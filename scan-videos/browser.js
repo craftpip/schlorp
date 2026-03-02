@@ -65,6 +65,7 @@ async function removeStaleLockArtifacts(userDataDir, profileDir) {
 async function launchBrowser(chromePath, userDataDir, profileDir, options = {}) {
   const headless =
     typeof options.headless === "boolean" ? options.headless : shouldRunHeadless();
+  const log = typeof options.log === "function" ? options.log : console.log;
   const launchArgs = [
     "--no-sandbox",
     "--disable-setuid-sandbox",
@@ -90,7 +91,7 @@ async function launchBrowser(chromePath, userDataDir, profileDir, options = {}) 
       message.includes("Failed to launch the browser process:  Code: 21");
     if (!lockError) throw err;
 
-    console.log("Profile lock detected. Trying to clear stale lock files and retry...");
+    log("Profile lock detected. Trying to clear stale lock files and retry...");
     await removeStaleLockArtifacts(userDataDir, profileDir);
 
     try {
@@ -111,7 +112,7 @@ async function launchBrowser(chromePath, userDataDir, profileDir, options = {}) 
       if (!retryStillLocked) throw retryErr;
     }
 
-    console.log(
+    log(
       "Primary profile is locked by a running Chrome instance. Using a cloned local profile snapshot..."
     );
 

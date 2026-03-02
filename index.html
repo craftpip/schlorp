@@ -197,6 +197,7 @@
       </form>
 
       <div id="status" class="status"></div>
+      <section id="downloads" class="results"></section>
       <pre id="output" class="json"></pre>
     </main>
 
@@ -205,6 +206,7 @@
       const input = document.getElementById("url-input");
       const submitBtn = document.getElementById("submit-btn");
       const statusEl = document.getElementById("status");
+      const downloadsEl = document.getElementById("downloads");
       const outputEl = document.getElementById("output");
 
       function setStatus(message, kind) {
@@ -216,14 +218,93 @@
         outputEl.textContent = "";
       }
 
+      function clearDownloads() {
+        downloadsEl.innerHTML = "";
+      }
+
       function appendOutput(text) {
         outputEl.textContent += text;
         outputEl.scrollTop = outputEl.scrollHeight;
       }
 
+      function toMediaUrl(filePath) {
+        const raw = String(filePath || "").trim();
+        if (!raw) return "";
+
+        const normalized = raw.replace(/\\/g, "/");
+        let relative = "";
+
+        const marker = "/media/";
+        const idx = normalized.lastIndexOf(marker);
+        if (idx >= 0) {
+          relative = normalized.slice(idx + marker.length);
+        } else if (normalized.startsWith("media/")) {
+          relative = normalized.slice("media/".length);
+        } else if (normalized.startsWith("./media/")) {
+          relative = normalized.slice("./media/".length);
+        }
+
+        if (!relative) return "";
+        const encoded = relative
+          .split("/")
+          .filter(Boolean)
+          .map((part) => encodeURIComponent(part))
+          .join("/");
+
+        return encoded ? `/media/${encoded}` : "";
+      }
+
+      function renderDownloadsFromOutput(text) {
+        const matches = Array.from(String(text || "").matchAll(/^Downloaded media to:\s+(.+)$/gm));
+        const unique = new Set();
+        const entries = [];
+
+        for (const match of matches) {
+          const filePath = String(match[1] || "").trim();
+          if (!filePath || unique.has(filePath)) continue;
+          unique.add(filePath);
+          entries.push({
+            filePath,
+            href: toMediaUrl(filePath),
+          });
+        }
+
+        clearDownloads();
+        if (!entries.length) return;
+
+        for (const entry of entries) {
+          const card = document.createElement("article");
+          card.className = "result";
+
+          const label = document.createElement("div");
+          label.className = "label";
+          label.textContent = "Downloaded File";
+          card.appendChild(label);
+
+          const link = document.createElement("a");
+          link.textContent = entry.href || "File outside /media (not linkable)";
+          if (entry.href) {
+            link.href = entry.href;
+            link.setAttribute("download", "");
+          } else {
+            link.href = "#";
+            link.style.pointerEvents = "none";
+          }
+          card.appendChild(link);
+
+          const path = document.createElement("div");
+          path.className = "path";
+          path.textContent = `Saved to: ${entry.filePath}`;
+          card.appendChild(path);
+
+          downloadsEl.appendChild(card);
+        }
+      }
+
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         clearOutput();
+        clearDownloads();
 
         const link = String(input.value || "").trim();
         if (!link) {
@@ -255,12 +336,14 @@
           const reader = response.body && response.body.getReader ? response.body.getReader() : null;
           if (!reader) {
             appendOutput(await response.text());
+            renderDownloadsFromOutput(outputEl.textContent);
           } else {
             const decoder = new TextDecoder();
             while (true) {
               const { done, value } = await reader.read();
               if (done) break;
               appendOutput(decoder.decode(value, { stream: true }));
+              renderDownloadsFromOutput(outputEl.textContent);
             }
           }
 

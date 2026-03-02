@@ -34,6 +34,7 @@ function getInstagramUserAgent() {
 
 async function waitForEnter(message, options = {}) {
   const forcePrompt = Boolean(options.forcePrompt);
+  const log = typeof options.log === "function" ? options.log : console.log;
 
   if (!forcePrompt && shouldAutoContinuePrompts()) {
     const rawDelay = process.env.AUTO_CONTINUE_WAIT_MS;
@@ -41,12 +42,12 @@ async function waitForEnter(message, options = {}) {
     const delayMs = Number.isFinite(parsedDelay) && parsedDelay > 0 ? Math.floor(parsedDelay) : 0;
 
     if (delayMs > 0) {
-      console.log(`${message} (auto-continue in ${delayMs}ms)`);
+      log(`${message} (auto-continue in ${delayMs}ms)`);
       await new Promise((resolve) => setTimeout(resolve, delayMs));
       return;
     }
 
-    console.log(`${message} (auto-continue enabled)`);
+    log(`${message} (auto-continue enabled)`);
     return;
   }
 

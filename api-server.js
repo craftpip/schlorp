@@ -3,7 +3,8 @@ require("dotenv").config({ quiet: true });
 
 const express = require("express");
 const path = require("path");
-const { spawn } = require("child_process");
+const { run } = require("./scan-videos/index");
+const { buildBrowserFromLocalProfile } = require("./scan-videos/browser");
 
 const app = express();
 const rootDir = __dirname;
@@ -12,7 +13,9 @@ const port = Number(process.env.PORT) || 3000;
 
 let shuttingDown = false;
 let jobCounter = 0;
-const runningChildren = new Set();
+let activeJob = null;
+let sharedBrowser = null;
+let browserInitPromise = null;
 
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: false }));
@@ -23,12 +26,24 @@ app.get("/", (_req, res) => {
 });
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true });
+  res.json({
+    ok: true,
+    shuttingDown,
+    busy: Boolean(activeJob),
+    browserReady: Boolean(sharedBrowser && sharedBrowser.isConnected && sharedBrowser.isConnected()),
+  });
 });
 
-app.post("/download", (req, res) => {
+app.post("/download", async (req, res) => {
   if (shuttingDown) {
     return res.status(503).json({ ok: false, error: "Server is shutting down." });
+  }
+
+  if (activeJob) {
+    return res.status(429).json({
+      ok: false,
+      error: `Another download is currently running (job ${activeJob.id}). Try again when it finishes.`,
+    });
   }
 
   const link = String(req.body?.link || req.query?.link || "").trim();
@@ -37,88 +52,120 @@ app.post("/download", (req, res) => {
   }
 
   const jobId = ++jobCounter;
-  const args = ["scan-videos.js", link];
+  activeJob = { id: jobId, startedAt: Date.now() };
 
-  console.log(`[scan:${jobId}] starting: node ${args.join(" ")}`);
+  let clientDisconnected = false;
+  const logToClientAndConsole = (message) => {
+    const text = String(message == null ? "" : message);
+    if (!text) return;
 
-  const child = spawn("node", args, {
-    cwd: rootDir,
-    env: {
-      ...process.env,
-      AUTO_CONTINUE: process.env.AUTO_CONTINUE || "1",
-      HEADLESS: process.env.API_HEADLESS || process.env.HEADLESS || "1",
-    },
-    stdio: ["ignore", "pipe", "pipe"],
+    const lines = text.split(/\r?\n/).filter((line) => line.trim());
+    for (const line of lines) {
+      console.log(`[scan:${jobId}] ${line}`);
+    }
+
+    if (!clientDisconnected && !res.writableEnded) {
+      res.write(text.endsWith("\n") ? text : `${text}\n`);
+    }
+  };
+
+  req.on("aborted", () => {
+    clientDisconnected = true;
   });
 
-  runningChildren.add(child);
+  res.on("close", () => {
+    if (!res.writableEnded) {
+      clientDisconnected = true;
+    }
+  });
 
   res.status(200);
   res.setHeader("Content-Type", "text/plain; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("X-Accel-Buffering", "no");
 
-  const writeStreamChunk = (streamName, chunk) => {
-    const text = chunk.toString();
-    for (const line of text.split(/\r?\n/)) {
-      if (!line.trim()) continue;
-      console.log(`[scan:${jobId}][${streamName}] ${line}`);
+  try {
+    logToClientAndConsole("[api] preparing browser...");
+    const browser = await getSharedBrowser(logToClientAndConsole);
+    logToClientAndConsole("[api] browser ready, starting scan...\n");
+
+    await run({
+      urls: [link],
+      linkOnly: false,
+      browser,
+      autoContinuePrompts: true,
+      waitForCompletionPrompt: false,
+      log: logToClientAndConsole,
+    });
+
+    logToClientAndConsole(`\n[api] process finished (exit=0, signal=none)`);
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    console.error(`[scan:${jobId}] failed: ${message}`);
+    logToClientAndConsole(`\n[api] process failed: ${message}`);
+
+    if (sharedBrowser && sharedBrowser.isConnected && !sharedBrowser.isConnected()) {
+      await closeSharedBrowser();
     }
-
+  } finally {
+    activeJob = null;
     if (!res.writableEnded) {
-      res.write(text);
-    }
-  };
-
-  child.stdout.on("data", (chunk) => writeStreamChunk("stdout", chunk));
-  child.stderr.on("data", (chunk) => writeStreamChunk("stderr", chunk));
-
-  child.on("error", (error) => {
-    runningChildren.delete(child);
-    console.error(`[scan:${jobId}] failed to start: ${error.message}`);
-
-    if (!res.writableEnded) {
-      res.write(`\n[api] failed to start process: ${error.message}\n`);
       res.end();
     }
-  });
-
-  child.on("close", (code, signal) => {
-    runningChildren.delete(child);
-    console.log(`[scan:${jobId}] finished: exit=${code} signal=${signal || "none"}`);
-
-    if (!res.writableEnded) {
-      res.write(`\n[api] process finished (exit=${code}, signal=${signal || "none"})\n`);
-      res.end();
-    }
-  });
-
-  req.on("aborted", () => {
-    if (child.exitCode == null && child.signalCode == null) {
-      try {
-        child.kill("SIGTERM");
-      } catch {
-        // ignore
-      }
-    }
-  });
-
-  res.on("close", () => {
-    if (!res.writableEnded && child.exitCode == null && child.signalCode == null) {
-      try {
-        child.kill("SIGTERM");
-      } catch {
-        // ignore
-      }
-    }
-  });
+  }
 });
 
 const server = app.listen(port, () => {
   console.log(`API server listening on http://localhost:${port}`);
+  void getSharedBrowser((message) => {
+    const text = String(message == null ? "" : message).trim();
+    if (!text) return;
+    console.log(`[browser] ${text}`);
+  }).catch((error) => {
+    console.error(`[browser] initial launch failed: ${error.message}`);
+  });
 });
 
 setupShutdownHandlers(server);
+
+async function getSharedBrowser(log) {
+  if (sharedBrowser && sharedBrowser.isConnected && sharedBrowser.isConnected()) {
+    return sharedBrowser;
+  }
+
+  if (browserInitPromise) {
+    return browserInitPromise;
+  }
+
+  const headless = parseBooleanInput(process.env.API_HEADLESS, parseBooleanInput(process.env.HEADLESS, true));
+
+  browserInitPromise = buildBrowserFromLocalProfile({ headless, log })
+    .then((browser) => {
+      sharedBrowser = browser;
+      browser.on("disconnected", () => {
+        console.log("[browser] disconnected");
+        sharedBrowser = null;
+      });
+      return browser;
+    })
+    .finally(() => {
+      browserInitPromise = null;
+    });
+
+  return browserInitPromise;
+}
+
+async function closeSharedBrowser() {
+  if (!sharedBrowser) return;
+
+  const browser = sharedBrowser;
+  sharedBrowser = null;
+  try {
+    await browser.close();
+  } catch {
+    // ignore
+  }
+}
 
 function setupShutdownHandlers(serverInstance) {
   const handleSignal = async (signal) => {
@@ -130,29 +177,7 @@ function setupShutdownHandlers(serverInstance) {
       serverInstance.close(() => resolve());
     });
 
-    const children = Array.from(runningChildren);
-    if (children.length) {
-      console.log(`[api] stopping ${children.length} running process(es)...`);
-    }
-
-    for (const child of children) {
-      try {
-        child.kill("SIGTERM");
-      } catch {
-        // ignore
-      }
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 3000));
-
-    for (const child of Array.from(runningChildren)) {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        // ignore
-      }
-    }
-
+    await closeSharedBrowser();
     process.exit(0);
   };
 
@@ -163,4 +188,12 @@ function setupShutdownHandlers(serverInstance) {
   process.on("SIGINT", () => {
     void handleSignal("SIGINT");
   });
+}
+
+function parseBooleanInput(value, fallback) {
+  if (typeof value === "boolean") return value;
+  const normalized = String(value == null ? "" : value).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
 }
