@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Video Downloader</title>
+    <style>
+      :root {
+        --bg-start: #f4efe2;
+        --bg-end: #e6f1ef;
+        --card: #ffffffcc;
+        --text: #1f2933;
+        --muted: #5a6673;
+        --accent: #0f766e;
+        --accent-hover: #115e59;
+        --border: #d5dde5;
+        --error: #b42318;
+        --ok: #027a48;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+        color: var(--text);
+        background: linear-gradient(140deg, var(--bg-start), var(--bg-end));
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+      }
+
+      .card {
+        width: min(760px, 100%);
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 24px;
+        backdrop-filter: blur(8px);
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: 1.6rem;
+      }
+
+      p {
+        margin: 0 0 18px;
+        color: var(--muted);
+      }
+
+      form {
+        display: grid;
+        gap: 12px;
+      }
+
+      .controls {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      .toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--muted);
+        font-size: 0.92rem;
+        user-select: none;
+      }
+
+      .toggle input {
+        accent-color: var(--accent);
+      }
+
+      input[type="url"] {
+        width: 100%;
+        padding: 12px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        font-size: 1rem;
+      }
+
+      button {
+        width: fit-content;
+        border: 0;
+        border-radius: 10px;
+        padding: 10px 16px;
+        background: var(--accent);
+        color: white;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background 0.2s ease;
+      }
+
+      button:hover {
+        background: var(--accent-hover);
+      }
+
+      button:disabled {
+        opacity: 0.7;
+        cursor: wait;
+      }
+
+      .status {
+        margin-top: 14px;
+        min-height: 24px;
+        font-size: 0.95rem;
+      }
+
+      .status.error {
+        color: var(--error);
+      }
+
+      .status.ok {
+        color: var(--ok);
+      }
+
+      .results {
+        margin-top: 14px;
+        display: grid;
+        gap: 10px;
+      }
+
+      .result {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px;
+        background: #fff;
+      }
+
+      .result a {
+        color: var(--accent);
+        text-decoration: none;
+        font-weight: 600;
+      }
+
+      .result a:hover {
+        text-decoration: underline;
+      }
+
+      .label {
+        font-size: 0.78rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--muted);
+        margin-bottom: 6px;
+      }
+
+      .src {
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 0.85rem;
+        word-break: break-word;
+      }
+
+      .path {
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 0.85rem;
+        word-break: break-word;
+      }
+
+      .json {
+        margin-top: 8px;
+        padding: 10px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: #f8fafb;
+        color: var(--text);
+        font-size: 0.8rem;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>Video Downloader</h1>
+      <p>Paste one URL and stream the scanner output live.</p>
+
+      <form id="download-form">
+        <input
+          id="url-input"
+          type="url"
+          placeholder="https://example.com/video-page"
+          required
+        />
+        <div class="controls">
+          <button id="submit-btn" type="submit">Run</button>
+        </div>
+      </form>
+
+      <div id="status" class="status"></div>
+      <pre id="output" class="json"></pre>
+    </main>
+
+    <script>
+      const form = document.getElementById("download-form");
+      const input = document.getElementById("url-input");
+      const submitBtn = document.getElementById("submit-btn");
+      const statusEl = document.getElementById("status");
+      const outputEl = document.getElementById("output");
+
+      function setStatus(message, kind) {
+        statusEl.textContent = message || "";
+        statusEl.className = `status${kind ? ` ${kind}` : ""}`;
+      }
+
+      function clearOutput() {
+        outputEl.textContent = "";
+      }
+
+      function appendOutput(text) {
+        outputEl.textContent += text;
+        outputEl.scrollTop = outputEl.scrollHeight;
+      }
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        clearOutput();
+
+        const link = String(input.value || "").trim();
+        if (!link) {
+          setStatus("Please enter a valid URL.", "error");
+          return;
+        }
+
+        submitBtn.disabled = true;
+        setStatus("Running... this can take a while.");
+
+        try {
+          const response = await fetch("/download", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ link }),
+          });
+
+          if (!response.ok) {
+            let message = "Request failed.";
+            try {
+              const payload = await response.json();
+              if (payload && payload.error) message = payload.error;
+            } catch {
+              // ignore
+            }
+            throw new Error(message);
+          }
+
+          const reader = response.body && response.body.getReader ? response.body.getReader() : null;
+          if (!reader) {
+            appendOutput(await response.text());
+          } else {
+            const decoder = new TextDecoder();
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              appendOutput(decoder.decode(value, { stream: true }));
+            }
+          }
+
+          setStatus("Done.", "ok");
+        } catch (error) {
+          setStatus(error.message || "Download failed.", "error");
+        } finally {
+          submitBtn.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>

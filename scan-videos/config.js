@@ -36,6 +36,16 @@ async function waitForEnter(message, options = {}) {
   const forcePrompt = Boolean(options.forcePrompt);
 
   if (!forcePrompt && shouldAutoContinuePrompts()) {
+    const rawDelay = process.env.AUTO_CONTINUE_WAIT_MS;
+    const parsedDelay = Number(rawDelay);
+    const delayMs = Number.isFinite(parsedDelay) && parsedDelay > 0 ? Math.floor(parsedDelay) : 0;
+
+    if (delayMs > 0) {
+      console.log(`${message} (auto-continue in ${delayMs}ms)`);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      return;
+    }
+
     console.log(`${message} (auto-continue enabled)`);
     return;
   }
@@ -72,6 +82,7 @@ function resolveProfileConfig() {
 
 module.exports = {
   shouldRunHeadless,
+  shouldAutoContinuePrompts,
   getInstagramUserAgent,
   waitForEnter,
   normalizeUrl,

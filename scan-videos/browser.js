@@ -50,6 +50,18 @@ async function cloneProfileDir(sourceDir, profileDir) {
   return cloneDir;
 }
 
+async function removeStaleLockArtifacts(userDataDir, profileDir) {
+  const lockNames = ["SingletonLock", "SingletonCookie", "SingletonSocket"];
+  const targets = [userDataDir, path.join(userDataDir, profileDir)];
+
+  for (const dir of targets) {
+    for (const name of lockNames) {
+      const lockPath = path.join(dir, name);
+      await fs.rm(lockPath, { force: true }).catch(() => {});
+    }
+  }
+}
+
 async function launchBrowser(chromePath, userDataDir, profileDir, options = {}) {
   const headless =
     typeof options.headless === "boolean" ? options.headless : shouldRunHeadless();
@@ -71,8 +83,33 @@ async function launchBrowser(chromePath, userDataDir, profileDir, options = {}) 
     });
   } catch (err) {
     const message = String(err && err.message ? err.message : err);
-    const lockError = message.includes("browser is already running");
+    const lockError =
+      message.includes("browser is already running") ||
+      message.includes("profile appears to be in use") ||
+      message.includes("Chromium has locked the profile") ||
+      message.includes("Failed to launch the browser process:  Code: 21");
     if (!lockError) throw err;
+
+    console.log("Profile lock detected. Trying to clear stale lock files and retry...");
+    await removeStaleLockArtifacts(userDataDir, profileDir);
+
+    try {
+      return await puppeteer.launch({
+        executablePath: chromePath,
+        headless,
+        defaultViewport: null,
+        userDataDir,
+        args: launchArgs,
+      });
+    } catch (retryErr) {
+      const retryMessage = String(retryErr && retryErr.message ? retryErr.message : retryErr);
+      const retryStillLocked =
+        retryMessage.includes("browser is already running") ||
+        retryMessage.includes("profile appears to be in use") ||
+        retryMessage.includes("Chromium has locked the profile") ||
+        retryMessage.includes("Failed to launch the browser process:  Code: 21");
+      if (!retryStillLocked) throw retryErr;
+    }
 
     console.log(
       "Primary profile is locked by a running Chrome instance. Using a cloned local profile snapshot..."

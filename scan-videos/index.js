@@ -2,7 +2,12 @@ const fs = require("fs/promises");
 const os = require("os");
 const path = require("path");
 const { buildBrowserFromLocalProfile } = require("./browser");
-const { getInstagramUserAgent, waitForEnter, normalizeUrl } = require("./config");
+const {
+  getInstagramUserAgent,
+  shouldAutoContinuePrompts,
+  waitForEnter,
+  normalizeUrl,
+} = require("./config");
 const {
   isLikelyVideoUrl,
   stripByteRangeParams,
@@ -23,6 +28,7 @@ const {
 const {
   extractXhamsterMediaData,
   extractXvideosMediaUrls,
+  extractPornhubMediaData,
   getInstagramUsername,
   getInstagramUsernameFromOembed,
 } = require("./extractors");
@@ -33,15 +39,95 @@ const {
   downloadMedia,
 } = require("./download");
 
+async function countDomMediaSignals(page) {
+  return page.evaluate(() => {
+    const abs = (u) => {
+      try {
+        return new URL(u, location.href).href;
+      } catch {
+        return "";
+      }
+    };
+
+    const urls = new Set();
+
+    document.querySelectorAll("video").forEach((el) => {
+      const currentSrc = abs(el.currentSrc || "");
+      const src = abs(el.getAttribute("src") || el.src || "");
+      if (currentSrc) urls.add(currentSrc);
+      if (src) urls.add(src);
+    });
+
+    document.querySelectorAll("video source[src], source[src], a[href]").forEach((el) => {
+      const attr = el.hasAttribute("href") ? "href" : "src";
+      const raw = el.getAttribute(attr) || "";
+      const resolved = abs(raw);
+      if (!resolved) return;
+      if (/(\.mp4|\.webm|\.m3u8|\.mpd|\.mov|\.mkv|\.avi|\.flv)(\?.*)?$/i.test(resolved)) {
+        urls.add(resolved);
+      }
+    });
+
+    const readyVideoCount = Array.from(document.querySelectorAll("video")).filter(
+      (el) => el.readyState >= 2
+    ).length;
+
+    return {
+      urlCount: urls.size,
+      readyVideoCount,
+      readyState: document.readyState,
+    };
+  });
+}
+
+async function waitForAutoCaptureWindow(page, getNetworkState, logLabel) {
+  const timeoutRaw = Number(process.env.AUTO_CAPTURE_TIMEOUT_MS);
+  const quietRaw = Number(process.env.AUTO_CAPTURE_QUIET_MS);
+  const pollRaw = Number(process.env.AUTO_CAPTURE_POLL_MS);
+
+  const timeoutMs = Number.isFinite(timeoutRaw) && timeoutRaw > 0 ? timeoutRaw : 30000;
+  const quietMs = Number.isFinite(quietRaw) && quietRaw > 0 ? quietRaw : 1800;
+  const pollMs = Number.isFinite(pollRaw) && pollRaw > 0 ? pollRaw : 250;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const dom = await countDomMediaSignals(page).catch(() => ({
+      urlCount: 0,
+      readyVideoCount: 0,
+      readyState: "loading",
+    }));
+    const net = getNetworkState();
+    const signalCount = dom.urlCount + dom.readyVideoCount + net.mediaCount;
+
+    const quietForMs = Date.now() - net.lastMediaSignalAt;
+    const hasSignals = signalCount > 0;
+    const domReady = dom.readyState === "complete" || dom.readyState === "interactive";
+
+    if (hasSignals && quietForMs >= quietMs && domReady) {
+      console.log(
+        `${logLabel} (auto-proceed after media settled: signals=${signalCount}, quiet=${quietForMs}ms)`
+      );
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+
+  console.log(`${logLabel} (auto-proceed after timeout)`);
+}
+
 async function run() {
-  const args = process.argv
+  const rawArgs = process.argv
     .slice(2)
     .map((x) => String(x || "").trim())
     .filter(Boolean);
 
+  const linkOnly = rawArgs.includes("--link-only");
+  const args = rawArgs.filter((arg) => arg !== "--link-only");
+
   if (!args.length) {
     throw new Error(
-      "Usage: node scan-videos.js <url1> [url2 ...] OR node scan-videos.js open-browser"
+      "Usage: node scan-videos.js [--link-only] <url1> [url2 ...] OR node scan-videos.js open-browser"
     );
   }
 
@@ -53,7 +139,11 @@ async function run() {
       waitUntil: "domcontentloaded",
       timeout: 60000,
     });
-    await waitForEnter("Browser is open on google.com. Use it to log in anywhere you want.", {
+    const vncHint =
+      process.env.ENABLE_VNC === "1"
+        ? " Open http://localhost:7901/vnc.html to control the browser."
+        : "";
+    await waitForEnter(`Browser is open on google.com. Use it to log in anywhere you want.${vncHint}`, {
       forcePrompt: true,
     });
     await browser.close();
@@ -77,6 +167,14 @@ async function run() {
       try {
         const u = new URL(targetUrl);
         return /(^|\.)xhamster\.com$/i.test(u.hostname);
+      } catch {
+        return false;
+      }
+    })();
+    const isPornhubTarget = (() => {
+      try {
+        const u = new URL(targetUrl);
+        return /(^|\.)pornhub\.(com|org)$/i.test(u.hostname);
       } catch {
         return false;
       }
@@ -108,6 +206,7 @@ async function run() {
       }
 
       const networkVideos = new Set();
+      let lastMediaSignalAt = Date.now();
       let instagramUsernameFromApi = "";
       const instagramTargetHintUrls = new Set();
       const instagramTargetHintAssetIds = new Set();
@@ -119,6 +218,7 @@ async function run() {
           const contentType = (headers["content-type"] || "").toLowerCase();
 
           if (contentType.startsWith("video/") || isLikelyVideoUrl(url)) {
+            if (!networkVideos.has(url)) lastMediaSignalAt = Date.now();
             networkVideos.add(url);
           }
 
@@ -156,9 +256,16 @@ async function run() {
       });
 
       await page.goto(targetUrl, { waitUntil: "networkidle2", timeout: 60000 });
-      await waitForEnter(
-        `Target page ${index + 1}/${inputUrls.length} is open. If needed, log in and ensure media is visible.`
-      );
+      const pageReadyMessage = `Target page ${index + 1}/${inputUrls.length} is open. If needed, log in and ensure media is visible.`;
+      if (shouldAutoContinuePrompts()) {
+        await waitForAutoCaptureWindow(
+          page,
+          () => ({ mediaCount: networkVideos.size, lastMediaSignalAt }),
+          pageReadyMessage
+        );
+      } else {
+        await waitForEnter(pageReadyMessage);
+      }
 
       if (!isInstagramTarget) {
         await page.evaluate(async () => {
@@ -278,6 +385,11 @@ async function run() {
         xhamsterData = await extractXhamsterMediaData(page);
       }
 
+      let pornhubData = { urls: [], qualityByUrl: new Map() };
+      if (isPornhubTarget) {
+        pornhubData = await extractPornhubMediaData(page);
+      }
+
       let extractedXvideosUrls = [];
       try {
         const current = new URL(targetUrl);
@@ -294,6 +406,7 @@ async function run() {
           ...networkVideos,
           ...extractedXvideosUrls,
           ...xhamsterData.urls,
+          ...pornhubData.urls,
         ])
       );
       console.log(`\n=== Video/Media URLs found for ${targetUrl} ===`);
@@ -304,10 +417,19 @@ async function run() {
       allVideos.forEach((u, i) => console.log(`${i + 1}. ${u}`));
 
       const downloadableUrls = extractDownloadableVideoUrls(allVideos, {
-        qualityByUrl: xhamsterData.qualityByUrl,
+        qualityByUrl: new Map([
+          ...xhamsterData.qualityByUrl,
+          ...pornhubData.qualityByUrl,
+        ]),
       });
       if (!downloadableUrls.length) {
         console.log("\nNo downloadable direct or stream URL found.");
+        continue;
+      }
+
+      if (linkOnly) {
+        console.log(`\n=== Downloadable media links for ${targetUrl} ===`);
+        downloadableUrls.forEach((u, i) => console.log(`${i + 1}. ${u}`));
         continue;
       }
 

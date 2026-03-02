@@ -222,6 +222,161 @@ async function extractXvideosMediaUrls(page) {
   return Array.isArray(result) ? result : [];
 }
 
+async function extractPornhubMediaData(page) {
+  const entries = await page.evaluate(() => {
+    const maxNodes = 80_000;
+    let scannedNodes = 0;
+    const seenObjects = new WeakSet();
+    const output = [];
+
+    const normalize = (value) =>
+      String(value || "")
+        .replace(/\\u002F/gi, "/")
+        .replace(/\\u0026/gi, "&")
+        .replace(/\\\//g, "/")
+        .trim();
+
+    const toAbsolute = (value) => {
+      const normalized = normalize(value);
+      if (!normalized) return "";
+      try {
+        return new URL(normalized, location.href).href;
+      } catch {
+        return "";
+      }
+    };
+
+    const pushCandidate = (value, meta = {}) => {
+      const url = toAbsolute(value);
+      if (!url) return;
+
+      const looksLikeMedia =
+        /\.(mp4|webm|mov|mkv|avi|flv|m3u8|mpd)(\?|$)/i.test(url) ||
+        /\/video\/get_media\b/i.test(url) ||
+        /\/hls\//i.test(url) ||
+        /[?&](?:quality|download|format|mime)=/i.test(url);
+
+      if (!looksLikeMedia) return;
+
+      output.push({
+        url,
+        quality: String(meta.quality || ""),
+        label: String(meta.label || ""),
+        name: String(meta.name || ""),
+      });
+    };
+
+    const scan = (node, depth = 0) => {
+      if (scannedNodes > maxNodes) return;
+      scannedNodes += 1;
+      if (depth > 8 || node == null) return;
+
+      if (typeof node === "string") {
+        pushCandidate(node);
+        return;
+      }
+
+      if (typeof node !== "object") return;
+      if (seenObjects.has(node)) return;
+      seenObjects.add(node);
+
+      if (Array.isArray(node)) {
+        for (const item of node) scan(item, depth + 1);
+        return;
+      }
+
+      const meta = {
+        quality: node.quality,
+        label: node.label,
+        name: node.name,
+      };
+
+      const urlFields = [
+        "videoUrl",
+        "video_url",
+        "url",
+        "src",
+        "file",
+        "hls",
+        "hlsUrl",
+        "hls_url",
+        "dash",
+        "dashUrl",
+        "dash_url",
+        "manifest",
+      ];
+
+      for (const key of urlFields) {
+        if (node[key]) pushCandidate(node[key], meta);
+      }
+
+      for (const value of Object.values(node)) {
+        scan(value, depth + 1);
+      }
+    };
+
+    for (const [key, value] of Object.entries(window)) {
+      if (
+        /^flashvars_/i.test(key) ||
+        /^mediadefinitions/i.test(key) ||
+        /^playerobj/i.test(key) ||
+        /^qualityitems/i.test(key)
+      ) {
+        scan(value);
+      }
+    }
+
+    if (window.MDL_FLASHVARS) scan(window.MDL_FLASHVARS);
+    if (window.flashvars) scan(window.flashvars);
+
+    const scripts = Array.from(document.querySelectorAll("script"));
+    const patterns = [
+      /https?:\/\/[^\s"'<>]+(?:\.m3u8|\.mpd|\.mp4)(?:[^\s"'<>]*)/gi,
+      /https?:\/\/[^\s"'<>]*\/video\/get_media[^\s"'<>]*/gi,
+      /"videoUrl"\s*:\s*"([^"\\]+)"/gi,
+      /"quality"\s*:\s*"?(\d{3,4})p?"?\s*,\s*"videoUrl"\s*:\s*"([^"\\]+)"/gi,
+    ];
+
+    for (const script of scripts) {
+      const text = (script.textContent || "").replace(/\\\//g, "/");
+      if (!text) continue;
+
+      for (const pattern of patterns) {
+        pattern.lastIndex = 0;
+        let match;
+        while ((match = pattern.exec(text))) {
+          if (match[2]) {
+            pushCandidate(match[2], { quality: match[1] });
+          } else {
+            pushCandidate(match[1] || match[0]);
+          }
+        }
+      }
+    }
+
+    return output;
+  });
+
+  const urls = [];
+  const qualityByUrl = new Map();
+  const seen = new Set();
+
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const cleaned = stripByteRangeParams(entry && entry.url ? entry.url : "");
+    if (!cleaned) continue;
+
+    const score = metadataQualityScore(entry);
+    const current = Number(qualityByUrl.get(cleaned) || 0);
+    if (score > current) qualityByUrl.set(cleaned, score);
+
+    if (seen.has(cleaned)) continue;
+    seen.add(cleaned);
+    urls.push(cleaned);
+  }
+
+  return { urls, qualityByUrl };
+}
+
 async function getInstagramUsername(page) {
   try {
     const candidate = await page.evaluate(() => {
@@ -445,6 +600,7 @@ async function getInstagramUsernameFromOembed(page, targetUrl) {
 module.exports = {
   extractXhamsterMediaData,
   extractXvideosMediaUrls,
+  extractPornhubMediaData,
   getInstagramUsername,
   getInstagramUsernameFromOembed,
 };

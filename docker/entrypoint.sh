@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${ENABLE_VNC:-0}" == "1" ]]; then
+  export DISPLAY="${DISPLAY:-:99}"
+
+  Xvfb "$DISPLAY" -screen 0 1366x768x24 -ac +extension RANDR &
+  fluxbox >/tmp/fluxbox.log 2>&1 &
+
+  x11vnc \
+    -display "$DISPLAY" \
+    -forever \
+    -shared \
+    -nopw \
+    -listen 0.0.0.0 \
+    -rfbport "${VNC_PORT:-5900}" >/tmp/x11vnc.log 2>&1 &
+
+  /usr/share/novnc/utils/novnc_proxy \
+    --vnc "localhost:${VNC_PORT:-5900}" \
+    --listen "${NOVNC_PORT:-7900}" >/tmp/novnc.log 2>&1 &
+fi
+
+exec "$@"

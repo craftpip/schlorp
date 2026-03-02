@@ -5,7 +5,8 @@
   "main": "scan-videos.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "api": "node api-server.js"
+    "api": "node api-server.js",
+    "docker-open-browser": "docker compose run --rm -it -p 7901:7900 -e ENABLE_VNC=1 -e HEADLESS=0 app node scan-videos.js open-browser"
   },
   "keywords": [],
   "author": "",
