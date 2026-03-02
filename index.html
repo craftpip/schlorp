@@ -77,12 +77,15 @@
         accent-color: var(--accent);
       }
 
-      input[type="url"] {
+      textarea {
         width: 100%;
         padding: 12px;
         border-radius: 10px;
         border: 1px solid var(--border);
         font-size: 1rem;
+        min-height: 120px;
+        resize: vertical;
+        font-family: inherit;
       }
 
       button {
@@ -124,6 +127,18 @@
         margin-top: 14px;
         display: grid;
         gap: 10px;
+      }
+
+      .result.running {
+        border-color: var(--accent);
+      }
+
+      .result.done {
+        border-color: #9ed8c7;
+      }
+
+      .result.error {
+        border-color: #f0b8b8;
       }
 
       .result {
@@ -177,36 +192,52 @@
         white-space: pre-wrap;
         word-break: break-word;
       }
+
+      .queue-url {
+        font-size: 0.9rem;
+        word-break: break-word;
+      }
+
+      .queue-state {
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+
+      .downloads-list {
+        margin-top: 8px;
+        display: grid;
+        gap: 6px;
+      }
     </style>
   </head>
   <body>
     <main class="card">
       <h1>Video Downloader</h1>
-      <p>Paste one URL and stream the scanner output live.</p>
+      <p>Paste one URL per line, run queue, and watch live logs.</p>
 
       <form id="download-form">
-        <input
-          id="url-input"
-          type="url"
-          placeholder="https://example.com/video-page"
+        <textarea
+          id="urls-input"
+          placeholder="https://example.com/video-page\nhttps://example.com/another-video"
           required
-        />
+        ></textarea>
         <div class="controls">
-          <button id="submit-btn" type="submit">Run</button>
+          <button id="submit-btn" type="submit">Run Queue</button>
         </div>
       </form>
 
       <div id="status" class="status"></div>
-      <section id="downloads" class="results"></section>
+      <section id="queue" class="results"></section>
       <pre id="output" class="json"></pre>
     </main>
 
     <script>
       const form = document.getElementById("download-form");
-      const input = document.getElementById("url-input");
+      const input = document.getElementById("urls-input");
       const submitBtn = document.getElementById("submit-btn");
       const statusEl = document.getElementById("status");
-      const downloadsEl = document.getElementById("downloads");
+      const queueEl = document.getElementById("queue");
       const outputEl = document.getElementById("output");
 
       function setStatus(message, kind) {
@@ -218,8 +249,8 @@
         outputEl.textContent = "";
       }
 
-      function clearDownloads() {
-        downloadsEl.innerHTML = "";
+      function clearQueue() {
+        queueEl.innerHTML = "";
       }
 
       function appendOutput(text) {
@@ -254,102 +285,180 @@
         return encoded ? `/media/${encoded}` : "";
       }
 
-      function renderDownloadsFromOutput(text) {
-        const matches = Array.from(String(text || "").matchAll(/^Downloaded media to:\s+(.+)$/gm));
-        const unique = new Set();
-        const entries = [];
+      function parseLinks(value) {
+        return String(value || "")
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean);
+      }
 
-        for (const match of matches) {
-          const filePath = String(match[1] || "").trim();
-          if (!filePath || unique.has(filePath)) continue;
-          unique.add(filePath);
-          entries.push({
-            filePath,
-            href: toMediaUrl(filePath),
-          });
+      function createQueueItem(link, index, total) {
+        const card = document.createElement("article");
+        card.className = "result";
+
+        const label = document.createElement("div");
+        label.className = "label";
+        label.textContent = `Item ${index + 1} of ${total}`;
+        card.appendChild(label);
+
+        const urlEl = document.createElement("div");
+        urlEl.className = "queue-url";
+        urlEl.textContent = link;
+        card.appendChild(urlEl);
+
+        const stateEl = document.createElement("div");
+        stateEl.className = "queue-state";
+        stateEl.textContent = "Queued";
+        card.appendChild(stateEl);
+
+        const downloadsEl = document.createElement("div");
+        downloadsEl.className = "downloads-list";
+        card.appendChild(downloadsEl);
+
+        queueEl.appendChild(card);
+
+        return {
+          link,
+          card,
+          stateEl,
+          downloadsEl,
+          seenFiles: new Set(),
+          partialLine: "",
+        };
+      }
+
+      function setQueueState(item, state, message) {
+        item.card.classList.remove("running", "done", "error");
+        if (state) item.card.classList.add(state);
+        item.stateEl.textContent = message;
+      }
+
+      function addDownloadedFile(item, filePath) {
+        const key = String(filePath || "").trim();
+        if (!key || item.seenFiles.has(key)) return;
+        item.seenFiles.add(key);
+
+        const href = toMediaUrl(key);
+        const row = document.createElement("div");
+
+        const title = document.createElement("div");
+        title.className = "label";
+        title.textContent = "Downloaded File";
+        row.appendChild(title);
+
+        const link = document.createElement("a");
+        link.textContent = href || "File outside /media (not linkable)";
+        if (href) {
+          link.href = href;
+          link.setAttribute("download", "");
+        } else {
+          link.href = "#";
+          link.style.pointerEvents = "none";
         }
+        row.appendChild(link);
 
-        clearDownloads();
-        if (!entries.length) return;
+        const path = document.createElement("div");
+        path.className = "path";
+        path.textContent = `Saved to: ${key}`;
+        row.appendChild(path);
 
-        for (const entry of entries) {
-          const card = document.createElement("article");
-          card.className = "result";
+        item.downloadsEl.appendChild(row);
+      }
 
-          const label = document.createElement("div");
-          label.className = "label";
-          label.textContent = "Downloaded File";
-          card.appendChild(label);
+      function collectDownloadLines(item, chunkText) {
+        const text = item.partialLine + String(chunkText || "");
+        const parts = text.split(/\r?\n/);
+        item.partialLine = parts.pop() || "";
 
-          const link = document.createElement("a");
-          link.textContent = entry.href || "File outside /media (not linkable)";
-          if (entry.href) {
-            link.href = entry.href;
-            link.setAttribute("download", "");
-          } else {
-            link.href = "#";
-            link.style.pointerEvents = "none";
+        for (const line of parts) {
+          const match = line.match(/^Downloaded media to:\s+(.+)$/);
+          if (match) {
+            addDownloadedFile(item, match[1]);
           }
-          card.appendChild(link);
-
-          const path = document.createElement("div");
-          path.className = "path";
-          path.textContent = `Saved to: ${entry.filePath}`;
-          card.appendChild(path);
-
-          downloadsEl.appendChild(card);
         }
       }
 
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         clearOutput();
-        clearDownloads();
+        clearQueue();
 
-        const link = String(input.value || "").trim();
-        if (!link) {
-          setStatus("Please enter a valid URL.", "error");
+        const links = parseLinks(input.value);
+        if (!links.length) {
+          setStatus("Please enter at least one URL (one per line).", "error");
           return;
         }
 
+        const queue = links.map((link, index) => createQueueItem(link, index, links.length));
+
         submitBtn.disabled = true;
-        setStatus("Running... this can take a while.");
+        setStatus(`Running ${queue.length} item(s)...`);
 
         try {
-          const response = await fetch("/download", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ link }),
-          });
+          let completed = 0;
+          let failed = 0;
 
-          if (!response.ok) {
-            let message = "Request failed.";
+          for (let i = 0; i < queue.length; i += 1) {
+            const item = queue[i];
+            setQueueState(item, "running", "Running...");
+            appendOutput(`\n=== Queue ${i + 1}/${queue.length}: ${item.link} ===\n`);
+
             try {
-              const payload = await response.json();
-              if (payload && payload.error) message = payload.error;
-            } catch {
-              // ignore
+              const response = await fetch("/download", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ link: item.link }),
+              });
+
+              if (!response.ok) {
+                let message = "Request failed.";
+                try {
+                  const payload = await response.json();
+                  if (payload && payload.error) message = payload.error;
+                } catch {
+                  // ignore
+                }
+                throw new Error(message);
+              }
+
+              const reader = response.body && response.body.getReader ? response.body.getReader() : null;
+              if (!reader) {
+                const text = await response.text();
+                appendOutput(text);
+                collectDownloadLines(item, text);
+              } else {
+                const decoder = new TextDecoder();
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+                  const text = decoder.decode(value, { stream: true });
+                  appendOutput(text);
+                  collectDownloadLines(item, text);
+                }
+              }
+
+              if (item.partialLine) {
+                const trailing = `${item.partialLine}\n`;
+                collectDownloadLines(item, trailing);
+                item.partialLine = "";
+              }
+
+              setQueueState(item, "done", "Done");
+              completed += 1;
+            } catch (err) {
+              failed += 1;
+              setQueueState(item, "error", `Failed: ${err.message || "unknown error"}`);
+              appendOutput(`[queue] Failed: ${item.link} -> ${err.message || "unknown error"}\n`);
             }
-            throw new Error(message);
           }
 
-          const reader = response.body && response.body.getReader ? response.body.getReader() : null;
-          if (!reader) {
-            appendOutput(await response.text());
-            renderDownloadsFromOutput(outputEl.textContent);
+          if (failed > 0) {
+            setStatus(`Completed ${completed}/${queue.length}. Failed ${failed}.`, "error");
           } else {
-            const decoder = new TextDecoder();
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              appendOutput(decoder.decode(value, { stream: true }));
-              renderDownloadsFromOutput(outputEl.textContent);
-            }
+            setStatus(`Done. Completed ${completed}/${queue.length}.`, "ok");
           }
-
-          setStatus("Done.", "ok");
         } catch (error) {
-          setStatus(error.message || "Download failed.", "error");
+          setStatus(error.message || "Queue run failed.", "error");
         } finally {
           submitBtn.disabled = false;
         }
