@@ -88,6 +88,14 @@
         font-family: inherit;
       }
 
+      input[type="text"] {
+        width: 100%;
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        font-size: 0.95rem;
+      }
+
       button {
         width: fit-content;
         border: 0;
@@ -222,6 +230,11 @@
           placeholder="https://example.com/video-page\nhttps://example.com/another-video"
           required
         ></textarea>
+        <input
+          id="folder-input"
+          type="text"
+          placeholder="Folder inside media (optional), e.g. hello or hello/sub"
+        />
         <div class="controls">
           <button id="submit-btn" type="submit">Run Queue</button>
         </div>
@@ -235,6 +248,7 @@
     <script>
       const form = document.getElementById("download-form");
       const input = document.getElementById("urls-input");
+      const folderInput = document.getElementById("folder-input");
       const submitBtn = document.getElementById("submit-btn");
       const statusEl = document.getElementById("status");
       const queueEl = document.getElementById("queue");
@@ -384,6 +398,7 @@
         clearQueue();
 
         const links = parseLinks(input.value);
+        const folder = String(folderInput.value || "").trim();
         if (!links.length) {
           setStatus("Please enter at least one URL (one per line).", "error");
           return;
@@ -407,7 +422,7 @@
               const response = await fetch("/download", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ link: item.link }),
+                body: JSON.stringify({ link: item.link, folder }),
               });
 
               if (!response.ok) {

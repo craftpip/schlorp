@@ -197,6 +197,11 @@ async function run(options = {}) {
     throw new Error("At least one URL is required.");
   }
 
+  const outputDir =
+    typeof options.outputDir === "string" && options.outputDir.trim()
+      ? options.outputDir.trim()
+      : path.join(process.cwd(), "media");
+
   const hasExternalBrowser = Boolean(options.browser);
   const browser =
     options.browser ||
@@ -576,7 +581,7 @@ async function run(options = {}) {
 
             result = await downloadMedia(
               candidate,
-              path.join(process.cwd(), "media"),
+              outputDir,
               headers,
               filePrefix
             );

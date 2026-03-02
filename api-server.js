@@ -51,6 +51,14 @@ app.post("/download", async (req, res) => {
     return res.status(400).json({ ok: false, error: "Field 'link' is required." });
   }
 
+  let outputDir = mediaDir;
+  try {
+    const folder = String(req.body?.folder || req.query?.folder || "").trim();
+    outputDir = resolveMediaOutputDir(folder);
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error.message });
+  }
+
   const jobId = ++jobCounter;
   activeJob = { id: jobId, startedAt: Date.now() };
 
@@ -92,6 +100,7 @@ app.post("/download", async (req, res) => {
     await run({
       urls: [link],
       linkOnly: false,
+      outputDir,
       browser,
       autoContinuePrompts: true,
       waitForCompletionPrompt: false,
@@ -196,4 +205,19 @@ function parseBooleanInput(value, fallback) {
   if (["1", "true", "yes", "on"].includes(normalized)) return true;
   if (["0", "false", "no", "off"].includes(normalized)) return false;
   return fallback;
+}
+
+function resolveMediaOutputDir(folder) {
+  if (!folder) return mediaDir;
+
+  const normalizedFolder = String(folder).replace(/\\/g, "/").trim();
+  const resolved = path.resolve(mediaDir, normalizedFolder);
+  const relative = path.relative(mediaDir, resolved);
+
+  if (!relative || relative === ".") return mediaDir;
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error("Invalid folder. Use a path inside media, e.g. 'hello' or 'hello/sub'.");
+  }
+
+  return resolved;
 }
