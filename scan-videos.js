@@ -198,6 +198,49 @@ function stripByteRangeParams(rawUrl) {
   }
 }
 
+function isStreamingManifestUrl(url) {
+  return /\.(m3u8|mpd)(\?|$)/i.test(url);
+}
+
+function isDirectFileUrl(url) {
+  return /\.(mp4|webm|mov|mkv|avi|flv)(\?|$)/i.test(url);
+}
+
+function extractQualityHint(url) {
+  const value = String(url || "");
+  const knownResolutions = [240, 360, 480, 540, 576, 720, 1080, 1440, 2160, 4320];
+
+  const explicitP = value.match(/(?:^|[^0-9])([0-9]{3,4})p(?:[^0-9]|$)/i);
+  if (explicitP) return Number(explicitP[1]);
+
+  for (const resolution of knownResolutions) {
+    const pattern = new RegExp(`(?:^|[\\/_-])${resolution}(?:[\\/_.-]|$)`, "i");
+    if (pattern.test(value)) return resolution;
+  }
+
+  return 0;
+}
+
+function metadataQualityScore(meta) {
+  if (!meta || typeof meta !== "object") return 0;
+
+  const height = Number(meta.height || 0);
+  const width = Number(meta.width || 0);
+  const bitrate = Number(meta.bitrate || 0);
+  const fps = Number(meta.fps || 0);
+  const labelQuality = extractQualityHint(
+    [meta.label, meta.quality, meta.name, meta.resolution].filter(Boolean).join(" ")
+  );
+
+  let score = 0;
+  if (Number.isFinite(height) && height > 0) score += height * 1_000_000;
+  if (Number.isFinite(width) && width > 0) score += width * 100_000;
+  if (Number.isFinite(labelQuality) && labelQuality > 0) score += labelQuality * 1_000_000;
+  if (Number.isFinite(bitrate) && bitrate > 0) score += Math.min(bitrate, 100_000_000);
+  if (Number.isFinite(fps) && fps > 0) score += fps * 10_000;
+  return score;
+}
+
 function decodeBase64Url(input) {
   const normalized = String(input || "").replace(/-/g, "+").replace(/_/g, "/");
   const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
@@ -235,7 +278,7 @@ function getInstagramAssetId(url) {
   return id == null ? "" : String(id);
 }
 
-function scoreDownloadCandidate(url) {
+function scoreDownloadCandidate(url, metadataBonus = 0) {
   let score = 0;
   const efg = parseInstagramEfg(url);
 
@@ -251,24 +294,260 @@ function scoreDownloadCandidate(url) {
     if (Number.isFinite(bitrate) && bitrate > 0) score += Math.min(bitrate, 5_000_000);
   }
 
+  if (isDirectFileUrl(url)) score += 200_000;
+  if (/\.mp4(\?|$)/i.test(url)) score += 250_000;
+  if (isStreamingManifestUrl(url)) score += 150_000;
+
+  score += extractQualityHint(url) * 1_000;
+  score += Number(metadataBonus || 0);
+
   return score;
 }
 
-function extractDownloadableVideoUrls(videoUrls) {
+function extractDownloadableVideoUrls(videoUrls, options = {}) {
+  const qualityByUrl = options.qualityByUrl instanceof Map ? options.qualityByUrl : new Map();
   const seen = new Set();
   const output = [];
 
   for (const url of videoUrls) {
     if (!url || url.startsWith("blob:")) continue;
-    if (!/\.mp4(\?|$)/i.test(url)) continue;
+    if (!isDirectFileUrl(url) && !isStreamingManifestUrl(url)) continue;
 
     const cleaned = stripByteRangeParams(url);
-    if (seen.has(cleaned)) continue;
+    const metadataScore = Number(qualityByUrl.get(cleaned) || 0);
+
+    if (seen.has(cleaned)) {
+      continue;
+    }
+
     seen.add(cleaned);
+
+    if (metadataScore > 0) qualityByUrl.set(cleaned, metadataScore);
     output.push(cleaned);
   }
 
-  return output.sort((a, b) => scoreDownloadCandidate(b) - scoreDownloadCandidate(a));
+  return output.sort(
+    (a, b) =>
+      scoreDownloadCandidate(b, qualityByUrl.get(b)) -
+      scoreDownloadCandidate(a, qualityByUrl.get(a))
+  );
+}
+
+async function extractXhamsterMediaData(page) {
+  const entries = await page.evaluate(() => {
+    const maxNodes = 60_000;
+    let scannedNodes = 0;
+    const seenObjects = new WeakSet();
+    const output = [];
+
+    const normalize = (value) =>
+      String(value || "")
+        .replace(/\\u002F/gi, "/")
+        .replace(/\\u0026/gi, "&")
+        .replace(/\\\//g, "/")
+        .trim();
+
+    const toAbsolute = (value) => {
+      const normalized = normalize(value);
+      if (!normalized) return "";
+      try {
+        return new URL(normalized, location.href).href;
+      } catch {
+        return "";
+      }
+    };
+
+    const pushCandidate = (value, meta = {}) => {
+      const url = toAbsolute(value);
+      if (!url) return;
+      if (!/\.(mp4|webm|mov|mkv|avi|flv|m3u8|mpd)(\?|$)/i.test(url)) return;
+
+      output.push({
+        url,
+        height: Number(meta.height || 0) || 0,
+        width: Number(meta.width || 0) || 0,
+        bitrate: Number(meta.bitrate || 0) || 0,
+        fps: Number(meta.fps || 0) || 0,
+        label: String(meta.label || ""),
+        quality: String(meta.quality || ""),
+        name: String(meta.name || ""),
+        resolution: String(meta.resolution || ""),
+      });
+    };
+
+    const scan = (node, depth = 0) => {
+      if (scannedNodes > maxNodes) return;
+      scannedNodes += 1;
+      if (depth > 7 || node == null) return;
+
+      if (typeof node === "string") {
+        pushCandidate(node);
+        return;
+      }
+
+      if (typeof node !== "object") return;
+      if (seenObjects.has(node)) return;
+      seenObjects.add(node);
+
+      if (Array.isArray(node)) {
+        for (const item of node) scan(item, depth + 1);
+        return;
+      }
+
+      const meta = {
+        height: node.height,
+        width: node.width,
+        bitrate: node.bitrate,
+        fps: node.fps,
+        label: node.label,
+        quality: node.quality,
+        name: node.name,
+        resolution: node.resolution,
+      };
+
+      const urlFields = [
+        "url",
+        "src",
+        "file",
+        "videoUrl",
+        "video_url",
+        "hls",
+        "hlsUrl",
+        "hls_url",
+        "dash",
+        "dashUrl",
+        "dash_url",
+        "manifest",
+        "playlist",
+      ];
+
+      for (const key of urlFields) {
+        if (node[key]) pushCandidate(node[key], meta);
+      }
+
+      for (const value of Object.values(node)) {
+        scan(value, depth + 1);
+      }
+    };
+
+    if (window.initials) scan(window.initials);
+    if (window.xplayerSettings) scan(window.xplayerSettings);
+    if (window.playerConfig) scan(window.playerConfig);
+    if (window.__INITIAL_STATE__) scan(window.__INITIAL_STATE__);
+
+    const preloadLinks = Array.from(
+      document.querySelectorAll('link[rel="preload"][as="fetch"][href]')
+    );
+    for (const link of preloadLinks) {
+      pushCandidate(link.getAttribute("href"));
+    }
+
+    const scripts = Array.from(document.querySelectorAll("script"));
+    const patterns = [
+      /https?:\\/\\/[^\s"'<>]+\.(?:m3u8|mpd|mp4)(?:[^\s"'<>]*)/gi,
+      /"(https?:\\/\\/[^"\\]+\.(?:m3u8|mpd|mp4)[^"\\]*)"/gi,
+      /'((?:https?:)?\\/\\/[^'\\]+\.(?:m3u8|mpd|mp4)[^'\\]*)'/gi,
+    ];
+
+    for (const script of scripts) {
+      const text = script.textContent || "";
+      if (!text) continue;
+
+      for (const pattern of patterns) {
+        pattern.lastIndex = 0;
+        let match;
+        while ((match = pattern.exec(text))) {
+          pushCandidate(match[1] || match[0]);
+        }
+      }
+    }
+
+    return output;
+  });
+
+  const urls = [];
+  const qualityByUrl = new Map();
+  const seen = new Set();
+
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const cleaned = stripByteRangeParams(entry && entry.url ? entry.url : "");
+    if (!cleaned) continue;
+
+    const score = metadataQualityScore(entry);
+    const current = Number(qualityByUrl.get(cleaned) || 0);
+    if (score > current) qualityByUrl.set(cleaned, score);
+
+    if (seen.has(cleaned)) continue;
+    seen.add(cleaned);
+    urls.push(cleaned);
+  }
+
+  return { urls, qualityByUrl };
+}
+
+async function extractXvideosMediaUrls(page) {
+  const result = await page.evaluate(() => {
+    const toAbsolute = (value) => {
+      if (!value) return "";
+      const normalized = String(value)
+        .replace(/\\u002F/gi, "/")
+        .replace(/\\u0026/gi, "&")
+        .replace(/\\\//g, "/")
+        .trim();
+      if (!normalized) return "";
+      try {
+        return new URL(normalized, location.href).href;
+      } catch {
+        return "";
+      }
+    };
+
+    const out = new Set();
+
+    const pushIfMedia = (value) => {
+      const url = toAbsolute(value);
+      if (!url) return;
+      if (/\.(mp4|webm|mov|mkv|avi|flv|m3u8|mpd)(\?|$)/i.test(url)) {
+        out.add(url);
+      }
+    };
+
+    const player = window.html5player;
+    if (player && typeof player === "object") {
+      pushIfMedia(player.url_high);
+      pushIfMedia(player.url_low);
+      pushIfMedia(player.hls);
+      pushIfMedia(player.hlsurl);
+      pushIfMedia(player.url_hls);
+      pushIfMedia(player.url_dash);
+    }
+
+    const scripts = Array.from(document.querySelectorAll("script"));
+    const patterns = [
+      /setVideoUrlHigh\('([^']+)'\)/g,
+      /setVideoUrlLow\('([^']+)'\)/g,
+      /setVideoHLS\('([^']+)'\)/g,
+      /setVideoDash\('([^']+)'\)/g,
+      /"video(?:UrlHigh|UrlLow|HLS|Dash)"\s*:\s*"([^"]+)"/g,
+      /"contentUrl"\s*:\s*"([^"]+)"/g,
+    ];
+
+    for (const script of scripts) {
+      const text = script.textContent || "";
+      if (!text) continue;
+      for (const pattern of patterns) {
+        pattern.lastIndex = 0;
+        let match;
+        while ((match = pattern.exec(text))) {
+          pushIfMedia(match[1]);
+        }
+      }
+    }
+
+    return Array.from(out);
+  });
+
+  return Array.isArray(result) ? result : [];
 }
 
 async function hasFfmpeg() {
@@ -296,6 +575,113 @@ async function muxVideoAndAudio(videoPath, audioPath, outPath) {
     "-shortest",
     outPath,
   ]);
+}
+
+async function downloadStreamingManifest(url, outDir, headers = {}, filePrefix = "media") {
+  if (!(await hasFfmpeg())) {
+    throw new Error("ffmpeg is required to download HLS/DASH streams (.m3u8/.mpd)");
+  }
+
+  const finalInputUrl = await (async () => {
+    if (!/\.m3u8(\?|$)/i.test(url)) return url;
+
+    try {
+      const response = await fetch(url, {
+        method: "GET",
+        redirect: "follow",
+        headers,
+      });
+
+      if (!response.ok) return url;
+      const manifestText = await response.text();
+      if (!manifestText.includes("#EXTM3U")) return url;
+
+      const lines = manifestText
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+
+      let bestUrl = "";
+      let bestScore = -1;
+
+      for (let i = 0; i < lines.length; i += 1) {
+        const line = lines[i];
+        if (!line.startsWith("#EXT-X-STREAM-INF:")) continue;
+
+        const attrsText = line.slice("#EXT-X-STREAM-INF:".length);
+        const attrs = {};
+        const attrRegex = /([A-Z0-9-]+)=((?:"[^"]*")|[^,]*)/g;
+        let match;
+        while ((match = attrRegex.exec(attrsText))) {
+          attrs[match[1]] = String(match[2] || "").replace(/^"|"$/g, "");
+        }
+
+        let candidate = "";
+        for (let j = i + 1; j < lines.length; j += 1) {
+          if (!lines[j].startsWith("#")) {
+            candidate = lines[j];
+            break;
+          }
+        }
+        if (!candidate) continue;
+
+        let candidateUrl = "";
+        try {
+          candidateUrl = new URL(candidate, response.url || url).href;
+        } catch {
+          candidateUrl = "";
+        }
+        if (!candidateUrl) continue;
+
+        const bandwidth = Number(attrs.BANDWIDTH || 0);
+        const averageBandwidth = Number(attrs["AVERAGE-BANDWIDTH"] || 0);
+        const effectiveBandwidth = Math.max(bandwidth, averageBandwidth);
+
+        let pixels = 0;
+        if (attrs.RESOLUTION) {
+          const resMatch = attrs.RESOLUTION.match(/(\d+)x(\d+)/i);
+          if (resMatch) {
+            pixels = Number(resMatch[1]) * Number(resMatch[2]);
+          }
+        }
+
+        const qualityHint = extractQualityHint(candidateUrl);
+        const score = effectiveBandwidth + pixels + qualityHint * 1_000_000;
+        if (score > bestScore) {
+          bestScore = score;
+          bestUrl = candidateUrl;
+        }
+      }
+
+      return bestUrl || url;
+    } catch {
+      return url;
+    }
+  })();
+
+  await fs.mkdir(outDir, { recursive: true });
+  const safePrefix = sanitizeFileToken(filePrefix) || "media";
+  const filePath = path.join(outDir, `${safePrefix}-${Date.now()}.mp4`);
+
+  const args = ["-y"];
+
+  if (headers["user-agent"]) {
+    args.push("-user_agent", String(headers["user-agent"]));
+  }
+
+  const passthroughHeaders = ["referer", "cookie", "origin"]
+    .filter((key) => headers[key])
+    .map((key) => `${key}: ${headers[key]}`)
+    .join("\r\n");
+
+  if (passthroughHeaders) {
+    args.push("-headers", `${passthroughHeaders}\r\n`);
+  }
+
+  args.push("-i", finalInputUrl, "-c", "copy", "-movflags", "+faststart", filePath);
+  await execFileAsync("ffmpeg", args);
+
+  return { filePath, url: finalInputUrl };
 }
 
 async function mediaHasAudio(filePath) {
@@ -645,6 +1031,10 @@ async function getInstagramUsernameFromOembed(page, targetUrl) {
 
 async function downloadMedia(url, outDir, headers = {}, filePrefix = "media") {
   const targetUrl = stripByteRangeParams(url);
+  if (isStreamingManifestUrl(targetUrl)) {
+    return downloadStreamingManifest(targetUrl, outDir, headers, filePrefix);
+  }
+
   await fs.mkdir(outDir, { recursive: true });
 
   const response = await fetch(targetUrl, {
@@ -700,6 +1090,14 @@ async function downloadMedia(url, outDir, headers = {}, filePrefix = "media") {
       try {
         const u = new URL(targetUrl);
         return /(^|\.)instagram\.com$/i.test(u.hostname);
+      } catch {
+        return false;
+      }
+    })();
+    const isXhamsterTarget = (() => {
+      try {
+        const u = new URL(targetUrl);
+        return /(^|\.)xhamster\.com$/i.test(u.hostname);
       } catch {
         return false;
       }
@@ -792,7 +1190,29 @@ async function downloadMedia(url, outDir, headers = {}, filePrefix = "media") {
         return Array.from(out);
       });
 
-      const allVideos = Array.from(new Set([...domVideos, ...networkVideos]));
+      let xhamsterData = { urls: [], qualityByUrl: new Map() };
+      if (isXhamsterTarget) {
+        xhamsterData = await extractXhamsterMediaData(page);
+      }
+
+      let extractedXvideosUrls = [];
+      try {
+        const current = new URL(targetUrl);
+        if (/(^|\.)xvideos\.com$/i.test(current.hostname)) {
+          extractedXvideosUrls = await extractXvideosMediaUrls(page);
+        }
+      } catch {
+        extractedXvideosUrls = [];
+      }
+
+      const allVideos = Array.from(
+        new Set([
+          ...domVideos,
+          ...networkVideos,
+          ...extractedXvideosUrls,
+          ...xhamsterData.urls,
+        ])
+      );
       console.log(`\n=== Video/Media URLs found for ${targetUrl} ===`);
       if (!allVideos.length) {
         console.log("No video media URLs detected.");
@@ -800,9 +1220,11 @@ async function downloadMedia(url, outDir, headers = {}, filePrefix = "media") {
       }
       allVideos.forEach((u, i) => console.log(`${i + 1}. ${u}`));
 
-      const downloadableUrls = extractDownloadableVideoUrls(allVideos);
+      const downloadableUrls = extractDownloadableVideoUrls(allVideos, {
+        qualityByUrl: xhamsterData.qualityByUrl,
+      });
       if (!downloadableUrls.length) {
-        console.log("\nNo downloadable HTTP MP4 URL found.");
+        console.log("\nNo downloadable direct or stream URL found.");
         continue;
       }
 
