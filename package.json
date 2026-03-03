@@ -4,9 +4,19 @@
   "description": "",
   "main": "scan-videos.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "echo \"No test suite configured\"",
     "api": "node api-server.js",
-    "docker-open-browser": "docker compose run --rm -it -p 7901:7900 -e ENABLE_VNC=1 -e HEADLESS=0 app node scan-videos.js open-browser"
+    "start": "node api-server.js",
+    "start:local": "node api-server.js",
+    "scan": "node scan-videos.js",
+    "open-browser": "node scan-videos.js open-browser",
+    "docker:build": "docker compose build",
+    "docker:up": "docker compose up -d",
+    "docker:up:build": "docker compose up --build -d",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f app",
+    "docker:restart": "docker compose restart app",
+    "docker:open-browser": "docker compose run --rm -it -p 7901:7900 -e ENABLE_VNC=1 -e HEADLESS=0 app node scan-videos.js open-browser"
   },
   "keywords": [],
   "author": "",

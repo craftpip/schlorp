@@ -4,6 +4,9 @@ set -euo pipefail
 if [[ "${ENABLE_VNC:-0}" == "1" ]]; then
   export DISPLAY="${DISPLAY:-:99}"
 
+  display_num="${DISPLAY#:}"
+  rm -f "/tmp/.X${display_num}-lock" "/tmp/.X11-unix/X${display_num}" || true
+
   Xvfb "$DISPLAY" -screen 0 1366x768x24 -ac +extension RANDR &
   fluxbox >/tmp/fluxbox.log 2>&1 &
 
