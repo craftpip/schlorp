@@ -75,12 +75,14 @@
         font-family: inherit;
       }
 
-      input[type="text"] {
+      input[type="text"],
+      select {
         width: 100%;
         padding: 10px 12px;
         border-radius: 10px;
         border: 1px solid var(--border);
         font-size: 0.95rem;
+        background: #fff;
       }
 
       button {
@@ -199,6 +201,7 @@
         background: #f8fafb;
         color: var(--text);
         font-size: 0.8rem;
+        height: 200px;
         overflow: auto;
         white-space: pre-wrap;
         word-break: break-word;
@@ -250,6 +253,17 @@
           type="text"
           placeholder="Folder inside media (optional), e.g. hello or hello/sub"
         />
+        <select id="max-quality-input" aria-label="Max quality (non-Instagram only)">
+          <option value="">Max quality: Best available (non-Instagram)</option>
+          <option value="2160">Max quality: 2160p</option>
+          <option value="1440">Max quality: 1440p</option>
+          <option value="1080">Max quality: 1080p</option>
+          <option value="720">Max quality: 720p</option>
+          <option value="540">Max quality: 540p</option>
+          <option value="480">Max quality: 480p</option>
+          <option value="360">Max quality: 360p</option>
+          <option value="240">Max quality: 240p</option>
+        </select>
         <div class="controls">
           <button id="submit-btn" type="submit">Run Queue</button>
           <button id="remove-downloaded-btn" class="secondary" type="button">Remove Downloaded</button>
@@ -267,16 +281,19 @@
       const form = document.getElementById("download-form");
       const input = document.getElementById("urls-input");
       const folderInput = document.getElementById("folder-input");
+      const maxQualityInput = document.getElementById("max-quality-input");
       const submitBtn = document.getElementById("submit-btn");
       const removeDownloadedBtn = document.getElementById("remove-downloaded-btn");
       const removeAllBtn = document.getElementById("remove-all-btn");
       const statusEl = document.getElementById("status");
       const queueEl = document.getElementById("queue");
       const outputEl = document.getElementById("output");
+      const MAX_OUTPUT_LINES = 200;
 
       let isRunning = false;
       let queueState = {
         folder: "",
+        maxQuality: "",
         items: [],
       };
 
@@ -286,7 +303,17 @@
       }
 
       function appendOutput(text) {
-        outputEl.textContent += text;
+        const chunk = String(text || "");
+        const incomingLines = chunk.split(/\r?\n/);
+        const existingText = String(outputEl.textContent || "");
+        const existingLines = existingText ? existingText.split(/\r?\n/) : [];
+        const combined = existingLines.concat(incomingLines);
+
+        if (combined.length > MAX_OUTPUT_LINES) {
+          outputEl.textContent = combined.slice(combined.length - MAX_OUTPUT_LINES).join("\n");
+        } else {
+          outputEl.textContent = combined.join("\n");
+        }
         outputEl.scrollTop = outputEl.scrollHeight;
       }
 
@@ -307,6 +334,7 @@
 
           queueState = {
             folder: typeof parsed.folder === "string" ? parsed.folder : "",
+            maxQuality: typeof parsed.maxQuality === "string" ? parsed.maxQuality : "",
             items: parsed.items.map((item) => ({
               id: String(item.id || `${Date.now()}-${Math.random()}`),
               link: String(item.link || "").trim(),
@@ -542,7 +570,9 @@
         renderQueue();
 
         const folder = String(folderInput.value || "").trim();
+        const maxQuality = String(maxQualityInput.value || "").trim();
         queueState.folder = folder;
+        queueState.maxQuality = maxQuality;
         saveQueueState();
 
         let completed = 0;
@@ -563,7 +593,7 @@
               const response = await fetch("/download", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ link: item.link, folder }),
+                body: JSON.stringify({ link: item.link, folder, maxQuality }),
               });
 
               if (!response.ok) {
@@ -632,6 +662,7 @@
         try {
           queueState = {
             folder: String(folderInput.value || "").trim(),
+            maxQuality: String(maxQualityInput.value || "").trim(),
             items: createQueueItemsFromInput(),
           };
           saveQueueState();
@@ -648,6 +679,7 @@
 
       loadQueueState();
       folderInput.value = queueState.folder || "";
+      maxQualityInput.value = queueState.maxQuality || "";
       input.value = queueState.items.map((item) => item.link).join("\n");
       queueState.items.forEach((item) => {
         if (item.status === "running") {

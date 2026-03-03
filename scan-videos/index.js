@@ -17,6 +17,7 @@ const {
   extractDownloadableVideoUrls,
   prioritizeInstagramCandidates,
   prioritizeXhamsterCandidates,
+  extractQualityHint,
   sanitizeFileToken,
 } = require("./media-utils");
 const {
@@ -115,12 +116,38 @@ async function waitForAutoCaptureWindow(page, getNetworkState, logLabel, log = c
 }
 
 function parseCliArgs(rawArgs) {
-  const linkOnly = rawArgs.includes("--link-only");
-  const args = rawArgs.filter((arg) => arg !== "--link-only");
+  let linkOnly = false;
+  let maxQuality = null;
+  const args = [];
+
+  for (let index = 0; index < rawArgs.length; index += 1) {
+    const arg = rawArgs[index];
+    if (arg === "--link-only") {
+      linkOnly = true;
+      continue;
+    }
+
+    if (arg === "--max-quality") {
+      const value = rawArgs[index + 1];
+      if (!value) {
+        throw new Error("--max-quality requires a value, e.g. --max-quality 720");
+      }
+      maxQuality = parseMaxQualityInput(value);
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--max-quality=")) {
+      maxQuality = parseMaxQualityInput(arg.slice("--max-quality=".length));
+      continue;
+    }
+
+    args.push(arg);
+  }
 
   if (!args.length) {
     throw new Error(
-      "Usage: node scan-videos.js [--link-only] <url1> [url2 ...] OR node scan-videos.js open-browser"
+      "Usage: node scan-videos.js [--link-only] [--max-quality <p>] <url1> [url2 ...] OR node scan-videos.js open-browser"
     );
   }
 
@@ -132,6 +159,7 @@ function parseCliArgs(rawArgs) {
   return {
     command: "scan",
     linkOnly,
+    maxQuality,
     inputUrls: args.map((raw) => normalizeUrl(raw)),
   };
 }
@@ -148,6 +176,33 @@ function sleep(ms) {
 function parsePositiveInt(value, fallback) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function parseMaxQualityInput(value) {
+  if (value == null || value === "") return null;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error("--max-quality must be a positive integer, e.g. 720 or 1080.");
+  }
+  return Math.floor(parsed);
+}
+
+function applyMaxQualityLimit(urls, maxQuality) {
+  if (!Number.isFinite(maxQuality) || maxQuality <= 0) return urls;
+
+  const candidates = urls.map((url) => ({ url, quality: extractQualityHint(url) }));
+  const explicit = candidates.filter((entry) => entry.quality > 0);
+  const cappedExplicit = explicit.filter((entry) => entry.quality <= maxQuality);
+
+  if (cappedExplicit.length > 0) {
+    return cappedExplicit.map((entry) => entry.url);
+  }
+
+  if (explicit.length === 0) {
+    return urls;
+  }
+
+  return [];
 }
 
 function isInstagram429Error(err) {
@@ -187,6 +242,7 @@ async function run(options = {}) {
     ? {
         command: options.command || "scan",
         linkOnly: Boolean(options.linkOnly),
+        maxQuality: parseMaxQualityInput(options.maxQuality),
         inputUrls: Array.isArray(options.urls)
           ? options.urls.map((raw) => normalizeUrl(String(raw || "").trim())).filter(Boolean)
           : [],
@@ -528,13 +584,66 @@ async function run(options = {}) {
           continue;
         }
 
+        const maxQuality = Number(parsed.maxQuality || 0);
+        const qualityCappedUrls = !isInstagramTarget
+          ? applyMaxQualityLimit(downloadableUrls, maxQuality)
+          : downloadableUrls;
+
+        if (!qualityCappedUrls.length) {
+          log(`\nNo downloadable media URL found at or below ${maxQuality}p.`);
+          continue;
+        }
+
+        if (!isInstagramTarget && maxQuality > 0 && qualityCappedUrls.length !== downloadableUrls.length) {
+          log(
+            `Applying non-Instagram max quality cap: ${maxQuality}p (${qualityCappedUrls.length}/${downloadableUrls.length} candidate URLs kept)`
+          );
+        }
+
         if (parsed.linkOnly) {
           log(`\n=== Downloadable media links for ${targetUrl} ===`);
-          downloadableUrls.forEach((u, i) => log(`${i + 1}. ${u}`));
+          qualityCappedUrls.forEach((u, i) => log(`${i + 1}. ${u}`));
           continue;
         }
 
         const userAgent = await page.evaluate(() => navigator.userAgent);
+        const requestOrigin = (() => {
+          try {
+            return new URL(targetUrl).origin;
+          } catch {
+            return "";
+          }
+        })();
+        const buildDownloadHeaders = async (candidateUrl) => {
+          const [pageCookies, candidateCookies] = await Promise.all([
+            page.cookies().catch(() => []),
+            page.cookies(candidateUrl).catch(() => []),
+          ]);
+
+          const cookieByName = new Map();
+          for (const cookie of pageCookies) {
+            if (!cookie || !cookie.name) continue;
+            cookieByName.set(cookie.name, cookie.value);
+          }
+          for (const cookie of candidateCookies) {
+            if (!cookie || !cookie.name) continue;
+            cookieByName.set(cookie.name, cookie.value);
+          }
+
+          const headers = {
+            "user-agent": userAgent,
+            referer: targetUrl,
+          };
+          if (requestOrigin) headers.origin = requestOrigin;
+
+          const cookieHeader = Array.from(cookieByName.entries())
+            .map(([name, value]) => `${name}=${value}`)
+            .join("; ");
+          if (cookieHeader) headers.cookie = cookieHeader;
+
+          return headers;
+        };
+
         let filePrefix = "media";
         if (!isInstagramTarget) {
           const title = await page.evaluate(() => document.title || "");
@@ -558,20 +667,20 @@ async function run(options = {}) {
         const primaryCandidates = isInstagramTarget
           ? prioritizeInstagramCandidates(
               filterInstagramCandidatesForTarget(
-                downloadableUrls.filter((u) => !isInstagramAudioOnlyUrl(u)),
+                qualityCappedUrls.filter((u) => !isInstagramAudioOnlyUrl(u)),
                 instagramTargetHintUrls,
                 instagramTargetHintAssetIds
               ),
               domVideos
             )
           : isXhamsterTarget
-            ? prioritizeXhamsterCandidates(downloadableUrls, xhamsterData.qualityByUrl)
-            : downloadableUrls;
+            ? prioritizeXhamsterCandidates(qualityCappedUrls, xhamsterData.qualityByUrl)
+            : qualityCappedUrls;
 
-        let candidatesToTry = primaryCandidates.length ? primaryCandidates : downloadableUrls;
+        let candidatesToTry = primaryCandidates.length ? primaryCandidates : qualityCappedUrls;
 
         if (isInstagramTarget && primaryCandidates.length) {
-          const audioCandidates = downloadableUrls.filter((u) => isInstagramAudioOnlyUrl(u));
+          const audioCandidates = qualityCappedUrls.filter((u) => isInstagramAudioOnlyUrl(u));
           const assetStats = new Map();
 
           for (const candidate of primaryCandidates) {
@@ -610,17 +719,7 @@ async function run(options = {}) {
 
         for (const candidate of candidatesToTry) {
           try {
-            const cookies = await page.cookies(candidate);
-            const cookieHeader = cookies
-              .map((cookie) => `${cookie.name}=${cookie.value}`)
-              .join("; ");
-
-            const headers = {
-              "user-agent": userAgent,
-              referer: targetUrl,
-            };
-
-            if (cookieHeader) headers.cookie = cookieHeader;
+            const headers = await buildDownloadHeaders(candidate);
 
             const maxAttempts = isInstagramTarget ? instagram429RetryCount + 1 : 1;
             for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -657,14 +756,14 @@ async function run(options = {}) {
 
         if (!result) {
           throw new Error(
-            `Failed to download from ${downloadableUrls.length} candidate URLs. Last error: ${
+            `Failed to download from ${qualityCappedUrls.length} candidate URLs. Last error: ${
               lastError ? lastError.message : "unknown"
             }`
           );
         }
 
         if (isInstagramTarget) {
-          const audioCandidates = downloadableUrls.filter((u) => isInstagramAudioOnlyUrl(u));
+          const audioCandidates = qualityCappedUrls.filter((u) => isInstagramAudioOnlyUrl(u));
           const primaryLooksVideo = selectedCandidate && !isInstagramAudioOnlyUrl(selectedCandidate);
           const matchingAudioCandidates = selectedAssetId
             ? audioCandidates.filter((u) => getInstagramAssetId(u) === selectedAssetId)
@@ -681,17 +780,7 @@ async function run(options = {}) {
 
               for (const candidate of matchingAudioCandidates) {
                 try {
-                  const cookies = await page.cookies(candidate);
-                  const cookieHeader = cookies
-                    .map((cookie) => `${cookie.name}=${cookie.value}`)
-                    .join("; ");
-
-                  const headers = {
-                    "user-agent": userAgent,
-                    referer: targetUrl,
-                  };
-
-                  if (cookieHeader) headers.cookie = cookieHeader;
+                  const headers = await buildDownloadHeaders(candidate);
 
                   audioResult = await downloadMedia(candidate, tempDir, headers, "audio");
                   break;

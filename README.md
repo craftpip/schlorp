@@ -22,6 +22,9 @@ node scan-videos.js https://example.com/video-page https://another.com
 # Scan URLs and only print downloadable media links (no file download)
 node scan-videos.js --link-only https://example.com/video-page
 
+# Cap non-Instagram media selection to 720p
+node scan-videos.js --max-quality 720 https://example.com/video-page
+
 # Open a browser so you can log in and manually interact with a page
 node scan-videos.js open-browser
 ```

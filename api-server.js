@@ -52,9 +52,11 @@ app.post("/download", async (req, res) => {
   }
 
   let outputDir = mediaDir;
+  let maxQuality = null;
   try {
     const folder = String(req.body?.folder || req.query?.folder || "").trim();
     outputDir = resolveMediaOutputDir(folder);
+    maxQuality = resolveMaxQuality(req.body?.maxQuality ?? req.query?.maxQuality);
   } catch (error) {
     return res.status(400).json({ ok: false, error: error.message });
   }
@@ -101,6 +103,7 @@ app.post("/download", async (req, res) => {
       urls: [link],
       linkOnly: false,
       outputDir,
+      maxQuality,
       browser,
       autoContinuePrompts: true,
       waitForCompletionPrompt: false,
@@ -220,4 +223,13 @@ function resolveMediaOutputDir(folder) {
   }
 
   return resolved;
+}
+
+function resolveMaxQuality(value) {
+  if (value == null || value === "") return null;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error("Invalid max quality. Use a positive integer like 720 or 1080.");
+  }
+  return Math.floor(parsed);
 }

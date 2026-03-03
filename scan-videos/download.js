@@ -140,7 +140,11 @@ async function downloadStreamingManifest(url, outDir, headers = {}, filePrefix =
     args.push("-user_agent", String(headers["user-agent"]));
   }
 
-  const passthroughHeaders = ["referer", "cookie", "origin"]
+  if (headers.referer) {
+    args.push("-referer", String(headers.referer));
+  }
+
+  const passthroughHeaders = ["cookie", "origin"]
     .filter((key) => headers[key])
     .map((key) => `${key}: ${headers[key]}`)
     .join("\r\n");
