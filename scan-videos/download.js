@@ -41,7 +41,15 @@ async function muxVideoAndAudio(videoPath, audioPath, outPath) {
   ]);
 }
 
-async function downloadStreamingManifest(url, outDir, headers = {}, filePrefix = "media") {
+function buildOutputFilePath(outDir, filePrefix, ext, options = {}) {
+  const includeTimestamp =
+    typeof options.includeTimestamp === "boolean" ? options.includeTimestamp : true;
+  const safePrefix = sanitizeFileToken(filePrefix) || "media";
+  const filename = includeTimestamp ? `${safePrefix}-${Date.now()}.${ext}` : `${safePrefix}.${ext}`;
+  return path.join(outDir, filename);
+}
+
+async function downloadStreamingManifest(url, outDir, headers = {}, filePrefix = "media", options = {}) {
   if (!(await hasFfmpeg())) {
     throw new Error("ffmpeg is required to download HLS/DASH streams (.m3u8/.mpd)");
   }
@@ -124,8 +132,7 @@ async function downloadStreamingManifest(url, outDir, headers = {}, filePrefix =
   })();
 
   await fs.mkdir(outDir, { recursive: true });
-  const safePrefix = sanitizeFileToken(filePrefix) || "media";
-  const filePath = path.join(outDir, `${safePrefix}-${Date.now()}.mp4`);
+  const filePath = buildOutputFilePath(outDir, filePrefix, "mp4", options);
 
   const args = ["-y"];
 
@@ -167,10 +174,10 @@ async function mediaHasAudio(filePath) {
   }
 }
 
-async function downloadMedia(url, outDir, headers = {}, filePrefix = "media") {
+async function downloadMedia(url, outDir, headers = {}, filePrefix = "media", options = {}) {
   const targetUrl = stripByteRangeParams(url);
   if (isStreamingManifestUrl(targetUrl)) {
-    return downloadStreamingManifest(targetUrl, outDir, headers, filePrefix);
+    return downloadStreamingManifest(targetUrl, outDir, headers, filePrefix, options);
   }
 
   await fs.mkdir(outDir, { recursive: true });
@@ -187,8 +194,7 @@ async function downloadMedia(url, outDir, headers = {}, filePrefix = "media") {
 
   const extMatch = new URL(targetUrl).pathname.match(/\.([a-z0-9]+)$/i);
   const ext = extMatch ? extMatch[1] : "bin";
-  const safePrefix = sanitizeFileToken(filePrefix) || "media";
-  const filePath = path.join(outDir, `${safePrefix}-${Date.now()}.${ext}`);
+  const filePath = buildOutputFilePath(outDir, filePrefix, ext, options);
 
   await pipeline(Readable.fromWeb(response.body), createWriteStream(filePath));
   return { filePath, url: targetUrl };

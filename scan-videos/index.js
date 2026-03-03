@@ -141,6 +141,39 @@ function resolveLogger(log) {
   return (message) => console.log(message);
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parsePositiveInt(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function isInstagram429Error(err) {
+  const message = String(err && err.message ? err.message : err || "").toLowerCase();
+  return message.includes("429") || message.includes("too many requests");
+}
+
+async function gotoWithInstagram429Retry(page, targetUrl, isInstagramTarget, log, backoffMs, retryCount) {
+  let retries = 0;
+
+  while (true) {
+    const response = await page.goto(targetUrl, { waitUntil: "networkidle2", timeout: 60000 });
+    const status = response && typeof response.status === "function" ? response.status() : 0;
+
+    if (!isInstagramTarget || status !== 429 || retries >= retryCount) {
+      return response;
+    }
+
+    retries += 1;
+    log(
+      `Instagram responded with 429 for ${targetUrl}. Waiting ${Math.ceil(backoffMs / 1000)}s before retry ${retries}/${retryCount}...`
+    );
+    await sleep(backoffMs);
+  }
+}
+
 async function run(options = {}) {
   const log = resolveLogger(options.log);
 
@@ -173,6 +206,8 @@ async function run(options = {}) {
     typeof options.waitForCompletionPrompt === "boolean"
       ? options.waitForCompletionPrompt
       : !hasProgrammaticOptions;
+  const instagram429BackoffMs = parsePositiveInt(process.env.INSTAGRAM_429_BACKOFF_MS, 120000);
+  const instagram429RetryCount = parsePositiveInt(process.env.INSTAGRAM_429_RETRIES, 1);
 
   if (parsed.command === "open-browser") {
     const browser = await buildBrowserFromLocalProfile({ headless: false, log });
@@ -313,7 +348,14 @@ async function run(options = {}) {
           }
         });
 
-        await page.goto(targetUrl, { waitUntil: "networkidle2", timeout: 60000 });
+        await gotoWithInstagram429Retry(
+          page,
+          targetUrl,
+          isInstagramTarget,
+          log,
+          instagram429BackoffMs,
+          instagram429RetryCount
+        );
         const pageReadyMessage = `Target page ${index + 1}/${parsed.inputUrls.length} is open. If needed, log in and ensure media is visible.`;
         if (autoContinuePrompts) {
           await waitForAutoCaptureWindow(
@@ -504,7 +546,8 @@ async function run(options = {}) {
             instagramUsernameFromApi ||
             (await getInstagramUsernameFromOembed(page, targetUrl)) ||
             (await getInstagramUsername(page));
-          if (username) filePrefix = username;
+          const postId = instagramShortcode || "post";
+          filePrefix = username ? `${username}-${postId}` : `instagram-${postId}`;
         }
 
         let result = null;
@@ -579,12 +622,31 @@ async function run(options = {}) {
 
             if (cookieHeader) headers.cookie = cookieHeader;
 
-            result = await downloadMedia(
-              candidate,
-              outputDir,
-              headers,
-              filePrefix
-            );
+            const maxAttempts = isInstagramTarget ? instagram429RetryCount + 1 : 1;
+            for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+              try {
+                result = await downloadMedia(
+                  candidate,
+                  outputDir,
+                  headers,
+                  filePrefix,
+                  { includeTimestamp: !isInstagramTarget }
+                );
+                break;
+              } catch (err) {
+                if (!(isInstagramTarget && isInstagram429Error(err) && attempt < maxAttempts)) {
+                  throw err;
+                }
+
+                log(
+                  `Instagram media request hit 429 for candidate ${candidate}. Waiting ${Math.ceil(
+                    instagram429BackoffMs / 1000
+                  )}s before retry ${attempt}/${instagram429RetryCount}...`
+                );
+                await sleep(instagram429BackoffMs);
+              }
+            }
+
             selectedCandidate = candidate;
             selectedAssetId = getInstagramAssetId(candidate);
             break;

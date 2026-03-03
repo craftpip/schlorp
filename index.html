@@ -64,19 +64,6 @@
         flex-wrap: wrap;
       }
 
-      .toggle {
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        color: var(--muted);
-        font-size: 0.92rem;
-        user-select: none;
-      }
-
-      .toggle input {
-        accent-color: var(--accent);
-      }
-
       textarea {
         width: 100%;
         padding: 12px;
@@ -110,6 +97,22 @@
 
       button:hover {
         background: var(--accent-hover);
+      }
+
+      button.secondary {
+        background: #3f4b59;
+      }
+
+      button.secondary:hover {
+        background: #2f3945;
+      }
+
+      button.danger {
+        background: #b42318;
+      }
+
+      button.danger:hover {
+        background: #912018;
       }
 
       button:disabled {
@@ -217,6 +220,18 @@
         display: grid;
         gap: 6px;
       }
+
+      .item-actions {
+        margin-top: 10px;
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .item-actions button {
+        padding: 6px 10px;
+        font-size: 0.82rem;
+      }
     </style>
   </head>
   <body>
@@ -237,6 +252,8 @@
         />
         <div class="controls">
           <button id="submit-btn" type="submit">Run Queue</button>
+          <button id="remove-downloaded-btn" class="secondary" type="button">Remove Downloaded</button>
+          <button id="remove-all-btn" class="danger" type="button">Remove All</button>
         </div>
       </form>
 
@@ -246,30 +263,65 @@
     </main>
 
     <script>
+      const STORAGE_KEY = "xdl.queue.v1";
       const form = document.getElementById("download-form");
       const input = document.getElementById("urls-input");
       const folderInput = document.getElementById("folder-input");
       const submitBtn = document.getElementById("submit-btn");
+      const removeDownloadedBtn = document.getElementById("remove-downloaded-btn");
+      const removeAllBtn = document.getElementById("remove-all-btn");
       const statusEl = document.getElementById("status");
       const queueEl = document.getElementById("queue");
       const outputEl = document.getElementById("output");
+
+      let isRunning = false;
+      let queueState = {
+        folder: "",
+        items: [],
+      };
 
       function setStatus(message, kind) {
         statusEl.textContent = message || "";
         statusEl.className = `status${kind ? ` ${kind}` : ""}`;
       }
 
-      function clearOutput() {
-        outputEl.textContent = "";
-      }
-
-      function clearQueue() {
-        queueEl.innerHTML = "";
-      }
-
       function appendOutput(text) {
         outputEl.textContent += text;
         outputEl.scrollTop = outputEl.scrollHeight;
+      }
+
+      function saveQueueState() {
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(queueState));
+        } catch {
+          // ignore storage failures
+        }
+      }
+
+      function loadQueueState() {
+        try {
+          const raw = localStorage.getItem(STORAGE_KEY);
+          if (!raw) return;
+          const parsed = JSON.parse(raw);
+          if (!parsed || !Array.isArray(parsed.items)) return;
+
+          queueState = {
+            folder: typeof parsed.folder === "string" ? parsed.folder : "",
+            items: parsed.items.map((item) => ({
+              id: String(item.id || `${Date.now()}-${Math.random()}`),
+              link: String(item.link || "").trim(),
+              status: ["queued", "running", "done", "error"].includes(item.status)
+                ? item.status
+                : "queued",
+              message: String(item.message || "Queued"),
+              downloads: Array.isArray(item.downloads)
+                ? item.downloads.map((x) => String(x || "").trim()).filter(Boolean)
+                : [],
+            })).filter((item) => item.link),
+          };
+        } catch {
+          // ignore broken storage payload
+        }
       }
 
       function toMediaUrl(filePath) {
@@ -306,116 +358,205 @@
           .filter(Boolean);
       }
 
-      function createQueueItem(link, index, total) {
-        const card = document.createElement("article");
-        card.className = "result";
-
-        const label = document.createElement("div");
-        label.className = "label";
-        label.textContent = `Item ${index + 1} of ${total}`;
-        card.appendChild(label);
-
-        const urlEl = document.createElement("div");
-        urlEl.className = "queue-url";
-        urlEl.textContent = link;
-        card.appendChild(urlEl);
-
-        const stateEl = document.createElement("div");
-        stateEl.className = "queue-state";
-        stateEl.textContent = "Queued";
-        card.appendChild(stateEl);
-
-        const downloadsEl = document.createElement("div");
-        downloadsEl.className = "downloads-list";
-        card.appendChild(downloadsEl);
-
-        queueEl.appendChild(card);
-
-        return {
-          link,
-          card,
-          stateEl,
-          downloadsEl,
-          seenFiles: new Set(),
-          partialLine: "",
-        };
-      }
-
-      function setQueueState(item, state, message) {
-        item.card.classList.remove("running", "done", "error");
-        if (state) item.card.classList.add(state);
-        item.stateEl.textContent = message;
-      }
-
-      function addDownloadedFile(item, filePath) {
-        const key = String(filePath || "").trim();
-        if (!key || item.seenFiles.has(key)) return;
-        item.seenFiles.add(key);
-
-        const href = toMediaUrl(key);
-        const row = document.createElement("div");
-
-        const title = document.createElement("div");
-        title.className = "label";
-        title.textContent = "Downloaded File";
-        row.appendChild(title);
-
-        const link = document.createElement("a");
-        link.textContent = href || "File outside /media (not linkable)";
-        if (href) {
-          link.href = href;
-          link.setAttribute("download", "");
-        } else {
-          link.href = "#";
-          link.style.pointerEvents = "none";
-        }
-        row.appendChild(link);
-
-        const path = document.createElement("div");
-        path.className = "path";
-        path.textContent = `Saved to: ${key}`;
-        row.appendChild(path);
-
-        item.downloadsEl.appendChild(row);
-      }
-
-      function collectDownloadLines(item, chunkText) {
-        const text = item.partialLine + String(chunkText || "");
+      function parseDownloadedPaths(chunkText, partialLine) {
+        const text = `${partialLine || ""}${String(chunkText || "")}`;
         const parts = text.split(/\r?\n/);
-        item.partialLine = parts.pop() || "";
+        const nextPartial = parts.pop() || "";
+        const found = [];
 
         for (const line of parts) {
           const match = line.match(/^Downloaded media to:\s+(.+)$/);
           if (match) {
-            addDownloadedFile(item, match[1]);
+            const value = String(match[1] || "").trim();
+            if (value) found.push(value);
           }
+        }
+
+        return { found, nextPartial };
+      }
+
+      function createQueueItemsFromInput() {
+        const links = parseLinks(input.value);
+        if (!links.length) {
+          throw new Error("Please enter at least one URL (one per line).");
+        }
+
+        const now = Date.now();
+        return links.map((link, index) => ({
+          id: `${now}-${index}`,
+          link,
+          status: "queued",
+          message: "Queued",
+          downloads: [],
+        }));
+      }
+
+      function setItemStatus(itemId, status, message) {
+        const item = queueState.items.find((x) => x.id === itemId);
+        if (!item) return;
+        item.status = status;
+        item.message = message;
+        saveQueueState();
+        renderQueue();
+      }
+
+      function addItemDownload(itemId, filePath) {
+        const item = queueState.items.find((x) => x.id === itemId);
+        if (!item) return;
+        const value = String(filePath || "").trim();
+        if (!value) return;
+        if (!item.downloads.includes(value)) {
+          item.downloads.push(value);
+          saveQueueState();
+          renderQueue();
         }
       }
 
-      form.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        clearOutput();
-        clearQueue();
+      function removeItem(itemId) {
+        if (isRunning) return;
+        queueState.items = queueState.items.filter((item) => item.id !== itemId);
+        saveQueueState();
+        renderQueue();
+      }
 
-        const links = parseLinks(input.value);
-        const folder = String(folderInput.value || "").trim();
-        if (!links.length) {
-          setStatus("Please enter at least one URL (one per line).", "error");
+      function retryItem(itemId) {
+        if (isRunning) return;
+        const item = queueState.items.find((x) => x.id === itemId);
+        if (!item) return;
+        item.status = "queued";
+        item.message = "Queued";
+        item.downloads = [];
+        saveQueueState();
+        renderQueue();
+      }
+
+      function removeDownloaded() {
+        if (isRunning) return;
+        queueState.items = queueState.items.filter((item) => item.status !== "done");
+        saveQueueState();
+        renderQueue();
+      }
+
+      function removeAll() {
+        if (isRunning) return;
+        queueState.items = [];
+        saveQueueState();
+        renderQueue();
+      }
+
+      function renderQueue() {
+        queueEl.innerHTML = "";
+        const total = queueState.items.length;
+
+        queueState.items.forEach((item, index) => {
+          const card = document.createElement("article");
+          card.className = "result";
+          if (["running", "done", "error"].includes(item.status)) {
+            card.classList.add(item.status);
+          }
+
+          const label = document.createElement("div");
+          label.className = "label";
+          label.textContent = `Item ${index + 1} of ${total}`;
+          card.appendChild(label);
+
+          const urlEl = document.createElement("div");
+          urlEl.className = "queue-url";
+          urlEl.textContent = item.link;
+          card.appendChild(urlEl);
+
+          const stateEl = document.createElement("div");
+          stateEl.className = "queue-state";
+          stateEl.textContent = item.message || "Queued";
+          card.appendChild(stateEl);
+
+          const downloadsEl = document.createElement("div");
+          downloadsEl.className = "downloads-list";
+
+          item.downloads.forEach((filePath) => {
+            const row = document.createElement("div");
+
+            const title = document.createElement("div");
+            title.className = "label";
+            title.textContent = "Downloaded File";
+            row.appendChild(title);
+
+            const href = toMediaUrl(filePath);
+            const link = document.createElement("a");
+            link.textContent = href || "File outside /media (not linkable)";
+            if (href) {
+              link.href = href;
+              link.setAttribute("download", "");
+            } else {
+              link.href = "#";
+              link.style.pointerEvents = "none";
+            }
+            row.appendChild(link);
+
+            const path = document.createElement("div");
+            path.className = "path";
+            path.textContent = `Saved to: ${filePath}`;
+            row.appendChild(path);
+
+            downloadsEl.appendChild(row);
+          });
+
+          card.appendChild(downloadsEl);
+
+          const actions = document.createElement("div");
+          actions.className = "item-actions";
+
+          const retryBtn = document.createElement("button");
+          retryBtn.type = "button";
+          retryBtn.className = "secondary";
+          retryBtn.textContent = "Retry";
+          retryBtn.disabled = isRunning;
+          retryBtn.addEventListener("click", () => retryItem(item.id));
+          actions.appendChild(retryBtn);
+
+          const removeBtn = document.createElement("button");
+          removeBtn.type = "button";
+          removeBtn.className = "danger";
+          removeBtn.textContent = "Remove";
+          removeBtn.disabled = isRunning;
+          removeBtn.addEventListener("click", () => removeItem(item.id));
+          actions.appendChild(removeBtn);
+
+          card.appendChild(actions);
+          queueEl.appendChild(card);
+        });
+
+        removeDownloadedBtn.disabled = isRunning;
+        removeAllBtn.disabled = isRunning;
+      }
+
+      async function runQueue() {
+        const queue = queueState.items;
+        if (!queue.length) {
+          setStatus("Queue is empty.", "error");
           return;
         }
 
-        const queue = links.map((link, index) => createQueueItem(link, index, links.length));
-
+        isRunning = true;
         submitBtn.disabled = true;
-        setStatus(`Running ${queue.length} item(s)...`);
+        renderQueue();
+
+        const folder = String(folderInput.value || "").trim();
+        queueState.folder = folder;
+        saveQueueState();
+
+        let completed = 0;
+        let failed = 0;
 
         try {
-          let completed = 0;
-          let failed = 0;
-
           for (let i = 0; i < queue.length; i += 1) {
             const item = queue[i];
-            setQueueState(item, "running", "Running...");
+            if (item.status === "done") {
+              completed += 1;
+              continue;
+            }
+
+            setItemStatus(item.id, "running", "Running...");
             appendOutput(`\n=== Queue ${i + 1}/${queue.length}: ${item.link} ===\n`);
 
             try {
@@ -436,11 +577,14 @@
                 throw new Error(message);
               }
 
+              let partialLine = "";
               const reader = response.body && response.body.getReader ? response.body.getReader() : null;
               if (!reader) {
                 const text = await response.text();
                 appendOutput(text);
-                collectDownloadLines(item, text);
+                const parsed = parseDownloadedPaths(text, partialLine);
+                partialLine = parsed.nextPartial;
+                parsed.found.forEach((filePath) => addItemDownload(item.id, filePath));
               } else {
                 const decoder = new TextDecoder();
                 while (true) {
@@ -448,22 +592,24 @@
                   if (done) break;
                   const text = decoder.decode(value, { stream: true });
                   appendOutput(text);
-                  collectDownloadLines(item, text);
+                  const parsed = parseDownloadedPaths(text, partialLine);
+                  partialLine = parsed.nextPartial;
+                  parsed.found.forEach((filePath) => addItemDownload(item.id, filePath));
                 }
               }
 
-              if (item.partialLine) {
-                const trailing = `${item.partialLine}\n`;
-                collectDownloadLines(item, trailing);
-                item.partialLine = "";
+              if (partialLine) {
+                const parsed = parseDownloadedPaths(`${partialLine}\n`, "");
+                parsed.found.forEach((filePath) => addItemDownload(item.id, filePath));
               }
 
-              setQueueState(item, "done", "Done");
+              setItemStatus(item.id, "done", "Done");
               completed += 1;
             } catch (err) {
               failed += 1;
-              setQueueState(item, "error", `Failed: ${err.message || "unknown error"}`);
-              appendOutput(`[queue] Failed: ${item.link} -> ${err.message || "unknown error"}\n`);
+              const message = err && err.message ? err.message : "unknown error";
+              setItemStatus(item.id, "error", `Failed: ${message}`);
+              appendOutput(`[queue] Failed: ${item.link} -> ${message}\n`);
             }
           }
 
@@ -472,12 +618,45 @@
           } else {
             setStatus(`Done. Completed ${completed}/${queue.length}.`, "ok");
           }
+        } finally {
+          isRunning = false;
+          submitBtn.disabled = false;
+          renderQueue();
+        }
+      }
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        outputEl.textContent = "";
+
+        try {
+          queueState = {
+            folder: String(folderInput.value || "").trim(),
+            items: createQueueItemsFromInput(),
+          };
+          saveQueueState();
+          renderQueue();
+          setStatus(`Running ${queueState.items.length} item(s)...`);
+          await runQueue();
         } catch (error) {
           setStatus(error.message || "Queue run failed.", "error");
-        } finally {
-          submitBtn.disabled = false;
         }
       });
+
+      removeDownloadedBtn.addEventListener("click", removeDownloaded);
+      removeAllBtn.addEventListener("click", removeAll);
+
+      loadQueueState();
+      folderInput.value = queueState.folder || "";
+      input.value = queueState.items.map((item) => item.link).join("\n");
+      queueState.items.forEach((item) => {
+        if (item.status === "running") {
+          item.status = "queued";
+          item.message = "Queued";
+        }
+      });
+      saveQueueState();
+      renderQueue();
     </script>
   </body>
 </html>
