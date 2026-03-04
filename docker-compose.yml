@@ -18,6 +18,15 @@ services:
       - /app/node_modules
       - chrome-data:/data/chrome
     restart: unless-stopped
+  sync:
+    build: .
+    container_name: xdl-sync
+    depends_on:
+      - app
+    command: node sync-saved-downloads.js
+    environment:
+      API_BASE: http://app:3000
+    restart: unless-stopped
 
 volumes:
   chrome-data:
