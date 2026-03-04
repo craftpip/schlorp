@@ -2,8 +2,9 @@ services:
   app:
     build: .
     container_name: xdl-app
+    network: "container:gluetun-global"
     ports:
-      - "3001:3000"
+      - "7866:3000"
       - "7900:7900"
     environment:
       PORT: 3000
@@ -16,6 +17,7 @@ services:
     volumes:
       - .:/app
       - /app/node_modules
+      - /f/downloads/studies/xdl:/app/media
       - chrome-data:/data/chrome
     restart: unless-stopped
   sync:
