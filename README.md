@@ -58,7 +58,9 @@ To reduce the chance of the API becoming stuck on one long-running job, the serv
 - `DOWNLOAD_FETCH_TIMEOUT_MS` (default: `300000`) - max duration for direct media/manifest HTTP fetch requests.
 - `FFMPEG_TIMEOUT_MS` (default: `900000`) - max runtime for ffmpeg download/mux commands.
 - `FFPROBE_TIMEOUT_MS` (default: `120000`) - max runtime for ffprobe audio detection.
-- `INSTAGRAM_DOWNLOAD_DELAY_MS` (default: `20000`) - delay between Instagram media download requests.
+- `INSTAGRAM_429_COOLDOWN_MS` (default: `300000`) - cooldown wait after Instagram 429 before suspending the current run.
+- `SAVED_SYNC_DOWNLOAD_DELAY_MS` (default: `20000`) - delay between `/download` requests in `sync-saved-downloads.js`.
+- `SAVED_SYNC_429_COOLDOWN_MS` (default: `300000`) - cooldown wait in `sync-saved-downloads.js` after 429 before exiting.
 
 If a job times out, the current request fails and the browser is restarted automatically so new requests can run.
 

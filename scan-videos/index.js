@@ -210,23 +210,28 @@ function isInstagram429Error(err) {
   return message.includes("429") || message.includes("too many requests");
 }
 
-async function gotoWithInstagram429Retry(page, targetUrl, isInstagramTarget, log, backoffMs, retryCount) {
-  let retries = 0;
+function createInstagram429CooldownError(message) {
+  const error = new Error(message);
+  error.status = 429;
+  return error;
+}
 
-  while (true) {
-    const response = await page.goto(targetUrl, { waitUntil: "networkidle2", timeout: 60000 });
-    const status = response && typeof response.status === "function" ? response.status() : 0;
+async function waitForInstagram429Cooldown(log, cooldownMs) {
+  log("waiting for 429 cooldown.");
+  await sleep(cooldownMs);
+}
 
-    if (!isInstagramTarget || status !== 429 || retries >= retryCount) {
-      return response;
-    }
+async function gotoWithInstagram429Retry(page, targetUrl, isInstagramTarget, log, cooldownMs) {
+  const response = await page.goto(targetUrl, { waitUntil: "networkidle2", timeout: 60000 });
+  const status = response && typeof response.status === "function" ? response.status() : 0;
 
-    retries += 1;
-    log(
-      `Instagram responded with 429 for ${targetUrl}. Waiting ${Math.ceil(backoffMs / 1000)}s before retry ${retries}/${retryCount}...`
-    );
-    await sleep(backoffMs);
+  if (isInstagramTarget && status === 429) {
+    log(`Instagram responded with 429 for ${targetUrl}.`);
+    await waitForInstagram429Cooldown(log, cooldownMs);
+    throw createInstagram429CooldownError("Instagram responded with 429. Suspending this run; retry later.");
   }
+
+  return response;
 }
 
 async function run(options = {}) {
@@ -262,27 +267,7 @@ async function run(options = {}) {
     typeof options.waitForCompletionPrompt === "boolean"
       ? options.waitForCompletionPrompt
       : !hasProgrammaticOptions;
-  const instagram429BackoffMs = parsePositiveInt(process.env.INSTAGRAM_429_BACKOFF_MS, 120000);
-  const instagram429RetryCount = parsePositiveInt(process.env.INSTAGRAM_429_RETRIES, 1);
-  const instagramDownloadDelayMs = parsePositiveInt(process.env.INSTAGRAM_DOWNLOAD_DELAY_MS, 20000);
-  let lastInstagramDownloadAttemptAt = 0;
-
-  const throttleInstagramDownload = async () => {
-    if (!instagramDownloadDelayMs) return;
-
-    const elapsedMs = Date.now() - lastInstagramDownloadAttemptAt;
-    const waitMs = instagramDownloadDelayMs - elapsedMs;
-    if (waitMs > 0) {
-      log(
-        `Instagram download throttle: waiting ${Math.ceil(
-          waitMs / 1000
-        )}s before the next media request...`
-      );
-      await sleep(waitMs);
-    }
-
-    lastInstagramDownloadAttemptAt = Date.now();
-  };
+  const instagram429CooldownMs = parsePositiveInt(process.env.INSTAGRAM_429_COOLDOWN_MS, 300000);
 
   if (parsed.command === "open-browser") {
     const browser = await buildBrowserFromLocalProfile({ headless: false, log });
@@ -428,8 +413,7 @@ async function run(options = {}) {
           targetUrl,
           isInstagramTarget,
           log,
-          instagram429BackoffMs,
-          instagram429RetryCount
+          instagram429CooldownMs
         );
         const pageReadyMessage = `Target page ${index + 1}/${parsed.inputUrls.length} is open. If needed, log in and ensure media is visible.`;
         if (autoContinuePrompts) {
@@ -740,32 +724,21 @@ async function run(options = {}) {
           try {
             const headers = await buildDownloadHeaders(candidate);
 
-            const maxAttempts = isInstagramTarget ? instagram429RetryCount + 1 : 1;
-            for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-              try {
-                if (isInstagramTarget) {
-                  await throttleInstagramDownload();
-                }
-                result = await downloadMedia(
-                  candidate,
-                  outputDir,
-                  headers,
-                  filePrefix,
-                  { includeTimestamp: !isInstagramTarget }
-                );
-                break;
-              } catch (err) {
-                if (!(isInstagramTarget && isInstagram429Error(err) && attempt < maxAttempts)) {
-                  throw err;
-                }
-
-                log(
-                  `Instagram media request hit 429 for candidate ${candidate}. Waiting ${Math.ceil(
-                    instagram429BackoffMs / 1000
-                  )}s before retry ${attempt}/${instagram429RetryCount}...`
-                );
-                await sleep(instagram429BackoffMs);
+            try {
+              result = await downloadMedia(
+                candidate,
+                outputDir,
+                headers,
+                filePrefix,
+                { includeTimestamp: !isInstagramTarget }
+              );
+            } catch (err) {
+              if (isInstagramTarget && isInstagram429Error(err)) {
+                log(`Instagram media request hit 429 for candidate ${candidate}.`);
+                await waitForInstagram429Cooldown(log, instagram429CooldownMs);
+                throw createInstagram429CooldownError("Instagram responded with 429. Suspending this run; retry later.");
               }
+              throw err;
             }
 
             selectedCandidate = candidate;
@@ -803,11 +776,16 @@ async function run(options = {}) {
               for (const candidate of matchingAudioCandidates) {
                 try {
                   const headers = await buildDownloadHeaders(candidate);
-                  await throttleInstagramDownload();
-
                   audioResult = await downloadMedia(candidate, tempDir, headers, "audio");
                   break;
-                } catch {
+                } catch (err) {
+                  if (isInstagram429Error(err)) {
+                    log("Instagram media request hit 429 while fetching companion audio.");
+                    await waitForInstagram429Cooldown(log, instagram429CooldownMs);
+                    throw createInstagram429CooldownError(
+                      "Instagram responded with 429. Suspending this run; retry later."
+                    );
+                  }
                   // keep trying other audio candidates
                 }
               }
