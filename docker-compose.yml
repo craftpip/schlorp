@@ -18,7 +18,7 @@ services:
     volumes:
       - .:/app
       - /app/node_modules
-      - /f/downloads/studies/xdl:/app/media
+      - ./media:/app/media
       - chrome-data:/data/chrome
     restart: unless-stopped
   sync:
