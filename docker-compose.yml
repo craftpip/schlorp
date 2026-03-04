@@ -1,6 +1,7 @@
 services:
   app:
     build: .
+    image: xdl-app-image:local
     container_name: xdl-app
     network: "container:gluetun-global"
     ports:
@@ -21,7 +22,7 @@ services:
       - chrome-data:/data/chrome
     restart: unless-stopped
   sync:
-    build: .
+    image: xdl-app-image:local
     container_name: xdl-sync
     depends_on:
       - app
