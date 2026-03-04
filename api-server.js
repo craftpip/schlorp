@@ -5,11 +5,13 @@ const express = require("express");
 const path = require("path");
 const { run } = require("./scan-videos/index");
 const { buildBrowserFromLocalProfile } = require("./scan-videos/browser");
+const { scanSavedPage } = require("./scan-videos/scan-saved");
 
 const app = express();
 const rootDir = __dirname;
 const mediaDir = path.join(rootDir, "media");
 const port = Number(process.env.PORT) || 3000;
+const apiJobTimeoutMs = parsePositiveInt(process.env.API_JOB_TIMEOUT_MS, 1800000);
 
 let shuttingDown = false;
 let jobCounter = 0;
@@ -23,6 +25,10 @@ app.use("/media", express.static(mediaDir));
 
 app.get("/", (_req, res) => {
   res.sendFile(path.join(rootDir, "index.html"));
+});
+
+app.get("/scan-saved", (_req, res) => {
+  res.sendFile(path.join(rootDir, "scan-saved.html"));
 });
 
 app.get("/health", (_req, res) => {
@@ -42,7 +48,7 @@ app.post("/download", async (req, res) => {
   if (activeJob) {
     return res.status(429).json({
       ok: false,
-      error: `Another download is currently running (job ${activeJob.id}). Try again when it finishes.`,
+      error: `Another task is currently running (job ${activeJob.id}, type=${activeJob.type}). Try again when it finishes.`,
     });
   }
 
@@ -62,7 +68,7 @@ app.post("/download", async (req, res) => {
   }
 
   const jobId = ++jobCounter;
-  activeJob = { id: jobId, startedAt: Date.now() };
+  activeJob = { id: jobId, type: "download", startedAt: Date.now() };
 
   let clientDisconnected = false;
   const logToClientAndConsole = (message) => {
@@ -99,16 +105,24 @@ app.post("/download", async (req, res) => {
     const browser = await getSharedBrowser(logToClientAndConsole);
     logToClientAndConsole("[api] browser ready, starting scan...\n");
 
-    await run({
-      urls: [link],
-      linkOnly: false,
-      outputDir,
-      maxQuality,
-      browser,
-      autoContinuePrompts: true,
-      waitForCompletionPrompt: false,
-      log: logToClientAndConsole,
-    });
+    await runWithJobTimeout(
+      run({
+        urls: [link],
+        linkOnly: false,
+        outputDir,
+        maxQuality,
+        browser,
+        autoContinuePrompts: true,
+        waitForCompletionPrompt: false,
+        log: logToClientAndConsole,
+      }),
+      {
+        timeoutMs: apiJobTimeoutMs,
+        jobId,
+        jobType: "download",
+        log: logToClientAndConsole,
+      }
+    );
 
     logToClientAndConsole(`\n[api] process finished (exit=0, signal=none)`);
   } catch (error) {
@@ -124,6 +138,68 @@ app.post("/download", async (req, res) => {
     if (!res.writableEnded) {
       res.end();
     }
+  }
+});
+
+app.post("/scan-saved", async (req, res) => {
+  if (shuttingDown) {
+    return res.status(503).json({ ok: false, error: "Server is shutting down." });
+  }
+
+  if (activeJob) {
+    return res.status(429).json({
+      ok: false,
+      error: `Another task is currently running (job ${activeJob.id}, type=${activeJob.type}). Try again when it finishes.`,
+    });
+  }
+
+  const targetUrl = String(req.body?.url || req.query?.url || "").trim();
+  if (!targetUrl) {
+    return res.status(400).json({ ok: false, error: "Field 'url' is required." });
+  }
+
+  try {
+    new URL(targetUrl);
+  } catch {
+    return res.status(400).json({ ok: false, error: "Field 'url' must be a valid absolute URL." });
+  }
+
+  const endUrls = normalizeEndUrls(req.body?.endUrls ?? req.query?.endUrls);
+  const jobId = ++jobCounter;
+  activeJob = { id: jobId, type: "scan-saved", startedAt: Date.now() };
+
+  try {
+    const browser = await getSharedBrowser((message) => {
+      const text = String(message == null ? "" : message).trim();
+      if (!text) return;
+      console.log(`[scan-saved:${jobId}] ${text}`);
+    });
+
+    const result = await runWithJobTimeout(
+      scanSavedPage({
+        browser,
+        targetUrl,
+        endUrls,
+        log: (message) => {
+          const text = String(message == null ? "" : message).trim();
+          if (!text) return;
+          console.log(`[scan-saved:${jobId}] ${text}`);
+        },
+      }),
+      {
+        timeoutMs: apiJobTimeoutMs,
+        jobId,
+        jobType: "scan-saved",
+      }
+    );
+
+    return res.json({ ok: true, ...result });
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    console.error(`[scan-saved:${jobId}] failed: ${message}`);
+    return res.status(500).json({ ok: false, error: message });
+  } finally {
+    activeJob = null;
   }
 });
 
@@ -210,6 +286,49 @@ function parseBooleanInput(value, fallback) {
   return fallback;
 }
 
+function parsePositiveInt(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+async function runWithJobTimeout(promise, options = {}) {
+  const timeoutMs = parsePositiveInt(options.timeoutMs, 0);
+  if (!timeoutMs) {
+    return promise;
+  }
+
+  const jobType = String(options.jobType || "job");
+  const jobId = options.jobId != null ? options.jobId : "?";
+  const log = typeof options.log === "function" ? options.log : null;
+
+  let timer = null;
+  let timedOut = false;
+
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(async () => {
+      timedOut = true;
+      const message = `[api] ${jobType} job ${jobId} timed out after ${timeoutMs}ms. Recycling browser session.`;
+      if (log) log(message);
+      console.error(message);
+      await closeSharedBrowser();
+      reject(new Error(`${jobType} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    if (timer && typeof timer.unref === "function") {
+      timer.unref();
+    }
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (timedOut) {
+      await closeSharedBrowser();
+    }
+  }
+}
+
 function resolveMediaOutputDir(folder) {
   if (!folder) return mediaDir;
 
@@ -232,4 +351,28 @@ function resolveMaxQuality(value) {
     throw new Error("Invalid max quality. Use a positive integer like 720 or 1080.");
   }
   return Math.floor(parsed);
+}
+
+function normalizeEndUrls(rawValue) {
+  if (Array.isArray(rawValue)) {
+    return Array.from(
+      new Set(
+        rawValue
+          .map((value) => String(value || "").trim())
+          .filter(Boolean)
+      )
+    );
+  }
+
+  const text = String(rawValue == null ? "" : rawValue);
+  if (!text.trim()) return [];
+
+  return Array.from(
+    new Set(
+      text
+        .split(/\r?\n|,/)
+        .map((value) => value.trim())
+        .filter(Boolean)
+    )
+  );
 }

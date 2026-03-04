@@ -264,6 +264,25 @@ async function run(options = {}) {
       : !hasProgrammaticOptions;
   const instagram429BackoffMs = parsePositiveInt(process.env.INSTAGRAM_429_BACKOFF_MS, 120000);
   const instagram429RetryCount = parsePositiveInt(process.env.INSTAGRAM_429_RETRIES, 1);
+  const instagramDownloadDelayMs = parsePositiveInt(process.env.INSTAGRAM_DOWNLOAD_DELAY_MS, 20000);
+  let lastInstagramDownloadAttemptAt = 0;
+
+  const throttleInstagramDownload = async () => {
+    if (!instagramDownloadDelayMs) return;
+
+    const elapsedMs = Date.now() - lastInstagramDownloadAttemptAt;
+    const waitMs = instagramDownloadDelayMs - elapsedMs;
+    if (waitMs > 0) {
+      log(
+        `Instagram download throttle: waiting ${Math.ceil(
+          waitMs / 1000
+        )}s before the next media request...`
+      );
+      await sleep(waitMs);
+    }
+
+    lastInstagramDownloadAttemptAt = Date.now();
+  };
 
   if (parsed.command === "open-browser") {
     const browser = await buildBrowserFromLocalProfile({ headless: false, log });
@@ -724,6 +743,9 @@ async function run(options = {}) {
             const maxAttempts = isInstagramTarget ? instagram429RetryCount + 1 : 1;
             for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
               try {
+                if (isInstagramTarget) {
+                  await throttleInstagramDownload();
+                }
                 result = await downloadMedia(
                   candidate,
                   outputDir,
@@ -781,6 +803,7 @@ async function run(options = {}) {
               for (const candidate of matchingAudioCandidates) {
                 try {
                   const headers = await buildDownloadHeaders(candidate);
+                  await throttleInstagramDownload();
 
                   audioResult = await downloadMedia(candidate, tempDir, headers, "audio");
                   break;

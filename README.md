@@ -50,6 +50,18 @@ Then open:
 
 Downloads are saved to `./media` on your host.
 
+## Timeout and stuck-job safety
+
+To reduce the chance of the API becoming stuck on one long-running job, the server and downloader use safety timeouts.
+
+- `API_JOB_TIMEOUT_MS` (default: `1800000`) - max API job runtime before the shared browser is recycled.
+- `DOWNLOAD_FETCH_TIMEOUT_MS` (default: `300000`) - max duration for direct media/manifest HTTP fetch requests.
+- `FFMPEG_TIMEOUT_MS` (default: `900000`) - max runtime for ffmpeg download/mux commands.
+- `FFPROBE_TIMEOUT_MS` (default: `120000`) - max runtime for ffprobe audio detection.
+- `INSTAGRAM_DOWNLOAD_DELAY_MS` (default: `20000`) - delay between Instagram media download requests.
+
+If a job times out, the current request fails and the browser is restarted automatically so new requests can run.
+
 ## Chrome inside Docker
 
 Yes — Chrome (Chromium) is installed in the container.
