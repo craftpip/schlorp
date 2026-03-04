@@ -26,6 +26,9 @@ services:
     command: node sync-saved-downloads.js
     environment:
       API_BASE: http://app:3000
+    volumes:
+      - .:/app
+      - /app/node_modules
     restart: unless-stopped
 
 volumes:
