@@ -64,6 +64,32 @@
         flex-wrap: wrap;
       }
 
+      .queue-progress {
+        margin-top: 16px;
+      }
+
+      .queue-progress__label {
+        font-size: 0.85rem;
+        color: var(--muted);
+        margin-bottom: 6px;
+      }
+
+      .queue-progress__bar {
+        width: 100%;
+        height: 12px;
+        background: #e2e8f0;
+        border-radius: 999px;
+        overflow: hidden;
+      }
+
+      .queue-progress__bar span {
+        display: block;
+        height: 100%;
+        width: 0;
+        background: linear-gradient(90deg, var(--accent), #4ade80);
+        transition: width 0.25s ease;
+      }
+
       textarea {
         width: 100%;
         padding: 12px;
@@ -240,7 +266,7 @@
   <body>
     <main class="card">
       <h1>Video Downloader</h1>
-      <p>Paste one URL per line, run queue, and watch live logs.</p>
+      <p>Paste one URL per line, add them to the queue, then start processing.</p>
 
       <form id="download-form">
         <textarea
@@ -265,9 +291,15 @@
           <option value="240">Max quality: 240p</option>
         </select>
         <div class="controls">
-          <button id="submit-btn" type="submit">Run Queue</button>
-          <button id="remove-downloaded-btn" class="secondary" type="button">Remove Downloaded</button>
+          <button id="add-to-queue-btn" type="submit">Add to queue</button>
+          <button id="start-queue-btn" type="button">Start queue</button>
+          <button id="stop-queue-btn" type="button" class="secondary">Stop queue</button>
+          <button id="remove-downloaded-btn" class="secondary" type="button">Remove Completed</button>
           <button id="remove-all-btn" class="danger" type="button">Remove All</button>
+        </div>
+        <div class="queue-progress">
+          <div class="queue-progress__label">Queue progress 0/0</div>
+          <div class="queue-progress__bar"><span></span></div>
         </div>
       </form>
 
@@ -282,15 +314,20 @@
       const input = document.getElementById("urls-input");
       const folderInput = document.getElementById("folder-input");
       const maxQualityInput = document.getElementById("max-quality-input");
-      const submitBtn = document.getElementById("submit-btn");
+      const addToQueueBtn = document.getElementById("add-to-queue-btn");
+      const startBtn = document.getElementById("start-queue-btn");
+      const stopBtn = document.getElementById("stop-queue-btn");
       const removeDownloadedBtn = document.getElementById("remove-downloaded-btn");
       const removeAllBtn = document.getElementById("remove-all-btn");
+      const progressLabel = document.querySelector(".queue-progress__label");
+      const progressBarFill = document.querySelector(".queue-progress__bar span");
       const statusEl = document.getElementById("status");
       const queueEl = document.getElementById("queue");
       const outputEl = document.getElementById("output");
       const MAX_OUTPUT_LINES = 200;
 
       let isRunning = false;
+      let queueStopRequested = false;
       let queueState = {
         folder: "",
         maxQuality: "",
@@ -401,6 +438,36 @@
         }
 
         return { found, nextPartial };
+      }
+
+      function hasPendingItems() {
+        return queueState.items.some((item) => item.status !== "done");
+      }
+
+      function updateQueueProgress() {
+        const total = queueState.items.length;
+        const done = queueState.items.filter((item) => item.status === "done").length;
+        const percent = total ? Math.round((done / total) * 100) : 0;
+
+        if (progressBarFill) {
+          progressBarFill.style.width = `${percent}%`;
+        }
+
+        if (progressLabel) {
+          progressLabel.textContent = total
+            ? `Queue progress ${done}/${total} (${percent}%)`
+            : "Queue progress 0/0";
+        }
+      }
+
+      function updateControls() {
+        const hasPending = hasPendingItems();
+        const busy = isRunning;
+        if (addToQueueBtn) addToQueueBtn.disabled = busy;
+        if (startBtn) startBtn.disabled = busy || !hasPending;
+        if (stopBtn) stopBtn.disabled = !busy;
+        removeDownloadedBtn.disabled = busy;
+        removeAllBtn.disabled = busy;
       }
 
       function createQueueItemsFromInput() {
@@ -554,8 +621,8 @@
           queueEl.appendChild(card);
         });
 
-        removeDownloadedBtn.disabled = isRunning;
-        removeAllBtn.disabled = isRunning;
+        updateQueueProgress();
+        updateControls();
       }
 
       async function runQueue() {
@@ -565,9 +632,11 @@
           return;
         }
 
-        isRunning = true;
-        submitBtn.disabled = true;
-        renderQueue();
+        const pending = queue.filter((item) => item.status !== "done");
+        if (!pending.length) {
+          setStatus("Queue has no pending items.", "error");
+          return;
+        }
 
         const folder = String(folderInput.value || "").trim();
         const maxQuality = String(maxQualityInput.value || "").trim();
@@ -575,14 +644,21 @@
         queueState.maxQuality = maxQuality;
         saveQueueState();
 
-        let completed = 0;
-        let failed = 0;
+        let stopped = false;
+        queueStopRequested = false;
+        isRunning = true;
+        setStatus(`Running ${pending.length} item(s)...`);
+        renderQueue();
 
         try {
           for (let i = 0; i < queue.length; i += 1) {
+            if (queueStopRequested) {
+              stopped = true;
+              break;
+            }
+
             const item = queue[i];
             if (item.status === "done") {
-              completed += 1;
               continue;
             }
 
@@ -634,53 +710,73 @@
               }
 
               setItemStatus(item.id, "done", "Done");
-              completed += 1;
             } catch (err) {
-              failed += 1;
               const message = err && err.message ? err.message : "unknown error";
               setItemStatus(item.id, "error", `Failed: ${message}`);
               appendOutput(`[queue] Failed: ${item.link} -> ${message}\n`);
             }
           }
-
-          if (failed > 0) {
-            setStatus(`Completed ${completed}/${queue.length}. Failed ${failed}.`, "error");
-          } else {
-            setStatus(`Done. Completed ${completed}/${queue.length}.`, "ok");
-          }
         } finally {
           isRunning = false;
-          submitBtn.disabled = false;
+          queueStopRequested = false;
+          const total = queueState.items.length;
+          const doneCount = queueState.items.filter((item) => item.status === "done").length;
+          const failedCount = queueState.items.filter((item) => item.status === "error").length;
           renderQueue();
+
+          if (stopped) {
+            setStatus(`Queue paused. ${doneCount}/${total} completed.`);
+            return;
+          }
+
+          if (failedCount > 0) {
+            setStatus(`Completed ${doneCount}/${total}. Failed ${failedCount}.`, "error");
+          } else {
+            setStatus(`Done. Completed ${doneCount}/${total}.`, "ok");
+          }
         }
       }
 
-      form.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        outputEl.textContent = "";
+      function stopQueue() {
+        if (!isRunning || queueStopRequested) {
+          return;
+        }
+        queueStopRequested = true;
+        if (stopBtn) stopBtn.disabled = true;
+        setStatus("Stopping queue after current item...");
+      }
 
+      function handleAddToQueue(event) {
+        event.preventDefault();
         try {
-          queueState = {
-            folder: String(folderInput.value || "").trim(),
-            maxQuality: String(maxQualityInput.value || "").trim(),
-            items: createQueueItemsFromInput(),
-          };
+          const newItems = createQueueItemsFromInput();
+          queueState.folder = String(folderInput.value || "").trim();
+          queueState.maxQuality = String(maxQualityInput.value || "").trim();
+          queueState.items = queueState.items.concat(newItems);
           saveQueueState();
           renderQueue();
-          setStatus(`Running ${queueState.items.length} item(s)...`);
-          await runQueue();
+          setStatus(`Queued ${newItems.length} item(s).`);
+          input.value = "";
         } catch (error) {
-          setStatus(error.message || "Queue run failed.", "error");
+          setStatus(error.message || "Failed to add to queue.", "error");
         }
-      });
+      }
 
+      form.addEventListener("submit", handleAddToQueue);
+      startBtn.addEventListener("click", () => {
+        outputEl.textContent = "";
+        runQueue().catch((error) => {
+          setStatus(error.message || "Queue run failed.", "error");
+        });
+      });
+      stopBtn.addEventListener("click", stopQueue);
       removeDownloadedBtn.addEventListener("click", removeDownloaded);
       removeAllBtn.addEventListener("click", removeAll);
 
       loadQueueState();
       folderInput.value = queueState.folder || "";
       maxQualityInput.value = queueState.maxQuality || "";
-      input.value = queueState.items.map((item) => item.link).join("\n");
+      input.value = "";
       queueState.items.forEach((item) => {
         if (item.status === "running") {
           item.status = "queued";

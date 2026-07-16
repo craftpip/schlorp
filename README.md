@@ -60,7 +60,7 @@ To reduce the chance of the API becoming stuck on one long-running job, the serv
 - `FFPROBE_TIMEOUT_MS` (default: `120000`) - max runtime for ffprobe audio detection.
 - `INSTAGRAM_429_COOLDOWN_MS` (default: `300000`) - cooldown wait after Instagram 429 before suspending the current run.
 - `SAVED_SYNC_DOWNLOAD_DELAY_MS` (default: `20000`) - delay between `/download` requests in `sync-saved-downloads.js`.
-- `SAVED_SYNC_429_COOLDOWN_MS` (default: `300000`) - cooldown wait in `sync-saved-downloads.js` after 429 before exiting.
+- `sync-saved-downloads.js` now exits immediately on 429 so the sync container stops and can be retried later.
 
 If a job times out, the current request fails and the browser is restarted automatically so new requests can run.
 

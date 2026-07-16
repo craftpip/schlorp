@@ -10,7 +10,6 @@ const MEDIA_ROOT_DIR = path.resolve(__dirname, "media");
 const RETRY_DELAY_MS = Number(process.env.SAVED_SYNC_RETRY_DELAY_MS || 3000);
 const RETRY_COUNT = Number(process.env.SAVED_SYNC_RETRY_COUNT || 20);
 const DOWNLOAD_DELAY_MS = Number(process.env.SAVED_SYNC_DOWNLOAD_DELAY_MS || 20000);
-const RATE_LIMIT_COOLDOWN_MS = Number(process.env.SAVED_SYNC_429_COOLDOWN_MS || 300000);
 
 // Edit this list only: one saved URL per target folder.
 const SAVED_LISTS = [
@@ -38,12 +37,9 @@ async function main() {
   const state = await loadState(STATE_FILE);
   const apiBase = String(API_BASE).replace(/\/+$/, "");
   let hadErrors = false;
-  let suspendRequested = false;
   let lastDownloadRequestAt = 0;
 
   for (let i = 0; i < SAVED_LISTS.length; i += 1) {
-    if (suspendRequested) break;
-
     const item = SAVED_LISTS[i];
     const listState = state.lists[item.url] || {};
     const lastSeenUrl = String(listState.lastSeenUrl || "").trim();
@@ -70,8 +66,8 @@ async function main() {
       hadErrors = true;
       console.error(`[error] scan failed for ${item.url}: ${error.message}`);
       if (isRateLimitError(error)) {
-        await waitFor429Cooldown();
-        suspendRequested = true;
+        await stopSyncContainerOnRateLimit(state);
+        return;
       }
       continue;
     }
@@ -98,8 +94,6 @@ async function main() {
     const outputDir = resolveOutputDir(item.folder);
 
     for (let idx = 0; idx < downloadQueue.length; idx += 1) {
-      if (suspendRequested) break;
-
       const postUrl = downloadQueue[idx];
       console.log(`\n[download ${idx + 1}/${downloadQueue.length}] ${postUrl}`);
 
@@ -139,15 +133,10 @@ async function main() {
         hadErrors = true;
         console.error(`[error] download failed: ${error.message}`);
         if (isRateLimitError(error)) {
-          await waitFor429Cooldown();
-          suspendRequested = true;
-          break;
+          await stopSyncContainerOnRateLimit(state);
+          return;
         }
       }
-    }
-
-    if (suspendRequested) {
-      continue;
     }
 
     if (listFailed) {
@@ -177,9 +166,6 @@ async function main() {
 
   if (hadErrors) {
     process.exitCode = 1;
-    if (suspendRequested) {
-      console.log("Run suspended after Instagram 429 cooldown; retry in a future run.");
-    }
     console.log("Completed with errors.");
   } else {
     console.log("Completed successfully.");
@@ -437,9 +423,16 @@ function extractApiProcessFailureMessage(output) {
   return lastMessage;
 }
 
-async function waitFor429Cooldown() {
-  console.log("waiting for 429 cooldown.");
-  await delay(RATE_LIMIT_COOLDOWN_MS);
+async function stopSyncContainerOnRateLimit(state) {
+  console.log("429 detected. Stopping sync container now.");
+  state.updatedAt = new Date().toISOString();
+  try {
+    await saveState(STATE_FILE, state);
+    console.log(`State saved: ${STATE_FILE}`);
+  } catch (error) {
+    console.error(`[error] failed to save state before exit: ${error.message}`);
+  }
+  process.exit(0);
 }
 
 main().catch((error) => {

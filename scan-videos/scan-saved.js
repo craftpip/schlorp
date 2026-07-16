@@ -52,11 +52,6 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function parsePositiveInt(value, fallback) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
-}
-
 async function readItemsOnPage(page) {
   return page.evaluate(() => {
     const rootAnchors = document.querySelectorAll("._ac7v.x1ty9z65.xzboxd6 a[href]");
@@ -115,7 +110,6 @@ async function scanSavedPage(options = {}) {
   const maxIterations = Number.isFinite(Number(options.maxIterations)) && Number(options.maxIterations) > 0
     ? Math.floor(Number(options.maxIterations))
     : 1200;
-  const cooldownMs = parsePositiveInt(process.env.INSTAGRAM_429_COOLDOWN_MS, 300000);
   const stopUrls = toUniqueStrings(Array.isArray(options.endUrls) ? options.endUrls : []);
   const stopIdSet = new Set(stopUrls.map((value) => extractStopId(value)).filter(Boolean));
   const stopUrlSet = new Set(stopUrls.map((url) => normalizeComparableUrl(url)).filter(Boolean));
@@ -134,9 +128,7 @@ async function scanSavedPage(options = {}) {
     const status = response && typeof response.status === "function" ? response.status() : 0;
     if (status === 429) {
       log("Instagram saved-page scan got 429.");
-      log("waiting for 429 cooldown.");
-      await sleep(cooldownMs);
-      const error = new Error("Instagram responded with 429 during saved-page scan. Suspending this run; retry later.");
+      const error = new Error("Instagram responded with 429 during saved-page scan. Cancelling this job now.");
       error.status = 429;
       throw error;
     }

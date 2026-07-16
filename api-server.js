@@ -196,8 +196,9 @@ app.post("/scan-saved", async (req, res) => {
     return res.json({ ok: true, ...result });
   } catch (error) {
     const message = error && error.message ? error.message : String(error);
+    const statusCode = Number(error && error.status) === 429 || /429|too many requests/i.test(message) ? 429 : 500;
     console.error(`[scan-saved:${jobId}] failed: ${message}`);
-    return res.status(500).json({ ok: false, error: message });
+    return res.status(statusCode).json({ ok: false, error: message });
   } finally {
     activeJob = null;
   }
