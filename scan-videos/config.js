@@ -75,8 +75,8 @@ function normalizeUrl(raw) {
 function resolveProfileConfig() {
   const home = process.env.HOME || "/home/boniface";
   const userDataDir =
-    process.env.CHROME_USER_DATA_DIR || `${home}/.config/google-chrome`;
-  const profileDir = process.env.CHROME_PROFILE_DIR || "Default";
+    process.env.BROWSER_USER_DATA_DIR || `${home}/.config/cloakbrowser-profile`;
+  const profileDir = process.env.BROWSER_PROFILE_DIR || "Default";
 
   return { userDataDir, profileDir };
 }

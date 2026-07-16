@@ -64,11 +64,11 @@ To reduce the chance of the API becoming stuck on one long-running job, the serv
 
 If a job times out, the current request fails and the browser is restarted automatically so new requests can run.
 
-## Chrome inside Docker
+## CloakBrowser inside Docker
 
-Yes — Chrome (Chromium) is installed in the container.
+Yes — CloakBrowser (stealth Chromium) is installed in the container.
 
-- API mode runs Chrome headless by default.
+- API mode runs the browser headless by default.
 - For interactive browser login (`open-browser`), enable VNC/noVNC and run the command in an interactive container:
 
 ```bash
@@ -76,4 +76,4 @@ npm run docker-open-browser
 ```
 
 While it runs, open `http://localhost:7901/vnc.html` to see and control the browser.
-You can log in to websites there, and session/profile data is kept in the named volume `chrome-data`.
+You can log in to websites there, and session/profile data is kept in the named volume `browser-data`.

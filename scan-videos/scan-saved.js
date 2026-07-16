@@ -138,7 +138,7 @@ async function scanSavedPage(options = {}) {
     const openedLooksSaved = /\/saved\//i.test(openedUrl);
     if (targetLooksSaved && !openedLooksSaved) {
       throw new Error(
-        `Instagram redirected from saved page to ${openedUrl}. Make sure this Chrome profile is logged into the same account that owns the saved collection.`
+        `Instagram redirected from saved page to ${openedUrl}. Make sure this browser profile is logged into the same account that owns the saved collection.`
       );
     }
 

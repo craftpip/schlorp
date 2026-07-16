@@ -1,24 +1,14 @@
 const fs = require("fs/promises");
 const os = require("os");
 const path = require("path");
-const puppeteer = require("puppeteer-core");
-const chromeLauncher = require("chrome-launcher");
 const { shouldRunHeadless, resolveProfileConfig } = require("./config");
 
-async function getChromePath() {
-  if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
-
-  const installs = chromeLauncher.Launcher.getInstallations();
-  if (!installs || installs.length === 0) {
-    throw new Error(
-      "Chrome not found. Install Chrome or set CHROME_PATH to the executable."
-    );
-  }
-  return installs[0];
+async function getCloakBrowser() {
+  return import("cloakbrowser/puppeteer");
 }
 
 async function cloneProfileDir(sourceDir, profileDir) {
-  const cloneDir = path.join(os.tmpdir(), `chrome-profile-clone-${Date.now()}`);
+  const cloneDir = path.join(os.tmpdir(), `browser-profile-clone-${Date.now()}`);
   const sourceProfilePath = path.join(sourceDir, profileDir);
   const targetProfilePath = path.join(cloneDir, profileDir);
 
@@ -62,26 +52,30 @@ async function removeStaleLockArtifacts(userDataDir, profileDir) {
   }
 }
 
-async function launchBrowser(chromePath, userDataDir, profileDir, options = {}) {
+async function launchBrowser(userDataDir, profileDir, options = {}) {
   const headless =
     typeof options.headless === "boolean" ? options.headless : shouldRunHeadless();
   const log = typeof options.log === "function" ? options.log : console.log;
-  const launchArgs = [
+  const { launchPersistentContext } = await getCloakBrowser();
+
+  if (process.env.BROWSER_PATH) {
+    process.env.CLOAKBROWSER_BINARY_PATH = process.env.BROWSER_PATH;
+  }
+
+  const args = [
     "--no-sandbox",
     "--disable-setuid-sandbox",
     `--profile-directory=${profileDir}`,
   ];
 
-  if (headless) launchArgs.push("--headless=new");
+  const cbOptions = {
+    headless,
+    args,
+    userDataDir,
+  };
 
   try {
-    return await puppeteer.launch({
-      executablePath: chromePath,
-      headless,
-      defaultViewport: null,
-      userDataDir,
-      args: launchArgs,
-    });
+    return await launchPersistentContext(cbOptions);
   } catch (err) {
     const message = String(err && err.message ? err.message : err);
     const lockError =
@@ -95,13 +89,7 @@ async function launchBrowser(chromePath, userDataDir, profileDir, options = {}) 
     await removeStaleLockArtifacts(userDataDir, profileDir);
 
     try {
-      return await puppeteer.launch({
-        executablePath: chromePath,
-        headless,
-        defaultViewport: null,
-        userDataDir,
-        args: launchArgs,
-      });
+      return await launchPersistentContext(cbOptions);
     } catch (retryErr) {
       const retryMessage = String(retryErr && retryErr.message ? retryErr.message : retryErr);
       const retryStillLocked =
@@ -113,25 +101,21 @@ async function launchBrowser(chromePath, userDataDir, profileDir, options = {}) 
     }
 
     log(
-      "Primary profile is locked by a running Chrome instance. Using a cloned local profile snapshot..."
+      "Primary profile is locked by a running browser instance. Using a cloned local profile snapshot..."
     );
 
     const clonedUserDataDir = await cloneProfileDir(userDataDir, profileDir);
 
-    return puppeteer.launch({
-      executablePath: chromePath,
-      headless,
-      defaultViewport: null,
+    return launchPersistentContext({
+      ...cbOptions,
       userDataDir: clonedUserDataDir,
-      args: launchArgs,
     });
   }
 }
 
 async function buildBrowserFromLocalProfile(options = {}) {
-  const chromePath = await getChromePath();
   const { userDataDir, profileDir } = resolveProfileConfig();
-  return launchBrowser(chromePath, userDataDir, profileDir, options);
+  return launchBrowser(userDataDir, profileDir, options);
 }
 
 module.exports = {

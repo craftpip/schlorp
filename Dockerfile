@@ -3,7 +3,6 @@ FROM node:20-bookworm-slim
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  chromium \
   ffmpeg \
   xvfb \
   fluxbox \
@@ -12,6 +11,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   websockify \
   fonts-liberation \
   ca-certificates \
+  libnspr4 \
+  libnss3 \
+  libatk1.0-0 \
+  libatk-bridge2.0-0 \
+  libatspi2.0-0 \
+  libxcomposite1 \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -19,13 +24,12 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
 
-RUN mkdir -p /data/chrome /app/media
+RUN mkdir -p /data/browser /app/media
 
 ENV NODE_ENV=production \
   PORT=3000 \
-  CHROME_PATH=/usr/bin/chromium \
-  CHROME_USER_DATA_DIR=/data/chrome \
-  CHROME_PROFILE_DIR=Default \
+  BROWSER_USER_DATA_DIR=/data/browser \
+  BROWSER_PROFILE_DIR=Default \
   HEADLESS=1 \
   API_HEADLESS=1 \
   AUTO_CONTINUE=1 \

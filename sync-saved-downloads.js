@@ -6,10 +6,10 @@ const path = require("path");
 
 const API_BASE = process.env.API_BASE || "http://localhost:3001";
 const STATE_FILE = process.env.SAVED_SYNC_STATE_FILE || path.resolve(__dirname, ".saved-sync-state.json");
-const MEDIA_ROOT_DIR = path.resolve(__dirname, "media");
+const QUEUE_FILE = process.env.SAVED_SYNC_QUEUE_FILE || path.resolve(__dirname, ".download-queue.json");
 const RETRY_DELAY_MS = Number(process.env.SAVED_SYNC_RETRY_DELAY_MS || 3000);
 const RETRY_COUNT = Number(process.env.SAVED_SYNC_RETRY_COUNT || 20);
-const DOWNLOAD_DELAY_MS = Number(process.env.SAVED_SYNC_DOWNLOAD_DELAY_MS || 20000);
+const MAX_COMPLETED_TRIM = 200;
 
 // Edit this list only: one saved URL per target folder.
 const SAVED_LISTS = [
@@ -22,6 +22,117 @@ const SAVED_LISTS = [
   { url: "https://www.instagram.com/whatwhatwhaaaaaaaat/saved/nipp/17909657295053658/", folder: "nipp" },
 ];
 
+// ---------------------------------------------------------------------------
+// Random helpers
+// ---------------------------------------------------------------------------
+
+function randomBetween(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function randomChoice(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ---------------------------------------------------------------------------
+// Queue management
+// ---------------------------------------------------------------------------
+
+async function loadQueue() {
+  try {
+    const raw = await fs.readFile(QUEUE_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") {
+      return { pending: [], completed: [] };
+    }
+    if (!Array.isArray(parsed.pending)) parsed.pending = [];
+    if (!Array.isArray(parsed.completed)) parsed.completed = [];
+    return parsed;
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      return { pending: [], completed: [] };
+    }
+    throw error;
+  }
+}
+
+async function saveQueue(queue) {
+  if (queue.completed.length > MAX_COMPLETED_TRIM) {
+    queue.completed = queue.completed.slice(-MAX_COMPLETED_TRIM);
+  }
+  const dir = path.dirname(QUEUE_FILE);
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(QUEUE_FILE, JSON.stringify(queue, null, 2), "utf8");
+}
+
+function enqueueUrls(queue, urls, folder, existingSeenUrls) {
+  const seenSet = new Set(existingSeenUrls.map((u) => normalizeUrl(u)));
+  let added = 0;
+  for (const url of urls) {
+    const normalized = normalizeUrl(url);
+    if (!normalized || seenSet.has(normalized)) continue;
+    const alreadyPending = queue.pending.some((item) => normalizeUrl(item.url) === normalized);
+    const alreadyCompleted = queue.completed.some((item) => normalizeUrl(item.url) === normalized);
+    if (alreadyPending || alreadyCompleted) continue;
+    queue.pending.push({
+      url,
+      folder,
+      addedAt: new Date().toISOString(),
+    });
+    seenSet.add(normalized);
+    added += 1;
+  }
+  return added;
+}
+
+function normalizeUrl(url) {
+  try {
+    const parsed = new URL(String(url || "").trim());
+    parsed.hash = "";
+    return parsed.href.replace(/\/+$/, "");
+  } catch {
+    return "";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// State management (backward compatible with existing format)
+// ---------------------------------------------------------------------------
+
+async function loadState() {
+  try {
+    const raw = await fs.readFile(STATE_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") {
+      return { lists: {}, updatedAt: null };
+    }
+    if (!parsed.lists || typeof parsed.lists !== "object") {
+      parsed.lists = {};
+    }
+    return parsed;
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      return { lists: {}, updatedAt: null };
+    }
+    throw error;
+  }
+}
+
+async function saveState(state) {
+  state.updatedAt = new Date().toISOString();
+  const dir = path.dirname(STATE_FILE);
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(STATE_FILE, JSON.stringify(state, null, 2), "utf8");
+}
+
+// ---------------------------------------------------------------------------
+// API helpers
+// ---------------------------------------------------------------------------
+
 class ApiError extends Error {
   constructor(message, options = {}) {
     super(message);
@@ -29,260 +140,6 @@ class ApiError extends Error {
     this.status = options.status || 0;
     this.retryable = Boolean(options.retryable);
   }
-}
-
-async function main() {
-  validateConfig();
-
-  const state = await loadState(STATE_FILE);
-  const apiBase = String(API_BASE).replace(/\/+$/, "");
-  let hadErrors = false;
-  let lastDownloadRequestAt = 0;
-
-  for (let i = 0; i < SAVED_LISTS.length; i += 1) {
-    const item = SAVED_LISTS[i];
-    const listState = state.lists[item.url] || {};
-    const lastSeenUrl = String(listState.lastSeenUrl || "").trim();
-    const endUrls = lastSeenUrl ? [lastSeenUrl] : [];
-
-    console.log(`\n[${i + 1}/${SAVED_LISTS.length}] Scanning saved list`);
-    console.log(`URL: ${item.url}`);
-    console.log(`Folder: ${item.folder}`);
-    if (lastSeenUrl) {
-      console.log(`Last seen marker: ${lastSeenUrl}`);
-    } else {
-      console.log("Last seen marker: <none> (first full sync)");
-    }
-
-    let scanResult;
-    try {
-      scanResult = await withRetries(
-        "scan-saved",
-        () => postJson(`${apiBase}/scan-saved`, { url: item.url, endUrls }),
-        RETRY_COUNT,
-        RETRY_DELAY_MS
-      );
-    } catch (error) {
-      hadErrors = true;
-      console.error(`[error] scan failed for ${item.url}: ${error.message}`);
-      if (isRateLimitError(error)) {
-        await stopSyncContainerOnRateLimit(state);
-        return;
-      }
-      continue;
-    }
-
-    const scannedUrls = Array.from(
-      new Set((Array.isArray(scanResult.urls) ? scanResult.urls : []).map((x) => String(x || "").trim()).filter(Boolean))
-    );
-
-    const newUrls = getNewUrlsSinceMarker(scannedUrls, lastSeenUrl);
-    if (!newUrls.length) {
-      console.log("No new posts since last scan.");
-      state.lists[item.url] = {
-        ...listState,
-        lastRunAt: new Date().toISOString(),
-      };
-      continue;
-    }
-
-    console.log(`Found ${newUrls.length} new post(s). Downloading...`);
-
-    const downloadQueue = [...newUrls].reverse();
-    let listFailed = false;
-    let successfulDownloads = 0;
-    const outputDir = resolveOutputDir(item.folder);
-
-    for (let idx = 0; idx < downloadQueue.length; idx += 1) {
-      const postUrl = downloadQueue[idx];
-      console.log(`\n[download ${idx + 1}/${downloadQueue.length}] ${postUrl}`);
-
-      try {
-        const postId = extractInstagramPostId(postUrl);
-        if (postId && (await hasPostIdFileInFolder(outputDir, postId))) {
-          console.log(`already found skipped: ${postUrl}`);
-          successfulDownloads += 1;
-          await checkpointListState(state, item, postUrl, successfulDownloads);
-          continue;
-        }
-
-        if (DOWNLOAD_DELAY_MS > 0) {
-          const elapsedMs = Date.now() - lastDownloadRequestAt;
-          const waitMs = DOWNLOAD_DELAY_MS - elapsedMs;
-          if (waitMs > 0) {
-            console.log(`sync download throttle: waiting ${Math.ceil(waitMs / 1000)}s before next download request...`);
-            await delay(waitMs);
-          }
-        }
-        lastDownloadRequestAt = Date.now();
-
-        await withRetries(
-          "download",
-          () => postDownload(`${apiBase}/download`, {
-            link: postUrl,
-            folder: item.folder,
-            maxQuality: item.maxQuality,
-          }),
-          RETRY_COUNT,
-          RETRY_DELAY_MS
-        );
-        successfulDownloads += 1;
-        await checkpointListState(state, item, postUrl, successfulDownloads);
-      } catch (error) {
-        listFailed = true;
-        hadErrors = true;
-        console.error(`[error] download failed: ${error.message}`);
-        if (isRateLimitError(error)) {
-          await stopSyncContainerOnRateLimit(state);
-          return;
-        }
-      }
-    }
-
-    if (listFailed) {
-      console.error("One or more downloads failed. Kept per-post checkpoint progress for this list.");
-      const currentState = state.lists[item.url] || listState;
-      state.lists[item.url] = {
-        ...currentState,
-        lastRunAt: new Date().toISOString(),
-      };
-      continue;
-    }
-
-    state.lists[item.url] = {
-      ...listState,
-      lastSeenUrl: scannedUrls[0] || lastSeenUrl,
-      lastRunAt: new Date().toISOString(),
-      lastDownloadedCount: newUrls.length,
-      folder: item.folder,
-    };
-
-    console.log(`Done: downloaded ${newUrls.length} post(s).`);
-  }
-
-  state.updatedAt = new Date().toISOString();
-  await saveState(STATE_FILE, state);
-  console.log(`\nState saved: ${STATE_FILE}`);
-
-  if (hadErrors) {
-    process.exitCode = 1;
-    console.log("Completed with errors.");
-  } else {
-    console.log("Completed successfully.");
-  }
-}
-
-function validateConfig() {
-  if (!Array.isArray(SAVED_LISTS) || SAVED_LISTS.length === 0) {
-    throw new Error("SAVED_LISTS is empty. Add at least one { url, folder } item in this script.");
-  }
-
-  for (const [index, item] of SAVED_LISTS.entries()) {
-    const url = String(item && item.url ? item.url : "").trim();
-    const folder = String(item && item.folder ? item.folder : "").trim();
-
-    if (!url) {
-      throw new Error(`SAVED_LISTS[${index}] is missing 'url'.`);
-    }
-    if (!folder) {
-      throw new Error(`SAVED_LISTS[${index}] is missing 'folder'.`);
-    }
-
-    try {
-      new URL(url);
-    } catch {
-      throw new Error(`SAVED_LISTS[${index}].url must be an absolute URL: ${url}`);
-    }
-  }
-}
-
-function getNewUrlsSinceMarker(scannedUrls, markerUrl) {
-  if (!markerUrl) return scannedUrls;
-  const markerIndex = scannedUrls.indexOf(markerUrl);
-  if (markerIndex === -1) return scannedUrls;
-  return scannedUrls.slice(0, markerIndex);
-}
-
-function resolveOutputDir(folder) {
-  const normalizedFolder = String(folder || "").replace(/\\/g, "/").trim();
-  const resolved = path.resolve(MEDIA_ROOT_DIR, normalizedFolder);
-  const relative = path.relative(MEDIA_ROOT_DIR, resolved);
-
-  if (!relative || relative === ".") return MEDIA_ROOT_DIR;
-  if (relative.startsWith("..") || path.isAbsolute(relative)) {
-    throw new Error("Invalid folder. Use a path inside media, e.g. 'hello' or 'hello/sub'.");
-  }
-
-  return resolved;
-}
-
-function extractInstagramPostId(rawUrl) {
-  try {
-    const parsed = new URL(String(rawUrl || "").trim());
-    const match = parsed.pathname.match(/^\/(?:reel|p|tv)\/([^/?#]+)\/?/i);
-    return match ? String(match[1] || "").trim().toLowerCase() : "";
-  } catch {
-    return "";
-  }
-}
-
-async function hasPostIdFileInFolder(folderPath, postId) {
-  if (!postId) return false;
-
-  try {
-    const entries = await fs.readdir(folderPath, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry || !entry.isFile || !entry.isFile()) continue;
-      const name = String(entry.name || "").toLowerCase();
-      if (name.includes(`-${postId}.`) || name.includes(`-${postId}-`)) {
-        return true;
-      }
-    }
-    return false;
-  } catch (error) {
-    if (error && error.code === "ENOENT") return false;
-    throw error;
-  }
-}
-
-async function checkpointListState(state, item, lastSeenUrl, downloadedCount) {
-  state.lists[item.url] = {
-    ...(state.lists[item.url] || {}),
-    lastSeenUrl,
-    lastRunAt: new Date().toISOString(),
-    lastDownloadedCount: downloadedCount,
-    folder: item.folder,
-  };
-  state.updatedAt = new Date().toISOString();
-  await saveState(STATE_FILE, state);
-}
-
-async function withRetries(label, fn, retryCount, retryDelayMs) {
-  let attempt = 0;
-  let lastError;
-
-  while (attempt < retryCount) {
-    attempt += 1;
-    try {
-      if (attempt > 1) {
-        console.log(`[retry] ${label} attempt ${attempt}/${retryCount}`);
-      }
-      return await fn();
-    } catch (error) {
-      lastError = error;
-      if (isRateLimitError(error)) {
-        throw error;
-      }
-      const retryable = Boolean(error && error.retryable);
-      if (!retryable || attempt >= retryCount) {
-        throw error;
-      }
-      console.log(`[retry] ${label} busy/unavailable. Waiting ${retryDelayMs}ms...`);
-      await delay(retryDelayMs);
-    }
-  }
-
-  throw lastError || new Error(`${label} failed`);
 }
 
 async function postJson(url, payload) {
@@ -372,33 +229,32 @@ async function postDownload(url, payload) {
   }
 }
 
-async function loadState(filePath) {
-  try {
-    const raw = await fs.readFile(filePath, "utf8");
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") {
-      return { lists: {}, updatedAt: null };
+async function withRetries(label, fn, retryCount, retryDelayMs) {
+  let attempt = 0;
+  let lastError;
+
+  while (attempt < retryCount) {
+    attempt += 1;
+    try {
+      if (attempt > 1) {
+        console.log(`[retry] ${label} attempt ${attempt}/${retryCount}`);
+      }
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (isRateLimitError(error)) {
+        throw error;
+      }
+      const retryable = Boolean(error && error.retryable);
+      if (!retryable || attempt >= retryCount) {
+        throw error;
+      }
+      console.log(`[retry] ${label} busy/unavailable. Waiting ${retryDelayMs}ms...`);
+      await sleep(retryDelayMs);
     }
-    if (!parsed.lists || typeof parsed.lists !== "object") {
-      parsed.lists = {};
-    }
-    return parsed;
-  } catch (error) {
-    if (error && error.code === "ENOENT") {
-      return { lists: {}, updatedAt: null };
-    }
-    throw error;
   }
-}
 
-async function saveState(filePath, state) {
-  const dir = path.dirname(filePath);
-  await fs.mkdir(dir, { recursive: true });
-  await fs.writeFile(filePath, JSON.stringify(state, null, 2), "utf8");
-}
-
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  throw lastError || new Error(`${label} failed`);
 }
 
 function isRateLimitMessage(message) {
@@ -423,16 +279,219 @@ function extractApiProcessFailureMessage(output) {
   return lastMessage;
 }
 
-async function stopSyncContainerOnRateLimit(state) {
-  console.log("429 detected. Stopping sync container now.");
-  state.updatedAt = new Date().toISOString();
-  try {
-    await saveState(STATE_FILE, state);
-    console.log(`State saved: ${STATE_FILE}`);
-  } catch (error) {
-    console.error(`[error] failed to save state before exit: ${error.message}`);
+// ---------------------------------------------------------------------------
+// Task: Scan a random list
+// ---------------------------------------------------------------------------
+
+async function scanRandomList(state, queue, apiBase) {
+  const scannedUrls = [];
+  for (const item of SAVED_LISTS) {
+    const listState = state.lists[item.url] || {};
+    const lastSeenUrl = String(listState.lastSeenUrl || "").trim();
+    if (lastSeenUrl) scannedUrls.push(lastSeenUrl);
   }
-  process.exit(0);
+
+  const unscannedLists = SAVED_LISTS.filter((item) => {
+    const listState = state.lists[item.url] || {};
+    const lastSeenUrl = String(listState.lastSeenUrl || "").trim();
+    return !lastSeenUrl;
+  });
+
+  let target;
+  if (unscannedLists.length > 0) {
+    target = randomChoice(unscannedLists);
+  } else {
+    target = randomChoice(SAVED_LISTS);
+  }
+
+  const listState = state.lists[target.url] || {};
+  const lastSeenUrl = String(listState.lastSeenUrl || "").trim();
+  const endUrls = lastSeenUrl ? [lastSeenUrl] : [];
+
+  console.log(`\n[scan] ${target.folder} | stop: ${lastSeenUrl || "<none>"}`);
+
+  let scanResult;
+  try {
+    scanResult = await withRetries(
+      "scan-saved",
+      () => postJson(`${apiBase}/scan-saved`, { url: target.url, endUrls }),
+      RETRY_COUNT,
+      RETRY_DELAY_MS
+    );
+  } catch (error) {
+    console.error(`[scan] failed: ${error.message}`);
+    if (isRateLimitError(error)) {
+      console.log("[scan] 429 detected. Waiting 30 min before next task...");
+      await sleep(30 * 60 * 1000);
+    }
+    return { scanned: false, list: target.folder };
+  }
+
+  const scannedPageUrls = Array.from(
+    new Set((Array.isArray(scanResult.urls) ? scanResult.urls : []).map((x) => String(x || "").trim()).filter(Boolean))
+  );
+
+  const added = enqueueUrls(queue, scannedPageUrls, target.folder, scannedUrls);
+
+  state.lists[target.url] = {
+    ...listState,
+    lastSeenUrl: scannedPageUrls[0] || lastSeenUrl,
+    lastRunAt: new Date().toISOString(),
+    lastScannedCount: scannedPageUrls.length,
+    folder: target.folder,
+  };
+
+  console.log(`[scan] ${target.folder}: ${scannedPageUrls.length} urls, ${added} new queued`);
+  return { scanned: true, list: target.folder, added };
+}
+
+// ---------------------------------------------------------------------------
+// Task: Download a random URL from queue
+// ---------------------------------------------------------------------------
+
+async function downloadRandomUrl(queue, apiBase) {
+  if (queue.pending.length === 0) return { downloaded: false };
+
+  const idx = randomBetween(0, queue.pending.length - 1);
+  const item = queue.pending[idx];
+
+  console.log(`\n[download] ${item.folder} | ${item.url}`);
+
+  try {
+    await withRetries(
+      "download",
+      () => postDownload(`${apiBase}/download`, {
+        link: item.url,
+        folder: item.folder,
+      }),
+      RETRY_COUNT,
+      RETRY_DELAY_MS
+    );
+
+    queue.pending.splice(idx, 1);
+    queue.completed.push({
+      url: item.url,
+      folder: item.folder,
+      downloadedAt: new Date().toISOString(),
+    });
+
+    console.log(`[download] done. Queue: ${queue.pending.length} pending`);
+    return { downloaded: true };
+  } catch (error) {
+    console.error(`[download] failed: ${error.message}`);
+    if (isRateLimitError(error)) {
+      console.log("[download] 429 detected. Waiting 30 min before next task...");
+      await sleep(30 * 60 * 1000);
+    }
+    return { downloaded: false };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function getTargetDownloadsPerHour(queue) {
+  if (queue.pending.length >= 50) return { min: 8, max: 12 };
+  if (queue.pending.length >= 20) return { min: 6, max: 10 };
+  if (queue.pending.length >= 5) return { min: 4, max: 8 };
+  return { min: 2, max: 5 };
+}
+
+function getTargetScansPerHour(queue) {
+  if (queue.pending.length < 5) return { min: 25, max: 45 };
+  if (queue.pending.length < 20) return { min: 30, max: 50 };
+  return { min: 40, max: 70 };
+}
+
+// ---------------------------------------------------------------------------
+// Main daemon loop
+// ---------------------------------------------------------------------------
+
+let shutdownRequested = false;
+
+process.on("SIGTERM", () => {
+  console.log("\n[shutdown] SIGTERM received. Finishing current task...");
+  shutdownRequested = true;
+});
+
+process.on("SIGINT", () => {
+  console.log("\n[shutdown] SIGINT received. Finishing current task...");
+  shutdownRequested = true;
+});
+
+async function main() {
+  console.log("Starting randomized sync daemon...");
+  console.log(`Lists: ${SAVED_LISTS.length}`);
+  console.log(`API: ${API_BASE}`);
+  console.log(`State: ${STATE_FILE}`);
+  console.log(`Queue: ${QUEUE_FILE}`);
+
+  const startupJitterMs = randomBetween(0, 5 * 60 * 1000);
+  console.log(`Startup jitter: ${Math.round(startupJitterMs / 1000)}s`);
+  await sleep(startupJitterMs);
+
+  const state = await loadState();
+  const queue = await loadQueue();
+  const apiBase = String(API_BASE).replace(/\/+$/, "");
+
+  console.log(`Queue: ${queue.pending.length} pending, ${queue.completed.length} completed`);
+
+  let lastBreakAt = Date.now();
+  let tasksSinceBreak = 0;
+
+  while (!shutdownRequested) {
+    const isDownloadQueueLow = queue.pending.length < 5;
+    const scanChance = isDownloadQueueLow ? 0.7 : 0.3;
+    const pickScan = Math.random() < scanChance;
+
+    const hoursSinceBreak = (Date.now() - lastBreakAt) / (1000 * 60 * 60);
+    if (hoursSinceBreak > 8 && tasksSinceBreak > 15 && Math.random() < 0.3) {
+      const breakMinutes = randomBetween(60, 90);
+      console.log(`\n[break] Taking a ${breakMinutes} min break...`);
+      await sleep(breakMinutes * 60 * 1000);
+      if (shutdownRequested) break;
+      lastBreakAt = Date.now();
+      tasksSinceBreak = 0;
+    }
+
+    try {
+      if (pickScan) {
+        await scanRandomList(state, queue, apiBase);
+        await saveState(state);
+        await saveQueue(queue);
+        tasksSinceBreak += 1;
+
+        const scanGap = getTargetScansPerHour(queue);
+        const waitMs = randomBetween(scanGap.min, scanGap.max) * 60 * 1000;
+        console.log(`[wait] Next task in ${Math.round(waitMs / 1000 / 60)} min (queue: ${queue.pending.length})`);
+        await sleep(waitMs);
+      } else if (queue.pending.length > 0) {
+        const result = await downloadRandomUrl(queue, apiBase);
+        await saveQueue(queue);
+        if (result.downloaded) {
+          await saveState(state);
+          tasksSinceBreak += 1;
+        }
+
+        const dlGap = getTargetDownloadsPerHour(queue);
+        const waitMs = randomBetween(dlGap.min, dlGap.max) * 60 * 1000;
+        console.log(`[wait] Next task in ${Math.round(waitMs / 1000 / 60)} min (queue: ${queue.pending.length})`);
+        await sleep(waitMs);
+      } else {
+        console.log("[idle] Queue empty. Scanning in 5 min...");
+        await sleep(5 * 60 * 1000);
+      }
+    } catch (error) {
+      console.error(`[error] ${error.message}`);
+      await sleep(5 * 60 * 1000);
+    }
+  }
+
+  console.log("[shutdown] Saving final state...");
+  await saveState(state);
+  await saveQueue(queue);
+  console.log("[shutdown] Done.");
 }
 
 main().catch((error) => {

@@ -166,7 +166,7 @@
   <body>
     <main class="card">
       <h1>Scan Saved</h1>
-      <p>Opens an independent Chrome tab, scrolls, and returns URLs + extracted IDs.</p>
+      <p>Opens an independent browser tab, scrolls, and returns URLs + extracted IDs.</p>
 
       <form id="scan-form">
         <label for="url-input">URL to scan</label>
@@ -249,7 +249,7 @@
         const targetUrl = String(urlInput.value || "").trim();
         const endUrls = parseEndUrls(endUrlsInput.value);
 
-        setStatus("Starting scan in a new Chrome tab...");
+        setStatus("Starting scan in a new browser tab...");
         metaEl.textContent = "";
         idsListEl.innerHTML = "";
         urlsListEl.innerHTML = "";
