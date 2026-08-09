@@ -118,6 +118,7 @@ async function waitForAutoCaptureWindow(page, getNetworkState, logLabel, log = c
 function parseCliArgs(rawArgs) {
   let linkOnly = false;
   let maxQuality = null;
+  let account = "";
   const args = [];
 
   for (let index = 0; index < rawArgs.length; index += 1) {
@@ -142,24 +143,42 @@ function parseCliArgs(rawArgs) {
       continue;
     }
 
+    if (arg === "--account") {
+      account = String(rawArgs[index + 1] || "").trim();
+      if (!account) {
+        throw new Error("--account requires a value, e.g. --account work");
+      }
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--account=")) {
+      account = arg.slice("--account=".length).trim();
+      if (!account) {
+        throw new Error("--account requires a value, e.g. --account work");
+      }
+      continue;
+    }
+
     args.push(arg);
   }
 
   if (!args.length) {
     throw new Error(
-      "Usage: node scan-videos.js [--link-only] [--max-quality <p>] <url1> [url2 ...] OR node scan-videos.js open-browser"
+      "Usage: node scan-videos.js [--link-only] [--max-quality <p>] [--account <name>] <url1> [url2 ...] OR node scan-videos.js open-browser [--account <name>]"
     );
   }
 
   const command = String(args[0] || "").toLowerCase();
   if (command === "open-browser") {
-    return { command };
+    return { command, account };
   }
 
   return {
     command: "scan",
     linkOnly,
     maxQuality,
+    account,
     inputUrls: args.map((raw) => normalizeUrl(raw)),
   };
 }
@@ -248,6 +267,7 @@ async function run(options = {}) {
         command: options.command || "scan",
         linkOnly: Boolean(options.linkOnly),
         maxQuality: parseMaxQualityInput(options.maxQuality),
+        account: String(options.account || "").trim(),
         inputUrls: Array.isArray(options.urls)
           ? options.urls.map((raw) => normalizeUrl(String(raw || "").trim())).filter(Boolean)
           : [],
@@ -270,17 +290,22 @@ async function run(options = {}) {
   const instagram429CooldownMs = parsePositiveInt(process.env.INSTAGRAM_429_COOLDOWN_MS, 300000);
 
   if (parsed.command === "open-browser") {
-    const browser = await buildBrowserFromLocalProfile({ headless: false, log });
+    const browserOptions = { headless: false, log };
+    if (parsed.account) {
+      browserOptions.account = parsed.account;
+    }
+    const browser = await buildBrowserFromLocalProfile(browserOptions);
     const page = await browser.newPage();
     await page.goto("https://www.google.com/", {
       waitUntil: "domcontentloaded",
       timeout: 60000,
     });
+    const accountMsg = parsed.account ? ` (account: ${parsed.account})` : "";
     const vncHint =
       process.env.ENABLE_VNC === "1"
         ? " Open http://localhost:7901/vnc.html to control the browser."
         : "";
-    await waitForEnter(`Browser is open on google.com. Use it to log in anywhere you want.${vncHint}`, {
+    await waitForEnter(`Browser is open on google.com${accountMsg}. Use it to log in anywhere you want.${vncHint}`, {
       forcePrompt: true,
       log,
     });
@@ -302,8 +327,11 @@ async function run(options = {}) {
     options.browser ||
     (await buildBrowserFromLocalProfile({
       headless: typeof options.headless === "boolean" ? options.headless : undefined,
+      account: parsed.account || undefined,
       log,
     }));
+
+  const failedTargets = [];
 
   try {
     for (let index = 0; index < parsed.inputUrls.length; index += 1) {
@@ -572,6 +600,7 @@ async function run(options = {}) {
         log(`\n=== Video/Media URLs found for ${targetUrl} ===`);
         if (!allVideos.length) {
           log("No video media URLs detected.");
+          failedTargets.push({ url: targetUrl, reason: "No video media URLs detected." });
           continue;
         }
         allVideos.forEach((u, i) => log(`${i + 1}. ${u}`));
@@ -584,6 +613,7 @@ async function run(options = {}) {
         });
         if (!downloadableUrls.length) {
           log("\nNo downloadable direct or stream URL found.");
+          failedTargets.push({ url: targetUrl, reason: "No downloadable direct or stream URL found." });
           continue;
         }
 
@@ -594,6 +624,10 @@ async function run(options = {}) {
 
         if (!qualityCappedUrls.length) {
           log(`\nNo downloadable media URL found at or below ${maxQuality}p.`);
+          failedTargets.push({
+            url: targetUrl,
+            reason: `No downloadable media URL at or below ${maxQuality}p.`,
+          });
           continue;
         }
 
@@ -823,8 +857,11 @@ async function run(options = {}) {
       await browser.close().catch(() => {});
     }
   }
+
+  return { urls: parsed.inputUrls, failedTargets };
 }
 
 module.exports = {
+  parseCliArgs,
   run,
 };

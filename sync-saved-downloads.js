@@ -3,6 +3,7 @@
 
 const fs = require("fs/promises");
 const path = require("path");
+const { normalizeAccountName } = require("./scan-videos/config");
 
 const API_BASE = process.env.API_BASE || "http://localhost:3001";
 const STATE_FILE = process.env.SAVED_SYNC_STATE_FILE || path.resolve(__dirname, ".saved-sync-state.json");
@@ -10,17 +11,6 @@ const QUEUE_FILE = process.env.SAVED_SYNC_QUEUE_FILE || path.resolve(__dirname, 
 const RETRY_DELAY_MS = Number(process.env.SAVED_SYNC_RETRY_DELAY_MS || 3000);
 const RETRY_COUNT = Number(process.env.SAVED_SYNC_RETRY_COUNT || 20);
 const MAX_COMPLETED_TRIM = 200;
-
-// Edit this list only: one saved URL per target folder.
-const SAVED_LISTS = [
-  { url: "https://www.instagram.com/whatwhatwhaaaaaaaat/saved/cosplay/18108968914608682/", folder: "cosplay" },
-  { url: "https://www.instagram.com/whatwhatwhaaaaaaaat/saved/k/18046180493635998/", folder: "k" },
-  { url: "https://www.instagram.com/whatwhatwhaaaaaaaat/saved/sexy/18094103047620020/", folder: "sexy" },
-  { url: "https://www.instagram.com/whatwhatwhaaaaaaaat/saved/pussy/18068979569102831/", folder: "pussy" },
-  { url: "https://www.instagram.com/whatwhatwhaaaaaaaat/saved/ass/18139114003414587/", folder: "ass" },
-  { url: "https://www.instagram.com/whatwhatwhaaaaaaaat/saved/boobs/18074138810302982/", folder: "boobs" },
-  { url: "https://www.instagram.com/whatwhatwhaaaaaaaat/saved/nipp/17909657295053658/", folder: "nipp" },
-];
 
 // ---------------------------------------------------------------------------
 // Random helpers
@@ -108,25 +98,31 @@ async function loadState() {
     const raw = await fs.readFile(STATE_FILE, "utf8");
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") {
-      return { lists: {}, updatedAt: null };
+      return { config: { accounts: [], savedLists: [] }, lists: {}, updatedAt: null };
     }
+    if (!parsed.config || typeof parsed.config !== "object") {
+      parsed.config = { accounts: [], savedLists: [] };
+    }
+    if (!Array.isArray(parsed.config.accounts)) parsed.config.accounts = [];
+    if (!Array.isArray(parsed.config.savedLists)) parsed.config.savedLists = [];
     if (!parsed.lists || typeof parsed.lists !== "object") {
       parsed.lists = {};
     }
     return parsed;
   } catch (error) {
     if (error && error.code === "ENOENT") {
-      return { lists: {}, updatedAt: null };
+      return { config: { accounts: [], savedLists: [] }, lists: {}, updatedAt: null };
     }
     throw error;
   }
 }
 
 async function saveState(state) {
-  state.updatedAt = new Date().toISOString();
+  const preserved = { ...state };
+  preserved.updatedAt = new Date().toISOString();
   const dir = path.dirname(STATE_FILE);
   await fs.mkdir(dir, { recursive: true });
-  await fs.writeFile(STATE_FILE, JSON.stringify(state, null, 2), "utf8");
+  await fs.writeFile(STATE_FILE, JSON.stringify(preserved, null, 2), "utf8");
 }
 
 // ---------------------------------------------------------------------------
@@ -284,14 +280,20 @@ function extractApiProcessFailureMessage(output) {
 // ---------------------------------------------------------------------------
 
 async function scanRandomList(state, queue, apiBase) {
+  const savedLists = Array.isArray(state.config.savedLists) ? state.config.savedLists : [];
+  if (!savedLists.length) {
+    console.log("[scan] No saved lists configured in config.savedLists. Add entries to .saved-sync-state.json");
+    return { scanned: false, list: "<none>" };
+  }
+
   const scannedUrls = [];
-  for (const item of SAVED_LISTS) {
+  for (const item of savedLists) {
     const listState = state.lists[item.url] || {};
     const lastSeenUrl = String(listState.lastSeenUrl || "").trim();
     if (lastSeenUrl) scannedUrls.push(lastSeenUrl);
   }
 
-  const unscannedLists = SAVED_LISTS.filter((item) => {
+  const unscannedLists = savedLists.filter((item) => {
     const listState = state.lists[item.url] || {};
     const lastSeenUrl = String(listState.lastSeenUrl || "").trim();
     return !lastSeenUrl;
@@ -301,20 +303,21 @@ async function scanRandomList(state, queue, apiBase) {
   if (unscannedLists.length > 0) {
     target = randomChoice(unscannedLists);
   } else {
-    target = randomChoice(SAVED_LISTS);
+    target = randomChoice(savedLists);
   }
 
   const listState = state.lists[target.url] || {};
   const lastSeenUrl = String(listState.lastSeenUrl || "").trim();
   const endUrls = lastSeenUrl ? [lastSeenUrl] : [];
+  const account = normalizeAccountName(target.account);
 
-  console.log(`\n[scan] ${target.folder} | stop: ${lastSeenUrl || "<none>"}`);
+  console.log(`\n[scan] ${target.folder} (account: ${account}) | stop: ${lastSeenUrl || "<none>"}`);
 
   let scanResult;
   try {
     scanResult = await withRetries(
       "scan-saved",
-      () => postJson(`${apiBase}/scan-saved`, { url: target.url, endUrls }),
+      () => postJson(`${apiBase}/scan-saved`, { url: target.url, endUrls, account }),
       RETRY_COUNT,
       RETRY_DELAY_MS
     );
@@ -422,7 +425,6 @@ process.on("SIGINT", () => {
 
 async function main() {
   console.log("Starting randomized sync daemon...");
-  console.log(`Lists: ${SAVED_LISTS.length}`);
   console.log(`API: ${API_BASE}`);
   console.log(`State: ${STATE_FILE}`);
   console.log(`Queue: ${QUEUE_FILE}`);
@@ -435,6 +437,8 @@ async function main() {
   const queue = await loadQueue();
   const apiBase = String(API_BASE).replace(/\/+$/, "");
 
+  const savedLists = Array.isArray(state.config.savedLists) ? state.config.savedLists : [];
+  console.log(`Saved lists: ${savedLists.length}`);
   console.log(`Queue: ${queue.pending.length} pending, ${queue.completed.length} completed`);
 
   let lastBreakAt = Date.now();

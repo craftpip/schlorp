@@ -24,12 +24,13 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
 
-RUN mkdir -p /data/browser /app/media
+RUN mkdir -p /data/browser /data/cloakbrowser /app/media
 
 ENV NODE_ENV=production \
   PORT=3000 \
   BROWSER_USER_DATA_DIR=/data/browser \
   BROWSER_PROFILE_DIR=Default \
+  CLOAKBROWSER_CACHE_DIR=/data/cloakbrowser \
   HEADLESS=1 \
   API_HEADLESS=1 \
   AUTO_CONTINUE=1 \

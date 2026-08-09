@@ -15,11 +15,13 @@ services:
       ENABLE_VNC: 1
       BROWSER_USER_DATA_DIR: /data/browser
       BROWSER_PROFILE_DIR: Default
+      CLOAKBROWSER_CACHE_DIR: /data/cloakbrowser
     volumes:
       - .:/app
       - /app/node_modules
       - /mnt/media2t/downloads/studies/xdl:/app/media
       - browser-data:/data/browser
+      - cloakbrowser-cache:/data/cloakbrowser
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 15s
@@ -45,3 +47,4 @@ services:
 
 volumes:
   browser-data:
+  cloakbrowser-cache:

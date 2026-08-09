@@ -4,7 +4,7 @@
   "description": "",
   "main": "scan-videos.js",
   "scripts": {
-    "test": "echo \"No test suite configured\"",
+    "test": "node --test",
     "api": "node api-server.js",
     "start": "node api-server.js",
     "start:local": "node api-server.js",

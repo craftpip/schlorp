@@ -1,7 +1,7 @@
 const fs = require("fs/promises");
 const os = require("os");
 const path = require("path");
-const { shouldRunHeadless, resolveProfileConfig } = require("./config");
+const { shouldRunHeadless, resolveProfileConfig, resolveAccountConfig } = require("./config");
 
 async function getCloakBrowser() {
   return import("cloakbrowser/puppeteer");
@@ -56,9 +56,15 @@ async function launchBrowser(userDataDir, profileDir, options = {}) {
   const headless =
     typeof options.headless === "boolean" ? options.headless : shouldRunHeadless();
   const log = typeof options.log === "function" ? options.log : console.log;
+
+  if (!headless && !process.env.DISPLAY && process.env.ENABLE_VNC === "1") {
+    process.env.DISPLAY = ":99";
+  }
+
   const { launchPersistentContext } = await getCloakBrowser();
 
-  if (process.env.BROWSER_PATH) {
+  if (process.env.BROWSER_PATH && !process.env.CLOAKBROWSER_BINARY_PATH) {
+    log("BROWSER_PATH is deprecated; use CLOAKBROWSER_BINARY_PATH instead.");
     process.env.CLOAKBROWSER_BINARY_PATH = process.env.BROWSER_PATH;
   }
 
@@ -82,6 +88,7 @@ async function launchBrowser(userDataDir, profileDir, options = {}) {
       message.includes("browser is already running") ||
       message.includes("profile appears to be in use") ||
       message.includes("Chromium has locked the profile") ||
+      message.includes("Opening in existing browser session") ||
       message.includes("Failed to launch the browser process:  Code: 21");
     if (!lockError) throw err;
 
@@ -96,6 +103,7 @@ async function launchBrowser(userDataDir, profileDir, options = {}) {
         retryMessage.includes("browser is already running") ||
         retryMessage.includes("profile appears to be in use") ||
         retryMessage.includes("Chromium has locked the profile") ||
+        retryMessage.includes("Opening in existing browser session") ||
         retryMessage.includes("Failed to launch the browser process:  Code: 21");
       if (!retryStillLocked) throw retryErr;
     }
@@ -114,8 +122,27 @@ async function launchBrowser(userDataDir, profileDir, options = {}) {
 }
 
 async function buildBrowserFromLocalProfile(options = {}) {
+  const log = typeof options.log === "function" ? options.log : console.log;
+
+  if (options.account) {
+    const appConfig = await resolveAppConfigWithRetry(log);
+    const config = resolveAccountConfig(options.account, appConfig.accounts);
+    log(`Using account "${options.account}" -> ${config.userDataDir}/${config.profileDir}`);
+    return launchBrowser(config.userDataDir, config.profileDir, options);
+  }
+
   const { userDataDir, profileDir } = resolveProfileConfig();
   return launchBrowser(userDataDir, profileDir, options);
+}
+
+async function resolveAppConfigWithRetry(log) {
+  try {
+    const { loadAppConfig } = require("./config");
+    return await loadAppConfig();
+  } catch (err) {
+    log(`Warning: could not load account config: ${err.message}`);
+    return { accounts: [], savedLists: [] };
+  }
 }
 
 module.exports = {

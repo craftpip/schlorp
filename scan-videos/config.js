@@ -1,3 +1,5 @@
+const fs = require("fs/promises");
+const path = require("path");
 const readline = require("readline");
 
 function parseBooleanEnv(name, fallback) {
@@ -81,6 +83,45 @@ function resolveProfileConfig() {
   return { userDataDir, profileDir };
 }
 
+function getStateFilePath() {
+  return (
+    process.env.SAVED_SYNC_STATE_FILE ||
+    path.resolve(__dirname, "..", ".saved-sync-state.json")
+  );
+}
+
+async function loadAppConfig() {
+  const statePath = getStateFilePath();
+  try {
+    const raw = await fs.readFile(statePath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.config === "object" && parsed.config) {
+      return {
+        accounts: Array.isArray(parsed.config.accounts) ? parsed.config.accounts : [],
+        savedLists: Array.isArray(parsed.config.savedLists) ? parsed.config.savedLists : [],
+      };
+    }
+  } catch {
+    // file missing or unparseable
+  }
+  return { accounts: [], savedLists: [] };
+}
+
+function resolveAccountConfig(accountName, accounts) {
+  const match = Array.isArray(accounts)
+    ? accounts.find((a) => a && a.name === accountName)
+    : null;
+  const defaults = resolveProfileConfig();
+  return {
+    userDataDir: (match && match.userDataDir) || defaults.userDataDir,
+    profileDir: (match && match.profileDir) || defaults.profileDir,
+  };
+}
+
+function normalizeAccountName(value) {
+  return String(value || "").trim() || "default";
+}
+
 module.exports = {
   shouldRunHeadless,
   shouldAutoContinuePrompts,
@@ -88,4 +129,8 @@ module.exports = {
   waitForEnter,
   normalizeUrl,
   resolveProfileConfig,
+  loadAppConfig,
+  resolveAccountConfig,
+  normalizeAccountName,
+  getStateFilePath,
 };

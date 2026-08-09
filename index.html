@@ -3,357 +3,1569 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Video Downloader</title>
+    <title>xdl</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2310b981'/%3E%3Cpath d='M12 9v14l11-7z' fill='white'/%3E%3C/svg%3E"
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"
+      crossorigin="anonymous"
+    />
     <style>
       :root {
-        --bg-start: #f4efe2;
-        --bg-end: #e6f1ef;
-        --card: #ffffffcc;
-        --text: #1f2933;
-        --muted: #5a6673;
-        --accent: #0f766e;
-        --accent-hover: #115e59;
-        --border: #d5dde5;
-        --error: #b42318;
-        --ok: #027a48;
+        --bg: #0b0b0e;
+        --bg-2: #101015;
+        --panel: #16161b;
+        --panel-2: #1c1c22;
+        --border: #26262e;
+        --border-2: #31313b;
+        --text: #f2f2f4;
+        --muted: #90909b;
+        --muted-2: #666672;
+        --accent: #10b981;
+        --accent-bright: #34d399;
+        --accent-dim: rgba(16, 185, 129, 0.12);
+        --accent-border: rgba(16, 185, 129, 0.42);
+        --danger: #f05454;
+        --ok: #22c55e;
+        --warn: #f59e0b;
+        --info: #38bdf8;
+        --radius: 14px;
+        --font: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       }
 
       * {
         box-sizing: border-box;
       }
 
+      html,
       body {
         margin: 0;
-        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      }
+
+      body {
+        background: radial-gradient(1200px 700px at 85% -10%, rgba(16, 185, 129, 0.09), transparent 60%),
+          var(--bg);
         color: var(--text);
-        background: linear-gradient(140deg, var(--bg-start), var(--bg-end));
-        min-height: 100vh;
-        display: grid;
-        place-items: center;
-        padding: 24px;
+        font-family: var(--font);
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
       }
 
-      .card {
-        width: min(760px, 100%);
-        background: var(--card);
-        border: 1px solid var(--border);
-        border-radius: 16px;
-        padding: 24px;
-        backdrop-filter: blur(8px);
+      ::selection {
+        background: rgba(16, 185, 129, 0.35);
       }
 
-      h1 {
-        margin: 0 0 8px;
-        font-size: 1.6rem;
+      ::-webkit-scrollbar {
+        width: 10px;
+        height: 10px;
       }
-
-      p {
-        margin: 0 0 18px;
-        color: var(--muted);
+      ::-webkit-scrollbar-track {
+        background: transparent;
       }
-
-      form {
-        display: grid;
-        gap: 12px;
+      ::-webkit-scrollbar-thumb {
+        background: #2b2b33;
+        border-radius: 8px;
+        border: 2px solid var(--bg);
+        background-clip: content-box;
       }
-
-      .controls {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        flex-wrap: wrap;
-      }
-
-      .queue-progress {
-        margin-top: 16px;
-      }
-
-      .queue-progress__label {
-        font-size: 0.85rem;
-        color: var(--muted);
-        margin-bottom: 6px;
-      }
-
-      .queue-progress__bar {
-        width: 100%;
-        height: 12px;
-        background: #e2e8f0;
-        border-radius: 999px;
-        overflow: hidden;
-      }
-
-      .queue-progress__bar span {
-        display: block;
-        height: 100%;
-        width: 0;
-        background: linear-gradient(90deg, var(--accent), #4ade80);
-        transition: width 0.25s ease;
-      }
-
-      textarea {
-        width: 100%;
-        padding: 12px;
-        border-radius: 10px;
-        border: 1px solid var(--border);
-        font-size: 1rem;
-        min-height: 120px;
-        resize: vertical;
-        font-family: inherit;
-      }
-
-      input[type="text"],
-      select {
-        width: 100%;
-        padding: 10px 12px;
-        border-radius: 10px;
-        border: 1px solid var(--border);
-        font-size: 0.95rem;
-        background: #fff;
+      ::-webkit-scrollbar-thumb:hover {
+        background: #3a3a44;
+        background-clip: content-box;
+        border: 2px solid var(--bg);
       }
 
       button {
-        width: fit-content;
-        border: 0;
-        border-radius: 10px;
-        padding: 10px 16px;
-        background: var(--accent);
-        color: white;
-        font-weight: 600;
-        cursor: pointer;
-        transition: background 0.2s ease;
+        font-family: inherit;
       }
 
-      button:hover {
-        background: var(--accent-hover);
+      :focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
       }
 
-      button.secondary {
-        background: #3f4b59;
+      .app-shell {
+        display: flex;
+        min-height: 100vh;
       }
 
-      button.secondary:hover {
-        background: #2f3945;
+      .sidebar {
+        width: 236px;
+        flex-shrink: 0;
+        background: linear-gradient(180deg, #0e0e12, #0b0b0e);
+        border-right: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        position: sticky;
+        top: 0;
+        height: 100vh;
+        padding: 18px 12px;
+        gap: 4px;
       }
 
-      button.danger {
-        background: #b42318;
-      }
-
-      button.danger:hover {
-        background: #912018;
-      }
-
-      button:disabled {
-        opacity: 0.7;
-        cursor: wait;
-      }
-
-      .status {
-        margin-top: 14px;
-        min-height: 24px;
-        font-size: 0.95rem;
-      }
-
-      .status.error {
-        color: var(--error);
-      }
-
-      .status.ok {
-        color: var(--ok);
-      }
-
-      .results {
-        margin-top: 14px;
-        display: grid;
+      .brand {
+        display: flex;
+        align-items: center;
         gap: 10px;
+        padding: 6px 10px 20px;
+        font-size: 20px;
+        font-weight: 800;
+        letter-spacing: 0.01em;
+        color: #fff;
       }
 
-      .result.running {
-        border-color: var(--accent);
+      .brand .mark {
+        width: 30px;
+        height: 30px;
+        border-radius: 9px;
+        background: linear-gradient(135deg, var(--accent), #047857);
+        display: grid;
+        place-items: center;
+        font-size: 15px;
+        color: #fff;
+        box-shadow: 0 0 16px rgba(16, 185, 129, 0.45);
       }
 
-      .result.done {
-        border-color: #9ed8c7;
+      .sidebar nav {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
       }
 
-      .result.error {
-        border-color: #f0b8b8;
-      }
-
-      .result {
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        padding: 10px;
-        background: #fff;
-      }
-
-      .result a {
-        color: var(--accent);
+      .sidebar .nav-link {
+        position: relative;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        color: var(--muted);
         text-decoration: none;
+        padding: 9px 12px;
+        border-radius: 10px;
+        font-size: 14px;
+        font-weight: 500;
+        transition: background 0.15s ease, color 0.15s ease;
+      }
+
+      .sidebar .nav-link i {
+        width: 18px;
+        text-align: center;
+        font-size: 15px;
+      }
+
+      .sidebar .nav-link:hover {
+        color: #fff;
+        background: rgba(255, 255, 255, 0.05);
+      }
+
+      .sidebar .nav-link.active {
+        color: #fff;
+        background: linear-gradient(90deg, var(--accent-dim), transparent);
+      }
+
+      .sidebar .nav-link.active::before {
+        content: "";
+        position: absolute;
+        left: -12px;
+        top: 8px;
+        bottom: 8px;
+        width: 3px;
+        border-radius: 0 3px 3px 0;
+        background: linear-gradient(180deg, var(--accent), var(--accent-bright));
+        box-shadow: 0 0 10px rgba(16, 185, 129, 0.6);
+      }
+
+      .sidebar-footer {
+        border-top: 1px solid var(--border);
+        padding: 14px 10px 4px;
+        font-size: 12.5px;
+        color: var(--muted);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .health-dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: #3a3a44;
+      }
+
+      .health-dot.online {
+        background: var(--ok);
+        animation: pulse 2s infinite;
+      }
+
+      .health-dot.offline {
+        background: var(--danger);
+        box-shadow: 0 0 8px rgba(240, 84, 84, 0.7);
+      }
+
+      @keyframes pulse {
+        0%, 100% {
+          box-shadow: 0 0 4px rgba(34, 197, 94, 0.4);
+        }
+        50% {
+          box-shadow: 0 0 12px rgba(34, 197, 94, 0.95);
+        }
+      }
+
+      .content {
+        flex: 1;
+        min-width: 0;
+        width: 100%;
+        max-width: 1320px;
+        margin: 0 auto;
+        padding: 28px 32px 48px;
+      }
+
+      .view {
+        display: none;
+      }
+
+      .view.active {
+        display: block;
+        animation: fadeIn 0.18s ease;
+      }
+
+      @keyframes fadeIn {
+        from {
+          opacity: 0;
+          transform: translateY(4px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+
+      .view-title {
+        font-size: 26px;
+        font-weight: 800;
+        letter-spacing: -0.01em;
+        margin: 0 0 4px;
+      }
+
+      .view-sub {
+        color: var(--muted);
+        margin: 0 0 22px;
+        font-size: 13.5px;
+      }
+
+      /* ---------- Cards ---------- */
+      .card {
+        border-radius: var(--radius);
+        border: 1px solid var(--border);
+        background: var(--panel);
+      }
+
+      .card-body {
+        padding: 20px;
+      }
+
+      .card-title {
+        font-size: 13.5px;
+        font-weight: 700;
+        letter-spacing: 0.01em;
+        margin: 0 0 14px;
+        color: #e8e8ec;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .card-title i {
+        color: var(--accent);
+      }
+
+      /* ---------- Stat cards ---------- */
+      .stat-card {
+        position: relative;
+        overflow: hidden;
+        border-radius: var(--radius);
+        border: 1px solid var(--border);
+        background: linear-gradient(160deg, var(--panel), var(--bg-2));
+        padding: 18px;
+        height: 100%;
+        transition: border-color 0.15s ease, transform 0.15s ease;
+      }
+
+      .stat-card:hover {
+        border-color: var(--border-2);
+        transform: translateY(-1px);
+      }
+
+      .stat-card::after {
+        content: "";
+        position: absolute;
+        inset: auto -30% -70% auto;
+        width: 60%;
+        height: 130%;
+        background: radial-gradient(closest-side, var(--accent-dim), transparent);
+        pointer-events: none;
+      }
+
+      .stat-label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.09em;
+        color: var(--muted-2);
         font-weight: 600;
       }
 
-      .result a:hover {
-        text-decoration: underline;
+      .stat-value {
+        font-size: 30px;
+        font-weight: 800;
+        line-height: 1.1;
+        margin: 2px 0;
       }
 
-      .label {
-        font-size: 0.78rem;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
+      /* ---------- Buttons ---------- */
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 7px;
+        border: 1px solid transparent;
+        border-radius: 10px;
+        padding: 9px 16px;
+        font-size: 13.5px;
+        font-weight: 600;
+        font-family: inherit;
+        cursor: pointer;
+        transition: all 0.15s ease;
+        text-decoration: none;
+        color: #fff;
+        background: var(--panel-2);
+        white-space: nowrap;
+      }
+
+      .btn:hover {
+        filter: brightness(1.1);
+      }
+
+      .btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+        filter: none;
+      }
+
+      .btn-success,
+      .btn-primary {
+        background: linear-gradient(135deg, var(--accent), #047857);
+        box-shadow: 0 2px 14px rgba(16, 185, 129, 0.35);
+      }
+
+      .btn-success:hover,
+      .btn-primary:hover {
+        background: linear-gradient(135deg, #34d399, #10b981);
+        box-shadow: 0 4px 22px rgba(16, 185, 129, 0.5);
+      }
+
+      .btn-outline-success {
+        background: transparent;
+        border-color: var(--accent-border);
+        color: var(--accent-bright);
+      }
+
+      .btn-outline-success:hover {
+        background: var(--accent-dim);
+        color: #fff;
+      }
+
+      .btn-outline-danger {
+        background: transparent;
+        border-color: rgba(240, 84, 84, 0.35);
+        color: var(--danger);
+      }
+
+      .btn-outline-danger:hover {
+        background: rgba(240, 84, 84, 0.15);
+        color: #fff;
+      }
+
+      .btn-outline-secondary {
+        background: transparent;
+        border-color: var(--border-2);
         color: var(--muted);
-        margin-bottom: 6px;
       }
 
-      .src {
-        margin-top: 6px;
-        color: var(--muted);
-        font-size: 0.85rem;
-        word-break: break-word;
+      .btn-outline-secondary:hover {
+        background: rgba(255, 255, 255, 0.05);
+        color: #fff;
+        border-color: var(--muted);
       }
 
-      .path {
-        margin-top: 6px;
-        color: var(--muted);
-        font-size: 0.85rem;
-        word-break: break-word;
-      }
-
-      .json {
-        margin-top: 8px;
-        padding: 10px;
+      .btn-sm {
+        padding: 6px 11px;
+        font-size: 12.5px;
         border-radius: 8px;
+      }
+
+      /* ---------- Forms ---------- */
+      .form-label {
+        display: block;
+        font-size: 12px;
+        color: var(--muted);
+        margin: 0 0 6px;
+        font-weight: 500;
+      }
+
+      .form-control {
+        width: 100%;
+        background: var(--bg-2);
         border: 1px solid var(--border);
-        background: #f8fafb;
+        border-radius: 10px;
         color: var(--text);
-        font-size: 0.8rem;
-        height: 200px;
+        padding: 10px 12px;
+        font-size: 13.5px;
+        font-family: inherit;
+        transition: border-color 0.15s ease, box-shadow 0.15s ease;
+      }
+
+      textarea.form-control {
+        resize: vertical;
+      }
+
+      .form-control:focus {
+        outline: none;
+        border-color: var(--accent-border);
+        box-shadow: 0 0 0 3px var(--accent-dim);
+      }
+
+      .form-select {
+        width: 100%;
+        appearance: none;
+        background-color: var(--bg-2);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        color: var(--text);
+        padding: 10px 32px 10px 12px;
+        font-size: 13.5px;
+        font-family: inherit;
+        cursor: pointer;
+        background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+          linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+        background-position: calc(100% - 18px) 50%, calc(100% - 13px) 50%;
+        background-size: 5px 5px;
+        background-repeat: no-repeat;
+        transition: border-color 0.15s ease, box-shadow 0.15s ease;
+      }
+
+      .form-select:focus {
+        outline: none;
+        border-color: var(--accent-border);
+        box-shadow: 0 0 0 3px var(--accent-dim);
+      }
+
+      .form-select option {
+        background: var(--bg-2);
+        color: var(--text);
+      }
+
+      /* ---------- Grid ---------- */
+      .row {
+        display: grid;
+        grid-template-columns: repeat(12, 1fr);
+        gap: 16px;
+      }
+
+      .col-12 { grid-column: span 12; }
+      .col-sm-6 { grid-column: span 12; }
+      .col-md-4 { grid-column: span 12; }
+      .col-md-6 { grid-column: span 12; }
+      .col-md-8 { grid-column: span 12; }
+      .col-lg-6 { grid-column: span 12; }
+      .col-xl-3 { grid-column: span 12; }
+
+      @media (min-width: 576px) {
+        .col-sm-6 { grid-column: span 6; }
+      }
+      @media (min-width: 768px) {
+        .col-md-4 { grid-column: span 4; }
+        .col-md-6 { grid-column: span 6; }
+        .col-md-8 { grid-column: span 8; }
+      }
+      @media (min-width: 992px) {
+        .col-lg-6 { grid-column: span 6; }
+      }
+      @media (min-width: 1200px) {
+        .col-xl-3 { grid-column: span 3; }
+      }
+
+      /* ---------- Layout utilities ---------- */
+      .d-flex { display: flex; }
+      .flex-column { flex-direction: column; }
+      .flex-wrap { flex-wrap: wrap; }
+      .align-items-center { align-items: center; }
+      .align-items-start { align-items: flex-start; }
+      .justify-content-between { justify-content: space-between; }
+      .justify-content-end { justify-content: flex-end; }
+      .gap-1 { gap: 4px; }
+      .gap-2 { gap: 8px; }
+      .gap-3 { gap: 16px; }
+      .flex-grow-1 { flex-grow: 1; }
+      .min-w-0 { min-width: 0; }
+      .d-none { display: none !important; }
+      .d-grid { display: grid; }
+
+      .mb-0 { margin-bottom: 0; }
+      .mb-1 { margin-bottom: 4px; }
+      .mb-2 { margin-bottom: 8px; }
+      .mb-3 { margin-bottom: 16px; }
+      .mb-4 { margin-bottom: 24px; }
+      .mt-1 { margin-top: 4px; }
+      .mt-2 { margin-top: 8px; }
+      .mt-3 { margin-top: 16px; }
+      .me-1 { margin-right: 4px; }
+      .ms-2 { margin-left: 8px; }
+
+      .small { font-size: 12.5px; }
+      .fw-semibold { font-weight: 600; }
+      .text-muted { color: var(--muted); }
+      .text-danger { color: var(--danger); }
+      .text-end { text-align: right; }
+
+      /* ---------- Badges / pills ---------- */
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 3px 9px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.03em;
+        line-height: 1.5;
+        white-space: nowrap;
+      }
+
+      .text-bg-success { background: rgba(34, 197, 94, 0.14); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.3); }
+      .text-bg-danger { background: rgba(240, 84, 84, 0.14); color: #ff8f8f; border: 1px solid rgba(240, 84, 84, 0.35); }
+      .text-bg-primary { background: rgba(16, 185, 129, 0.18); color: #6ee7b7; border: 1px solid rgba(16, 185, 129, 0.45); }
+      .text-bg-secondary { background: rgba(255, 255, 255, 0.06); color: var(--muted); border: 1px solid var(--border-2); }
+      .text-bg-warning { background: rgba(245, 158, 11, 0.14); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.35); }
+      .text-bg-info { background: rgba(56, 189, 248, 0.14); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.35); }
+
+      .badge-domain {
+        background: var(--bg-2);
+        color: var(--muted);
+        border: 1px solid var(--border-2);
+      }
+
+      /* ---------- Progress ---------- */
+      .progress {
+        height: 8px;
+        border-radius: 999px;
+        background: var(--bg-2);
+        overflow: hidden;
+      }
+
+      .progress-bar {
+        height: 100%;
+        border-radius: 999px;
+        background: linear-gradient(90deg, var(--accent), #34d399);
+        transition: width 0.3s ease;
+      }
+
+      /* ---------- Status ---------- */
+      .status-text {
+        font-size: 13px;
+        min-height: 18px;
+        color: var(--muted);
+      }
+
+      .status-text.error {
+        color: var(--danger);
+      }
+
+      .status-text.ok {
+        color: #4ade80;
+      }
+
+      /* ---------- Console ---------- */
+      .console {
+        background: #0a0a0d;
+        border: 1px solid var(--border);
+        color: #c9c9d4;
+        border-radius: 12px;
+        padding: 14px 16px;
+        font-size: 12.5px;
+        line-height: 1.55;
+        max-height: 60vh;
         overflow: auto;
         white-space: pre-wrap;
         word-break: break-word;
+        font-family: var(--mono);
       }
 
-      .queue-url {
-        font-size: 0.9rem;
-        word-break: break-word;
+      .console.small {
+        max-height: 280px;
+        font-size: 12px;
       }
 
-      .queue-state {
-        margin-top: 6px;
+      summary.small {
         color: var(--muted);
-        font-size: 0.85rem;
-      }
-
-      .downloads-list {
-        margin-top: 8px;
-        display: grid;
+        cursor: pointer;
+        user-select: none;
+        display: inline-flex;
+        align-items: center;
         gap: 6px;
       }
 
-      .item-actions {
-        margin-top: 10px;
-        display: flex;
-        gap: 8px;
-        flex-wrap: wrap;
+      summary.small::before {
+        content: "";
+        width: 0;
+        height: 0;
+        border-left: 5px solid var(--accent);
+        border-top: 4px solid transparent;
+        border-bottom: 4px solid transparent;
+        transition: transform 0.15s ease;
       }
 
-      .item-actions button {
-        padding: 6px 10px;
-        font-size: 0.82rem;
+      details[open] summary.small::before {
+        transform: rotate(90deg);
       }
+
+      /* ---------- Lists / rows ---------- */
+      .empty {
+        color: var(--muted-2);
+        font-size: 13px;
+        padding: 14px 0;
+      }
+
+      .queue-url {
+        word-break: break-all;
+        font-size: 13px;
+        color: #e8e8ec;
+      }
+
+      .file-path {
+        font-size: 11.5px;
+        color: var(--muted-2);
+        word-break: break-all;
+        font-family: var(--mono);
+      }
+
+      .result-row,
+      .sync-item,
+      .saved-list-row {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--panel);
+        padding: 10px 14px;
+      }
+
+      .result-link {
+        word-break: break-all;
+        color: var(--accent-bright);
+        text-decoration: none;
+      }
+
+      .result-link:hover {
+        text-decoration: underline;
+      }
+
+      .crumb-link {
+        color: var(--accent-bright);
+        cursor: pointer;
+        text-decoration: none;
+        font-weight: 500;
+      }
+
+      .crumb-link:hover {
+        text-decoration: underline;
+      }
+
+      .media-row:hover {
+        background: rgba(255, 255, 255, 0.02);
+      }
+
+      /* ---------- Table ---------- */
+      .table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13.5px;
+      }
+
+      .table thead th {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.07em;
+        color: var(--muted-2);
+        font-weight: 600;
+        text-align: left;
+        padding: 8px 10px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .table td {
+        padding: 10px;
+        border-bottom: 1px solid #1e1e24;
+        vertical-align: middle;
+      }
+
+      .table tbody tr:hover {
+        background: rgba(255, 255, 255, 0.02);
+      }
+
+      .table-sm td,
+      .table-sm th {
+        padding: 8px 10px;
+      }
+
+      .align-middle {
+        vertical-align: middle;
+      }
+
+      .mb-0 {
+        margin-bottom: 0;
+      }
+
+      @media (max-width: 768px) {
+        .sidebar {
+          width: 64px;
+          padding: 16px 8px;
+        }
+        .brand span:last-child,
+        .sidebar .nav-link {
+          font-size: 0;
+        }
+        .sidebar .nav-link i {
+          font-size: 17px;
+          width: auto;
+        }
+        .sidebar .nav-link.active::before {
+          left: -8px;
+        }
+        .sidebar-footer span:last-child {
+          display: none;
+        }
+        .content {
+          padding: 18px 16px 40px;
+        }
+      }
+
     </style>
   </head>
   <body>
-    <main class="card">
-      <h1>Video Downloader</h1>
-      <p>Paste one URL per line, add them to the queue, then start processing.</p>
-
-      <form id="download-form">
-        <textarea
-          id="urls-input"
-          placeholder="https://example.com/video-page\nhttps://example.com/another-video"
-          required
-        ></textarea>
-        <input
-          id="folder-input"
-          type="text"
-          placeholder="Folder inside media (optional), e.g. hello or hello/sub"
-        />
-        <select id="max-quality-input" aria-label="Max quality (non-Instagram only)">
-          <option value="">Max quality: Best available (non-Instagram)</option>
-          <option value="2160">Max quality: 2160p</option>
-          <option value="1440">Max quality: 1440p</option>
-          <option value="1080">Max quality: 1080p</option>
-          <option value="720">Max quality: 720p</option>
-          <option value="540">Max quality: 540p</option>
-          <option value="480">Max quality: 480p</option>
-          <option value="360">Max quality: 360p</option>
-          <option value="240">Max quality: 240p</option>
-        </select>
-        <div class="controls">
-          <button id="add-to-queue-btn" type="submit">Add to queue</button>
-          <button id="start-queue-btn" type="button">Start queue</button>
-          <button id="stop-queue-btn" type="button" class="secondary">Stop queue</button>
-          <button id="remove-downloaded-btn" class="secondary" type="button">Remove Completed</button>
-          <button id="remove-all-btn" class="danger" type="button">Remove All</button>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="mark"><i class="bi bi-play-fill"></i></span>
+          <span>xdl</span>
         </div>
-        <div class="queue-progress">
-          <div class="queue-progress__label">Queue progress 0/0</div>
-          <div class="queue-progress__bar"><span></span></div>
+        <nav>
+          <a class="nav-link" data-view="dashboard" href="#dashboard"><i class="bi bi-speedometer2"></i> Dashboard</a>
+          <a class="nav-link" data-view="downloads" href="#downloads"><i class="bi bi-download"></i> Downloads</a>
+          <a class="nav-link" data-view="saved" href="#saved"><i class="bi bi-bookmark-star"></i> Saved &amp; Lists</a>
+          <a class="nav-link" data-view="sync" href="#sync"><i class="bi bi-list-check"></i> Sync Queue</a>
+          <a class="nav-link" data-view="profiles" href="#profiles"><i class="bi bi-person-badge"></i> Profiles</a>
+          <a class="nav-link" data-view="media" href="#media"><i class="bi bi-folder2-open"></i> Media</a>
+          <a class="nav-link" data-view="console" href="#console"><i class="bi bi-terminal"></i> Console</a>
+        </nav>
+        <div class="sidebar-footer">
+          <span id="health-dot" class="health-dot"></span>
+          <span id="health-text">Offline</span>
         </div>
-      </form>
+      </aside>
 
-      <div id="status" class="status"></div>
-      <section id="queue" class="results"></section>
-      <pre id="output" class="json"></pre>
-    </main>
+      <main class="content">
+        <!-- ============ Dashboard ============ -->
+        <section id="view-dashboard" class="view">
+          <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
+            <div>
+              <div class="view-title">Dashboard</div>
+              <div class="view-sub">Server health, queue depths and browser status at a glance.</div>
+            </div>
+            <span id="dash-busy-badge" class="badge text-bg-warning d-none">Task running</span>
+          </div>
+
+          <div class="row g-3 mb-3">
+            <div class="col-sm-6 col-xl-3">
+              <div class="stat-card">
+                <div class="stat-label">Server</div>
+                <div class="stat-value" id="dash-server">Offline</div>
+                <div class="small text-muted" id="dash-server-sub">checking...</div>
+              </div>
+            </div>
+            <div class="col-sm-6 col-xl-3">
+              <div class="stat-card">
+                <div class="stat-label">Sync queue</div>
+                <div class="stat-value" id="dash-pending">0</div>
+                <div class="small text-muted" id="dash-completed">0 completed</div>
+              </div>
+            </div>
+            <div class="col-sm-6 col-xl-3">
+              <div class="stat-card">
+                <div class="stat-label">Browser</div>
+                <div class="stat-value" id="dash-browser">—</div>
+                <div class="small text-muted" id="dash-browser-sub">shared browser</div>
+              </div>
+            </div>
+            <div class="col-sm-6 col-xl-3">
+              <div class="stat-card">
+                <div class="stat-label">Profiles open</div>
+                <div class="stat-value" id="dash-open">0</div>
+                <div class="small text-muted" id="dash-open-sub">manual sessions</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-body">
+              <h6 class="card-title"><i class="bi bi-lightning-charge me-1"></i>Quick actions</h6>
+              <div class="d-flex flex-wrap gap-2">
+                <button class="btn btn-success" data-go="downloads"><i class="bi bi-download me-1"></i>Queue a download</button>
+                <button class="btn btn-outline-success" data-go="saved"><i class="bi bi-bookmark-star me-1"></i>Scan a saved collection</button>
+                <button class="btn btn-outline-secondary" data-go="sync"><i class="bi bi-list-check me-1"></i>View sync queue</button>
+                <button class="btn btn-outline-secondary" data-go="media"><i class="bi bi-folder2-open me-1"></i>Browse media</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============ Downloads ============ -->
+        <section id="view-downloads" class="view">
+          <div class="view-title">Downloads</div>
+          <div class="view-sub">Add URLs, then run the queue. Downloads stream into the log below.</div>
+
+          <form id="dl-form" class="card mb-3">
+            <div class="card-body">
+              <div class="row g-2">
+                <div class="col-12">
+                  <label class="form-label mb-1" for="dl-urls">URLs (one per line)</label>
+                  <textarea id="dl-urls" class="form-control" rows="4" placeholder="https://www.instagram.com/reel/...&#10;https://www.xvideos.com/video..."></textarea>
+                </div>
+                <div class="col-md-6">
+                  <label class="form-label mb-1" for="dl-folder">Folder (inside media, optional)</label>
+                  <input id="dl-folder" class="form-control" type="text" placeholder="e.g. mylist or instagram/2026" />
+                </div>
+                <div class="col-md-6">
+                  <label class="form-label mb-1" for="dl-quality">Max quality (optional)</label>
+                  <input id="dl-quality" class="form-control" type="number" min="1" placeholder="e.g. 720 or 1080" />
+                </div>
+              </div>
+              <div class="mt-3 d-flex flex-wrap gap-2">
+                <button id="dl-add-btn" type="submit" class="btn btn-success"><i class="bi bi-plus-lg me-1"></i>Add to queue</button>
+                <button id="dl-play-btn" type="button" class="btn btn-primary"><i class="bi bi-play-fill me-1"></i>Run queue</button>
+                <button id="dl-remove-done-btn" type="button" class="btn btn-outline-secondary">Remove completed</button>
+                <button id="dl-remove-all-btn" type="button" class="btn btn-outline-danger">Clear queue</button>
+              </div>
+            </div>
+          </form>
+
+          <div class="card mb-3">
+            <div class="card-body">
+              <div class="d-flex justify-content-between align-items-center mb-1 flex-wrap gap-2">
+                <span id="dl-progress-label" class="small fw-semibold">No items yet</span>
+                <span id="dl-progress-pct" class="small text-muted"></span>
+              </div>
+              <div class="progress" style="height: 8px">
+                <div id="dl-progress-bar" class="progress-bar bg-success" style="width: 0%"></div>
+              </div>
+              <div class="d-flex justify-content-between align-items-center mt-1 flex-wrap gap-2">
+                <span id="dl-progress-small" class="small text-muted">0 of 0</span>
+                <span id="dl-status" class="status-text"></span>
+              </div>
+            </div>
+          </div>
+
+          <div id="dl-queue" class="mb-3"></div>
+
+          <details class="mb-4">
+            <summary class="small text-muted">Live output</summary>
+            <pre id="dl-live" class="console small mt-2"></pre>
+          </details>
+        </section>
+
+        <!-- ============ Saved & Lists ============ -->
+        <section id="view-saved" class="view">
+          <div class="view-title">Saved &amp; Lists</div>
+          <div class="view-sub">Scan an Instagram saved collection, and manage the auto-sync list config the daemon uses.</div>
+
+          <div class="row g-3">
+            <div class="col-lg-6">
+              <div class="card">
+                <div class="card-body">
+                  <h6 class="card-title"><i class="bi bi-search me-1"></i>Scan a collection</h6>
+                  <form id="sv-form">
+                    <div class="mb-2">
+                      <label class="form-label mb-1" for="sv-url">Collection URL</label>
+                      <input id="sv-url" class="form-control" type="url" required placeholder="https://www.instagram.com/username/saved/list/list-id/" />
+                    </div>
+                    <div class="row g-2 mb-2">
+                      <div class="col-md-6">
+                        <label class="form-label mb-1" for="sv-account">Account</label>
+                        <select id="sv-account" class="form-select"></select>
+                      </div>
+                      <div class="col-md-6">
+                        <label class="form-label mb-1" for="sv-folder">Folder</label>
+                        <input id="sv-folder" class="form-control" type="text" placeholder="e.g. mylist" />
+                      </div>
+                    </div>
+                    <div class="mb-2">
+                      <label class="form-label mb-1" for="sv-endurl">Stop at URL (optional, one)</label>
+                      <input id="sv-endurl" class="form-control" type="url" placeholder="https://www.instagram.com/p/XXXX/" />
+                    </div>
+                    <button id="sv-scan-btn" type="submit" class="btn btn-success"><i class="bi bi-search me-1"></i>Scan</button>
+                  </form>
+                  <div id="sv-status" class="status-text mt-2"></div>
+                  <div id="sv-meta" class="small text-muted mt-1"></div>
+
+                  <div id="sv-results-box" class="d-none mt-3">
+                    <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-2">
+                      <span class="small fw-semibold">Post URLs found <span id="sv-count" class="badge text-bg-success">0</span></span>
+                      <div class="d-flex gap-2 flex-wrap">
+                        <button id="sv-add-all-btn" type="button" class="btn btn-sm btn-outline-success">Add to download queue</button>
+                        <button id="sv-enqueue-btn" type="button" class="btn btn-sm btn-outline-primary">Enqueue for sync</button>
+                        <button id="sv-copy-btn" type="button" class="btn btn-sm btn-outline-secondary">Copy</button>
+                      </div>
+                    </div>
+                    <div id="sv-results" class="d-grid gap-2"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="col-lg-6">
+              <div class="card mb-3">
+                <div class="card-body">
+                  <h6 class="card-title"><i class="bi bi-plus-circle me-1"></i>Add auto-sync list</h6>
+                  <form id="list-form">
+                    <div class="mb-2">
+                      <label class="form-label mb-1" for="list-url">Collection URL</label>
+                      <input id="list-url" class="form-control" type="url" required placeholder="https://www.instagram.com/username/saved/list/list-id/" />
+                    </div>
+                    <div class="row g-2 mb-2">
+                      <div class="col-md-6">
+                        <label class="form-label mb-1" for="list-folder">Folder</label>
+                        <input id="list-folder" class="form-control" type="text" placeholder="e.g. mylist" />
+                      </div>
+                      <div class="col-md-6">
+                        <label class="form-label mb-1" for="list-account">Account</label>
+                        <select id="list-account" class="form-select"></select>
+                      </div>
+                    </div>
+                    <button id="list-submit" type="submit" class="btn btn-primary"><i class="bi bi-plus-lg me-1"></i>Add list</button>
+                  </form>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="card-body">
+                  <h6 class="card-title"><i class="bi bi-bookmark-star me-1"></i>Configured lists</h6>
+                  <div id="lists-box" class="d-grid gap-2"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============ Sync Queue ============ -->
+        <section id="view-sync" class="view">
+          <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
+            <div>
+              <div class="view-title">Sync Queue</div>
+              <div class="view-sub">What the sync daemon downloads on its own schedule.</div>
+            </div>
+            <div class="d-flex gap-2">
+              <span id="sync-pending-count" class="badge text-bg-primary">0 pending</span>
+              <span id="sync-completed-count" class="badge text-bg-secondary">0 completed</span>
+            </div>
+          </div>
+
+          <div class="card mb-3">
+            <div class="card-body">
+              <h6 class="card-title"><i class="bi bi-plus-circle me-1"></i>Add URLs to sync queue</h6>
+              <form id="sync-add-form">
+                <div class="row g-2">
+                  <div class="col-md-8">
+                    <textarea id="sync-add-urls" class="form-control" rows="3" placeholder="https://www.instagram.com/reel/... (one per line)"></textarea>
+                  </div>
+                  <div class="col-md-4">
+                    <label class="form-label mb-1" for="sync-add-folder">Folder</label>
+                    <input id="sync-add-folder" class="form-control" type="text" placeholder="e.g. mylist" />
+                    <button id="sync-add-btn" type="submit" class="btn btn-primary mt-2">Add</button>
+                  </div>
+                </div>
+              </form>
+              <div id="sync-status" class="status-text mt-2"></div>
+            </div>
+          </div>
+
+          <div class="row g-3">
+            <div class="col-lg-6">
+              <div class="card">
+                <div class="card-body">
+                  <h6 class="card-title"><i class="bi bi-hourglass-split me-1"></i>Pending</h6>
+                  <div id="sync-pending" class="d-grid gap-2"></div>
+                </div>
+              </div>
+            </div>
+            <div class="col-lg-6">
+              <div class="card">
+                <div class="card-body">
+                  <div class="d-flex justify-content-between align-items-center mb-2">
+                    <h6 class="card-title mb-0"><i class="bi bi-check2-circle me-1"></i>Completed</h6>
+                    <button id="sync-clear-btn" type="button" class="btn btn-sm btn-outline-danger">Clear completed</button>
+                  </div>
+                  <div id="sync-completed" class="d-grid gap-2"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============ Profiles ============ -->
+        <section id="view-profiles" class="view">
+          <div class="view-title">Profiles</div>
+          <div class="view-sub">Open a visible browser for an account to log in via VNC, then close it.</div>
+
+          <div class="card mb-3">
+            <div class="card-body">
+              <div class="row g-2 align-items-end">
+                <div class="col-md-4">
+                  <label class="form-label mb-1" for="pr-account">Account</label>
+                  <select id="pr-account" class="form-select"></select>
+                </div>
+                <div class="col-md-8 d-flex gap-2 flex-wrap">
+                  <button id="pr-open-btn" type="button" class="btn btn-success"><i class="bi bi-window me-1"></i>Open browser</button>
+                  <button id="pr-close-btn" type="button" class="btn btn-outline-danger"><i class="bi bi-x-circle me-1"></i>Close browser</button>
+                  <a id="pr-novnc-link" class="btn btn-outline-secondary" href="#" target="_blank" rel="noopener"><i class="bi bi-broadcast me-1"></i>VNC session</a>
+                </div>
+              </div>
+              <div id="pr-status" class="status-text mt-2"></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-body">
+              <h6 class="card-title"><i class="bi bi-people me-1"></i>Accounts</h6>
+              <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Profile</th>
+                      <th>Status</th>
+                      <th>Opened</th>
+                    </tr>
+                  </thead>
+                  <tbody id="pr-accounts"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============ Media ============ -->
+        <section id="view-media" class="view">
+          <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
+            <div>
+              <div class="view-title">Media</div>
+              <div class="view-sub">Browse what has been downloaded to the media folder.</div>
+            </div>
+            <div class="d-flex gap-2">
+              <input id="media-filter" class="form-control form-control-sm" type="search" placeholder="Filter files..." />
+              <button id="media-refresh" class="btn btn-sm btn-outline-secondary" type="button"><i class="bi bi-arrow-clockwise"></i></button>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-body">
+              <nav class="mb-2 small" aria-label="breadcrumb">
+                <span class="crumb-link" data-media-path="">Media</span>
+                <span id="media-crumbs"></span>
+              </nav>
+              <div id="media-before" class="d-none mb-2">
+                <button id="media-back" type="button" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Up one level</button>
+              </div>
+              <div class="table-responsive">
+                <table class="table table-sm mb-0">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th class="text-end">Size</th>
+                      <th>Modified</th>
+                      <th class="text-end">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="media-rows"></tbody>
+                </table>
+              </div>
+              <div id="media-empty" class="empty d-none">No files here yet.</div>
+              <div id="media-error" class="status-text error mt-2"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============ Console ============ -->
+        <section id="view-console" class="view">
+          <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
+            <div>
+              <div class="view-title">Console</div>
+              <div class="view-sub">Streaming output from downloads and browser sessions.</div>
+            </div>
+            <button id="console-clear-btn" type="button" class="btn btn-sm btn-outline-danger"><i class="bi bi-trash me-1"></i>Clear</button>
+          </div>
+          <pre id="console-pre" class="console mt-3"></pre>
+        </section>
+      </main>
+    </div>
 
     <script>
-      const STORAGE_KEY = "xdl.queue.v1";
-      const form = document.getElementById("download-form");
-      const input = document.getElementById("urls-input");
-      const folderInput = document.getElementById("folder-input");
-      const maxQualityInput = document.getElementById("max-quality-input");
-      const addToQueueBtn = document.getElementById("add-to-queue-btn");
-      const startBtn = document.getElementById("start-queue-btn");
-      const stopBtn = document.getElementById("stop-queue-btn");
-      const removeDownloadedBtn = document.getElementById("remove-downloaded-btn");
-      const removeAllBtn = document.getElementById("remove-all-btn");
-      const progressLabel = document.querySelector(".queue-progress__label");
-      const progressBarFill = document.querySelector(".queue-progress__bar span");
-      const statusEl = document.getElementById("status");
-      const queueEl = document.getElementById("queue");
-      const outputEl = document.getElementById("output");
-      const MAX_OUTPUT_LINES = 200;
+      "use strict";
 
+      // ---------------- Element refs ----------------
+      const STORAGE_KEY = "xdl.queue.v1";
+      const MAX_LOG = 500;
+      const MAX_QUEUE_LINES = 200;
+
+      const $ = (id) => document.getElementById(id);
+
+      const dlForm = $("dl-form");
+      const dlUrls = $("dl-urls");
+      const dlFolder = $("dl-folder");
+      const dlQuality = $("dl-quality");
+      const dlAddBtn = $("dl-add-btn");
+      const dlPlayBtn = $("dl-play-btn");
+      const dlRemoveDoneBtn = $("dl-remove-done-btn");
+      const dlRemoveAllBtn = $("dl-remove-all-btn");
+      const dlProgressLabel = $("dl-progress-label");
+      const dlProgressSmall = $("dl-progress-small");
+      const dlProgressPct = $("dl-progress-pct");
+      const dlProgressBar = $("dl-progress-bar");
+      const dlStatus = $("dl-status");
+      const dlQueue = $("dl-queue");
+      const dlLive = $("dl-live");
+
+      const healthDot = $("health-dot");
+      const healthText = $("health-text");
+
+      const dashBusyBadge = $("dash-busy-badge");
+      const dashServer = $("dash-server");
+      const dashServerSub = $("dash-server-sub");
+      const dashPending = $("dash-pending");
+      const dashCompleted = $("dash-completed");
+      const dashBrowser = $("dash-browser");
+      const dashBrowserSub = $("dash-browser-sub");
+      const dashOpen = $("dash-open");
+      const dashOpenSub = $("dash-open-sub");
+
+      // Saved view
+      const svForm = $("sv-form");
+      const svUrl = $("sv-url");
+      const svAccount = $("sv-account");
+      const svFolder = $("sv-folder");
+      const svEndUrl = $("sv-endurl");
+      const svScanBtn = $("sv-scan-btn");
+      const svStatus = $("sv-status");
+      const svMeta = $("sv-meta");
+      const svResultsBox = $("sv-results-box");
+      const svResults = $("sv-results");
+      const svCount = $("sv-count");
+      const svAddAllBtn = $("sv-add-all-btn");
+      const svEnqueueBtn = $("sv-enqueue-btn");
+      const svCopyBtn = $("sv-copy-btn");
+
+      const listForm = $("list-form");
+      const listUrl = $("list-url");
+      const listFolder = $("list-folder");
+      const listAccount = $("list-account");
+      const listSubmit = $("list-submit");
+      const listsBox = $("lists-box");
+
+      // Sync queue view
+      const syncAddForm = $("sync-add-form");
+      const syncAddUrls = $("sync-add-urls");
+      const syncAddFolder = $("sync-add-folder");
+      const syncAddBtn = $("sync-add-btn");
+      const syncStatus = $("sync-status");
+      const syncPending = $("sync-pending");
+      const syncCompleted = $("sync-completed");
+      const syncPendingCount = $("sync-pending-count");
+      const syncCompletedCount = $("sync-completed-count");
+      const syncClearBtn = $("sync-clear-btn");
+
+      // Profiles view
+      const prAccount = $("pr-account");
+      const prOpenBtn = $("pr-open-btn");
+      const prCloseBtn = $("pr-close-btn");
+      const prNovncLink = $("pr-novnc-link");
+      const prStatus = $("pr-status");
+      const prAccounts = $("pr-accounts");
+
+      // Media view
+      const mediaFilter = $("media-filter");
+      const mediaRefresh = $("media-refresh");
+      const mediaCrumbs = $("media-crumbs");
+      const mediaBefore = $("media-before");
+      const mediaBack = $("media-back");
+      const mediaRows = $("media-rows");
+      const mediaEmpty = $("media-empty");
+      const mediaError = $("media-error");
+
+      // Console view
+      const consolePre = $("console-pre");
+      const consoleClearBtn = $("console-clear-btn");
+
+      // ---------------- State ----------------
       let isRunning = false;
       let queueStopRequested = false;
-      let queueState = {
-        folder: "",
-        maxQuality: "",
-        items: [],
-      };
+      let browserOpenInProgress = false;
+      let knownAccounts = [];
+      let syncData = { config: { accounts: [], savedLists: [] }, lists: {}, queue: { pending: [], completed: [] } };
+      let savedScanResults = [];
+      let mediaFolder = "";
+      let lastMediaItems = [];
 
-      function setStatus(message, kind) {
-        statusEl.textContent = message || "";
-        statusEl.className = `status${kind ? ` ${kind}` : ""}`;
+      let logLines = [];
+      let logPartial = "";
+
+      let queueState = { folder: "", maxQuality: "", items: [] };
+
+      // ---------------- Log ----------------
+      function appendLog(text) {
+        const chunk = String(text == null ? "" : text);
+        if (!chunk) return;
+        const combined = logPartial + chunk;
+        const parts = combined.split(/\r?\n/);
+        logPartial = parts.pop() || "";
+        for (const line of parts) logLines.push(line);
+        if (logLines.length > MAX_LOG) logLines.splice(0, logLines.length - MAX_LOG);
+        renderLogs();
       }
 
-      function appendOutput(text) {
-        const chunk = String(text || "");
-        const incomingLines = chunk.split(/\r?\n/);
-        const existingText = String(outputEl.textContent || "");
-        const existingLines = existingText ? existingText.split(/\r?\n/) : [];
-        const combined = existingLines.concat(incomingLines);
+      function clearLog() {
+        logLines = [];
+        logPartial = "";
+        renderLogs();
+      }
 
-        if (combined.length > MAX_OUTPUT_LINES) {
-          outputEl.textContent = combined.slice(combined.length - MAX_OUTPUT_LINES).join("\n");
-        } else {
-          outputEl.textContent = combined.join("\n");
+      function renderLogs() {
+        const text = logLines.join("\n") + (logPartial ? logPartial : "");
+        if (consolePre) {
+          consolePre.textContent = text;
+          consolePre.scrollTop = consolePre.scrollHeight;
         }
-        outputEl.scrollTop = outputEl.scrollHeight;
+        if (dlLive) {
+          const last = logLines.slice(-MAX_QUEUE_LINES).join("\n") + (logPartial ? logPartial : "");
+          dlLive.textContent = last;
+          dlLive.scrollTop = dlLive.scrollHeight;
+        }
       }
 
+      // ---------------- Helpers ----------------
+      async function getJson(url) {
+        const response = await fetch(url);
+        return response.json().catch(() => ({}));
+      }
+
+      async function postJson(url, payload) {
+        const response = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload || {}),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || data && data.ok === false) {
+          throw new Error(data && data.error ? data.error : `Request failed with status ${response.status}.`);
+        }
+        return data;
+      }
+
+      function setStatus(el, message, kind) {
+        if (!el) return;
+        el.textContent = message || "";
+        el.className = `status-text${kind ? ` ${kind}` : ""}`;
+      }
+
+      function parseLinks(value) {
+        return String(value || "")
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean);
+      }
+
+      function domainOf(url) {
+        try {
+          const u = new URL(String(url).trim());
+          return (u.hostname || "").replace(/^www\./, "");
+        } catch {
+          return "";
+        }
+      }
+
+      function toMediaUrl(filePath) {
+        const raw = String(filePath || "").trim();
+        if (!raw) return "";
+        const normalized = raw.replace(/\\/g, "/");
+        let relative = "";
+        const marker = "/media/";
+        const idx = normalized.lastIndexOf(marker);
+        if (idx >= 0) {
+          relative = normalized.slice(idx + marker.length);
+        } else if (normalized.startsWith("media/")) {
+          relative = normalized.slice("media/".length);
+        } else if (normalized.startsWith("./media/")) {
+          relative = normalized.slice("./media/".length);
+        }
+        if (!relative) return "";
+        const encoded = relative
+          .split("/")
+          .filter(Boolean)
+          .map((part) => encodeURIComponent(part))
+          .join("/");
+        return encoded ? `/media/${encoded}` : "";
+      }
+
+      function parseDownloadedPaths(chunkText, partialLine) {
+        const text = `${partialLine || ""}${String(chunkText || "")}`;
+        const parts = text.split(/\r?\n/);
+        const nextPartial = parts.pop() || "";
+        const found = [];
+        for (const line of parts) {
+          const match = line.match(/^Downloaded media to:\s+(.+)$/);
+          if (match) {
+            const value = String(match[1] || "").trim();
+            if (value) found.push(value);
+          }
+        }
+        return { found, nextPartial };
+      }
+
+      function formatBytes(bytes) {
+        if (bytes == null) return "";
+        const value = Number(bytes);
+        if (!Number.isFinite(value) || value < 0) return "";
+        if (value < 1024) return `${value} B`;
+        const units = ["KB", "MB", "GB", "TB"];
+        let num = value / 1024;
+        let unit = units[0];
+        for (let i = 1; i < units.length && num >= 1024; i += 1) {
+          num /= 1024;
+          unit = units[i];
+        }
+        return `${num.toFixed(1)} ${unit}`;
+      }
+
+      function formatDate(iso) {
+        if (!iso) return "";
+        const date = new Date(iso);
+        if (Number.isNaN(date.getTime())) return "";
+        return date.toLocaleString();
+      }
+
+      function novncUrl() {
+        return `${location.protocol === "https:" ? "https" : "http"}://${location.hostname}:7906`;
+      }
+
+      // ---------------- Navigation ----------------
+      const navLinks = Array.from(document.querySelectorAll('.sidebar .nav-link'));
+      const views = Array.from(document.querySelectorAll('.view'));
+
+      function navigate(viewName) {
+        navLinks.forEach((link) => {
+          const active = link.dataset.view === viewName;
+          link.classList.toggle("active", active);
+        });
+        views.forEach((view) => {
+          view.classList.toggle("active", view.id === `view-${viewName}`);
+        });
+        if (viewName === "media") loadMedia();
+      }
+
+      function currentView() {
+        const hash = String(location.hash || "").replace(/^#\/?/, "").trim();
+        const known = navLinks.some((link) => link.dataset.view === hash);
+        return known ? hash : "dashboard";
+      }
+
+      function handleHashChange() {
+        navigate(currentView());
+      }
+
+      window.addEventListener("hashchange", handleHashChange);
+      document.querySelectorAll('[data-go]').forEach((btn) => {
+        btn.addEventListener("click", () => {
+          location.hash = `#${btn.dataset.go}`;
+        });
+      });
+
+      // ---------------- Health ----------------
+      async function refreshHealth() {
+        try {
+          const payload = await getJson("/health");
+          const online = Boolean(payload && payload.ok);
+          healthDot.classList.toggle("online", online);
+          healthDot.classList.toggle("offline", !online);
+          healthText.textContent = online ? "Online" : "Offline";
+
+          dashServer.textContent = online ? "Online" : "Offline";
+          dashServerSub.textContent = online
+            ? `${payload.busy ? "busy" : "idle"}${payload.shuttingDown ? " · shutting down" : ""}`
+            : "checking...";
+
+          dashBrowser.textContent = payload.browserReady ? "Ready" : "—";
+          dashBrowserSub.textContent = `${payload.accountBrowsersReady || 0} account browser(s)`;
+
+          if (payload.busy) {
+            dashBusyBadge.classList.remove("d-none");
+          } else {
+            dashBusyBadge.classList.add("d-none");
+          }
+        } catch {
+          healthDot.classList.remove("online");
+          healthDot.classList.add("offline");
+          healthText.textContent = "Offline";
+          dashServer.textContent = "Offline";
+          dashServerSub.textContent = "unreachable";
+        }
+      }
+
+      // ---------------- Accounts / profiles ----------------
+      async function refreshAccounts() {
+        try {
+          const payload = await getJson("/accounts");
+          if (!payload || !Array.isArray(payload.accounts)) return;
+          knownAccounts = payload.accounts;
+          populateAccountSelects();
+          renderProfilesTable();
+        } catch {
+          // ignore
+        }
+      }
+
+      function populateAccountSelects() {
+        const names = knownAccounts.map((account) => account.name);
+        [svAccount, listAccount, prAccount].forEach((select) => {
+          if (!select) return;
+          const previous = select.value;
+          select.innerHTML = names.map((name) => `<option value="${name}">${name}</option>`).join("");
+          if (names.includes(previous)) select.value = previous;
+        });
+      }
+
+      function renderProfilesTable() {
+        if (!prAccounts) return;
+        prAccounts.innerHTML = "";
+        knownAccounts.forEach((account) => {
+          const tr = document.createElement("tr");
+          const nameTd = document.createElement("td");
+          nameTd.textContent = account.name;
+          tr.appendChild(nameTd);
+
+          const profileTd = document.createElement("td");
+          profileTd.textContent = `${account.profileDir || "Default"}${account.userDataDir ? ` (${account.userDataDir})` : ""}`;
+          tr.appendChild(profileTd);
+
+          const statusTd = document.createElement("td");
+          const badges = [];
+          if (account.manualOpen) badges.push('<span class="badge text-bg-success">manual open</span>');
+          if (account.sharedOpen) badges.push('<span class="badge text-bg-primary">shared</span>');
+          if (account.accountBrowserOpen) badges.push('<span class="badge text-bg-info">active</span>');
+          statusTd.innerHTML = badges.length ? badges.join(" ") : '<span class="text-muted">closed</span>';
+          tr.appendChild(statusTd);
+
+          const openedTd = document.createElement("td");
+          openedTd.textContent = account.openedAt ? new Date(account.openedAt).toLocaleString() : "—";
+          openedTd.className = "text-muted small";
+          tr.appendChild(openedTd);
+
+          prAccounts.appendChild(tr);
+        });
+
+        const open = knownAccounts.filter((account) => account.manualOpen);
+        dashOpen.textContent = String(open.length);
+        dashOpenSub.textContent = open.length ? `manual: ${open.map((a) => a.name).join(", ")}` : "manual sessions";
+      }
+
+      function setProfileStatus(message, kind) {
+        setStatus(prStatus, message, kind);
+      }
+
+      prOpenBtn.addEventListener("click", async () => {
+        if (browserOpenInProgress) return;
+        const account = prAccount.value || "default";
+        browserOpenInProgress = true;
+        prOpenBtn.disabled = true;
+        prCloseBtn.disabled = true;
+        setProfileStatus(`Opening browser for "${account}"...`);
+        appendLog(`\n=== Opening browser for profile "${account}" ===\n`);
+
+        try {
+          const response = await fetch("/open-browser", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ account }),
+          });
+
+          if (!response.ok) {
+            let message = "Request failed.";
+            try {
+              const payload = await response.json();
+              if (payload && payload.error) message = payload.error;
+            } catch {
+              // ignore
+            }
+            throw new Error(message);
+          }
+
+          const reader = response.body && response.body.getReader ? response.body.getReader() : null;
+          if (reader) {
+            const decoder = new TextDecoder();
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              appendLog(decoder.decode(value, { stream: true }));
+            }
+          } else {
+            appendLog(await response.text());
+          }
+
+          setProfileStatus(
+            `Browser for "${account}" is open. Log in at ${novncUrl()}, then press Close browser when done.`,
+            "ok"
+          );
+        } catch (err) {
+          setProfileStatus(err && err.message ? err.message : "Failed to open browser.", "error");
+          appendLog(`[browser] Failed to open browser for "${account}": ${err.message}\n`);
+        } finally {
+          browserOpenInProgress = false;
+          prOpenBtn.disabled = false;
+          prCloseBtn.disabled = false;
+          refreshAccounts();
+        }
+      });
+
+      prCloseBtn.addEventListener("click", async () => {
+        const account = prAccount.value || "default";
+        try {
+          const payload = await postJson("/close-browser", { account });
+          setProfileStatus(
+            payload.alreadyClosed ? `No open browser for "${account}".` : `Browser for "${account}" closed.`,
+            "ok"
+          );
+        } catch (err) {
+          setProfileStatus(err && err.message ? err.message : "Failed to close browser.", "error");
+        }
+        refreshAccounts();
+      });
+
+      prNovncLink.href = novncUrl();
+      prNovncLink.title = `Open VNC session at ${novncUrl()}`;
+
+      // ---------------- Download queue ----------------
       function saveQueueState() {
         try {
           localStorage.setItem(STORAGE_KEY, JSON.stringify(queueState));
@@ -368,16 +1580,13 @@
           if (!raw) return;
           const parsed = JSON.parse(raw);
           if (!parsed || !Array.isArray(parsed.items)) return;
-
           queueState = {
             folder: typeof parsed.folder === "string" ? parsed.folder : "",
             maxQuality: typeof parsed.maxQuality === "string" ? parsed.maxQuality : "",
             items: parsed.items.map((item) => ({
               id: String(item.id || `${Date.now()}-${Math.random()}`),
               link: String(item.link || "").trim(),
-              status: ["queued", "running", "done", "error"].includes(item.status)
-                ? item.status
-                : "queued",
+              status: ["queued", "running", "done", "error"].includes(item.status) ? item.status : "queued",
               message: String(item.message || "Queued"),
               downloads: Array.isArray(item.downloads)
                 ? item.downloads.map((x) => String(x || "").trim()).filter(Boolean)
@@ -389,57 +1598,6 @@
         }
       }
 
-      function toMediaUrl(filePath) {
-        const raw = String(filePath || "").trim();
-        if (!raw) return "";
-
-        const normalized = raw.replace(/\\/g, "/");
-        let relative = "";
-
-        const marker = "/media/";
-        const idx = normalized.lastIndexOf(marker);
-        if (idx >= 0) {
-          relative = normalized.slice(idx + marker.length);
-        } else if (normalized.startsWith("media/")) {
-          relative = normalized.slice("media/".length);
-        } else if (normalized.startsWith("./media/")) {
-          relative = normalized.slice("./media/".length);
-        }
-
-        if (!relative) return "";
-        const encoded = relative
-          .split("/")
-          .filter(Boolean)
-          .map((part) => encodeURIComponent(part))
-          .join("/");
-
-        return encoded ? `/media/${encoded}` : "";
-      }
-
-      function parseLinks(value) {
-        return String(value || "")
-          .split(/\r?\n/)
-          .map((line) => line.trim())
-          .filter(Boolean);
-      }
-
-      function parseDownloadedPaths(chunkText, partialLine) {
-        const text = `${partialLine || ""}${String(chunkText || "")}`;
-        const parts = text.split(/\r?\n/);
-        const nextPartial = parts.pop() || "";
-        const found = [];
-
-        for (const line of parts) {
-          const match = line.match(/^Downloaded media to:\s+(.+)$/);
-          if (match) {
-            const value = String(match[1] || "").trim();
-            if (value) found.push(value);
-          }
-        }
-
-        return { found, nextPartial };
-      }
-
       function hasPendingItems() {
         return queueState.items.some((item) => item.status !== "done");
       }
@@ -449,33 +1607,28 @@
         const done = queueState.items.filter((item) => item.status === "done").length;
         const percent = total ? Math.round((done / total) * 100) : 0;
 
-        if (progressBarFill) {
-          progressBarFill.style.width = `${percent}%`;
+        if (dlProgressBar) dlProgressBar.style.width = `${percent}%`;
+        if (dlProgressLabel) {
+          dlProgressLabel.textContent = total ? `${total} item${total === 1 ? "" : "s"} in queue` : "No items yet";
         }
-
-        if (progressLabel) {
-          progressLabel.textContent = total
-            ? `Queue progress ${done}/${total} (${percent}%)`
-            : "Queue progress 0/0";
-        }
+        if (dlProgressSmall) dlProgressSmall.textContent = total ? `${done} of ${total} completed` : "0 of 0";
+        if (dlProgressPct) dlProgressPct.textContent = total ? `${percent}%` : "";
       }
 
       function updateControls() {
-        const hasPending = hasPendingItems();
         const busy = isRunning;
-        if (addToQueueBtn) addToQueueBtn.disabled = busy;
-        if (startBtn) startBtn.disabled = busy || !hasPending;
-        if (stopBtn) stopBtn.disabled = !busy;
-        removeDownloadedBtn.disabled = busy;
-        removeAllBtn.disabled = busy;
+        if (dlAddBtn) dlAddBtn.disabled = busy;
+        dlPlayBtn.disabled = !hasPendingItems() && !busy;
+        dlPlayBtn.innerHTML = busy
+          ? '<i class="bi bi-pause-fill me-1"></i>Pause'
+          : '<i class="bi bi-play-fill me-1"></i>Run queue';
+        dlRemoveDoneBtn.disabled = busy;
+        dlRemoveAllBtn.disabled = busy;
       }
 
       function createQueueItemsFromInput() {
-        const links = parseLinks(input.value);
-        if (!links.length) {
-          throw new Error("Please enter at least one URL (one per line).");
-        }
-
+        const links = parseLinks(dlUrls.value);
+        if (!links.length) throw new Error("Please enter at least one URL (one per line).");
         const now = Date.now();
         return links.map((link, index) => ({
           id: `${now}-${index}`,
@@ -532,93 +1685,127 @@
         renderQueue();
       }
 
-      function removeAll() {
+      function removeAllItems() {
         if (isRunning) return;
         queueState.items = [];
         saveQueueState();
         renderQueue();
       }
 
+      const STATUS_BADGE = {
+        queued: "text-bg-secondary",
+        running: "text-bg-primary",
+        done: "text-bg-success",
+        error: "text-bg-danger",
+      };
+
       function renderQueue() {
-        queueEl.innerHTML = "";
+        dlQueue.innerHTML = "";
         const total = queueState.items.length;
+
+        if (!total) {
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = "Queue is empty — add some URLs above.";
+          dlQueue.appendChild(empty);
+        }
 
         queueState.items.forEach((item, index) => {
           const card = document.createElement("article");
-          card.className = "result";
-          if (["running", "done", "error"].includes(item.status)) {
-            card.classList.add(item.status);
+          card.className = "card mb-2";
+          card.style.borderLeftWidth = "3px";
+          card.style.borderLeftStyle = "solid";
+          card.style.borderLeftColor =
+            item.status === "running" ? "#0d6efd" : item.status === "done" ? "#198754" : item.status === "error" ? "#dc3545" : "#adb5bd";
+
+          const body = document.createElement("div");
+          body.className = "card-body py-2";
+
+          const top = document.createElement("div");
+          top.className = "d-flex align-items-center gap-2 flex-wrap mb-1";
+
+          const badge = document.createElement("span");
+          badge.className = `badge ${STATUS_BADGE[item.status] || "text-bg-secondary"}`;
+          badge.textContent = item.status;
+          top.appendChild(badge);
+
+          const idx = document.createElement("span");
+          idx.className = "small text-muted";
+          idx.textContent = `${index + 1} / ${total}`;
+          top.appendChild(idx);
+
+          const domain = domainOf(item.link);
+          if (domain) {
+            const chip = document.createElement("span");
+            chip.className = "badge badge-domain";
+            chip.textContent = domain;
+            top.appendChild(chip);
           }
 
-          const label = document.createElement("div");
-          label.className = "label";
-          label.textContent = `Item ${index + 1} of ${total}`;
-          card.appendChild(label);
+          if (!isRunning) {
+            const spacer = document.createElement("span");
+            spacer.className = "flex-grow-1";
+            top.appendChild(spacer);
+
+            const retryBtn = document.createElement("button");
+            retryBtn.type = "button";
+            retryBtn.className = "btn btn-sm btn-outline-secondary";
+            retryBtn.innerHTML = '<i class="bi bi-arrow-counterclockwise me-1"></i>Retry';
+            retryBtn.addEventListener("click", () => retryItem(item.id));
+            top.appendChild(retryBtn);
+
+            const removeBtn = document.createElement("button");
+            removeBtn.type = "button";
+            removeBtn.className = "btn btn-sm btn-outline-danger";
+            removeBtn.innerHTML = '<i class="bi bi-trash me-1"></i>Remove';
+            removeBtn.addEventListener("click", () => removeItem(item.id));
+            top.appendChild(removeBtn);
+          }
+
+          body.appendChild(top);
 
           const urlEl = document.createElement("div");
           urlEl.className = "queue-url";
           urlEl.textContent = item.link;
-          card.appendChild(urlEl);
+          body.appendChild(urlEl);
 
           const stateEl = document.createElement("div");
-          stateEl.className = "queue-state";
+          stateEl.className = `small ${item.status === "error" ? "text-danger" : "text-muted"}`;
           stateEl.textContent = item.message || "Queued";
-          card.appendChild(stateEl);
+          body.appendChild(stateEl);
 
-          const downloadsEl = document.createElement("div");
-          downloadsEl.className = "downloads-list";
+          if (item.downloads.length) {
+            item.downloads.forEach((filePath) => {
+              const row = document.createElement("div");
+              row.className = "d-flex flex-column mt-1";
 
-          item.downloads.forEach((filePath) => {
-            const row = document.createElement("div");
+              const link = document.createElement("a");
+              const href = toMediaUrl(filePath);
+              link.className = "small";
+              if (href) {
+                link.href = href;
+                link.target = "_blank";
+                link.rel = "noopener";
+                link.textContent = href;
+              } else {
+                link.href = "#";
+                link.style.pointerEvents = "none";
+                link.className = "small text-muted";
+                link.textContent = "File outside /media (not linkable)";
+              }
+              row.appendChild(link);
 
-            const title = document.createElement("div");
-            title.className = "label";
-            title.textContent = "Downloaded File";
-            row.appendChild(title);
+              const path = document.createElement("div");
+              path.className = "file-path";
+              path.textContent = `Saved to: ${filePath}`;
+              row.appendChild(path);
 
-            const href = toMediaUrl(filePath);
-            const link = document.createElement("a");
-            link.textContent = href || "File outside /media (not linkable)";
-            if (href) {
-              link.href = href;
-              link.setAttribute("download", "");
-            } else {
-              link.href = "#";
-              link.style.pointerEvents = "none";
-            }
-            row.appendChild(link);
+              body.appendChild(row);
+            });
+          }
 
-            const path = document.createElement("div");
-            path.className = "path";
-            path.textContent = `Saved to: ${filePath}`;
-            row.appendChild(path);
-
-            downloadsEl.appendChild(row);
-          });
-
-          card.appendChild(downloadsEl);
-
-          const actions = document.createElement("div");
-          actions.className = "item-actions";
-
-          const retryBtn = document.createElement("button");
-          retryBtn.type = "button";
-          retryBtn.className = "secondary";
-          retryBtn.textContent = "Retry";
-          retryBtn.disabled = isRunning;
-          retryBtn.addEventListener("click", () => retryItem(item.id));
-          actions.appendChild(retryBtn);
-
-          const removeBtn = document.createElement("button");
-          removeBtn.type = "button";
-          removeBtn.className = "danger";
-          removeBtn.textContent = "Remove";
-          removeBtn.disabled = isRunning;
-          removeBtn.addEventListener("click", () => removeItem(item.id));
-          actions.appendChild(removeBtn);
-
-          card.appendChild(actions);
-          queueEl.appendChild(card);
+          card.appendChild(body);
+          dlQueue.appendChild(card);
         });
 
         updateQueueProgress();
@@ -628,18 +1815,17 @@
       async function runQueue() {
         const queue = queueState.items;
         if (!queue.length) {
-          setStatus("Queue is empty.", "error");
+          setStatus(dlStatus, "Queue is empty.", "error");
           return;
         }
-
         const pending = queue.filter((item) => item.status !== "done");
         if (!pending.length) {
-          setStatus("Queue has no pending items.", "error");
+          setStatus(dlStatus, "Queue has no pending items.", "error");
           return;
         }
 
-        const folder = String(folderInput.value || "").trim();
-        const maxQuality = String(maxQualityInput.value || "").trim();
+        const folder = String(dlFolder.value || "").trim();
+        const maxQuality = String(dlQuality.value || "").trim();
         queueState.folder = folder;
         queueState.maxQuality = maxQuality;
         saveQueueState();
@@ -647,7 +1833,7 @@
         let stopped = false;
         queueStopRequested = false;
         isRunning = true;
-        setStatus(`Running ${pending.length} item(s)...`);
+        setStatus(dlStatus, `Running ${pending.length} item(s)...`);
         renderQueue();
 
         try {
@@ -658,12 +1844,10 @@
             }
 
             const item = queue[i];
-            if (item.status === "done") {
-              continue;
-            }
+            if (item.status === "done") continue;
 
             setItemStatus(item.id, "running", "Running...");
-            appendOutput(`\n=== Queue ${i + 1}/${queue.length}: ${item.link} ===\n`);
+            appendLog(`\n=== Queue ${i + 1}/${queue.length}: ${item.link} ===\n`);
 
             try {
               const response = await fetch("/download", {
@@ -687,7 +1871,7 @@
               const reader = response.body && response.body.getReader ? response.body.getReader() : null;
               if (!reader) {
                 const text = await response.text();
-                appendOutput(text);
+                appendLog(text);
                 const parsed = parseDownloadedPaths(text, partialLine);
                 partialLine = parsed.nextPartial;
                 parsed.found.forEach((filePath) => addItemDownload(item.id, filePath));
@@ -697,7 +1881,7 @@
                   const { done, value } = await reader.read();
                   if (done) break;
                   const text = decoder.decode(value, { stream: true });
-                  appendOutput(text);
+                  appendLog(text);
                   const parsed = parseDownloadedPaths(text, partialLine);
                   partialLine = parsed.nextPartial;
                   parsed.found.forEach((filePath) => addItemDownload(item.id, filePath));
@@ -709,11 +1893,16 @@
                 parsed.found.forEach((filePath) => addItemDownload(item.id, filePath));
               }
 
-              setItemStatus(item.id, "done", "Done");
+              if (item.downloads.length > 0) {
+                setItemStatus(item.id, "done", "Done");
+              } else {
+                setItemStatus(item.id, "error", "No media downloaded (see output).");
+                appendLog(`[queue] No media downloaded for: ${item.link} (see output above)\n`);
+              }
             } catch (err) {
               const message = err && err.message ? err.message : "unknown error";
               setItemStatus(item.id, "error", `Failed: ${message}`);
-              appendOutput(`[queue] Failed: ${item.link} -> ${message}\n`);
+              appendLog(`[queue] Failed: ${item.link} -> ${message}\n`);
             }
           }
         } finally {
@@ -725,58 +1914,619 @@
           renderQueue();
 
           if (stopped) {
-            setStatus(`Queue paused. ${doneCount}/${total} completed.`);
+            setStatus(dlStatus, `Queue paused. ${doneCount}/${total} completed.`);
             return;
           }
-
           if (failedCount > 0) {
-            setStatus(`Completed ${doneCount}/${total}. Failed ${failedCount}.`, "error");
+            setStatus(dlStatus, `Completed ${doneCount}/${total}. Failed ${failedCount}.`, "error");
           } else {
-            setStatus(`Done. Completed ${doneCount}/${total}.`, "ok");
+            setStatus(dlStatus, `Done. Completed ${doneCount}/${total}.`, "ok");
           }
         }
       }
 
-      function stopQueue() {
-        if (!isRunning || queueStopRequested) {
-          return;
-        }
-        queueStopRequested = true;
-        if (stopBtn) stopBtn.disabled = true;
-        setStatus("Stopping queue after current item...");
-      }
-
-      function handleAddToQueue(event) {
+      dlForm.addEventListener("submit", (event) => {
         event.preventDefault();
         try {
           const newItems = createQueueItemsFromInput();
-          queueState.folder = String(folderInput.value || "").trim();
-          queueState.maxQuality = String(maxQualityInput.value || "").trim();
+          queueState.folder = String(dlFolder.value || "").trim();
+          queueState.maxQuality = String(dlQuality.value || "").trim();
           queueState.items = queueState.items.concat(newItems);
           saveQueueState();
           renderQueue();
-          setStatus(`Queued ${newItems.length} item(s).`);
-          input.value = "";
+          setStatus(dlStatus, `Queued ${newItems.length} item(s).`, "ok");
+          dlUrls.value = "";
         } catch (error) {
-          setStatus(error.message || "Failed to add to queue.", "error");
+          setStatus(dlStatus, error.message || "Failed to add to queue.", "error");
+        }
+      });
+
+      dlPlayBtn.addEventListener("click", () => {
+        if (isRunning) {
+          if (!queueStopRequested) {
+            queueStopRequested = true;
+            setStatus(dlStatus, "Pausing after current item...");
+            updateControls();
+          }
+          return;
+        }
+        clearLog();
+        appendLog("=== Queue started ===\n");
+        runQueue().catch((error) => {
+          setStatus(dlStatus, error.message || "Queue run failed.", "error");
+        });
+      });
+
+      dlRemoveDoneBtn.addEventListener("click", removeDownloaded);
+      dlRemoveAllBtn.addEventListener("click", removeAllItems);
+
+      // ---------------- Saved collections ----------------
+      function setSavedStatus(message, kind) {
+        setStatus(svStatus, message, kind);
+      }
+
+      function isPostUrl(url) {
+        try {
+          const pathname = new URL(String(url).trim()).pathname;
+          return /^\/(p|reel|tv)\//i.test(pathname);
+        } catch {
+          return false;
         }
       }
 
-      form.addEventListener("submit", handleAddToQueue);
-      startBtn.addEventListener("click", () => {
-        outputEl.textContent = "";
-        runQueue().catch((error) => {
-          setStatus(error.message || "Queue run failed.", "error");
-        });
-      });
-      stopBtn.addEventListener("click", stopQueue);
-      removeDownloadedBtn.addEventListener("click", removeDownloaded);
-      removeAllBtn.addEventListener("click", removeAll);
+      function filterPostUrls(urls) {
+        return (Array.isArray(urls) ? urls : [])
+          .map((value) => String(value || "").trim())
+          .filter((value) => value && isPostUrl(value));
+      }
 
+      function addUrlToQueue(link) {
+        const normalized = String(link || "").trim();
+        if (!normalized) return;
+        const exists = queueState.items.some((item) => item.link === normalized);
+        if (exists) return;
+        queueState.items.push({
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          link: normalized,
+          status: "queued",
+          message: "Queued",
+          downloads: [],
+        });
+      }
+
+      function renderSavedResults() {
+        const urls = filterPostUrls(savedScanResults);
+        svResults.innerHTML = "";
+
+        if (!urls.length) {
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = "No post URLs found in this scan.";
+          svResults.appendChild(empty);
+          svCount.textContent = "0";
+          return;
+        }
+
+        svCount.textContent = String(urls.length);
+        urls.forEach((url, index) => {
+          const row = document.createElement("div");
+          row.className = "result-row d-flex align-items-center gap-2 flex-wrap";
+
+          const num = document.createElement("span");
+          num.className = "small text-muted";
+          num.textContent = String(index + 1);
+          row.appendChild(num);
+
+          const link = document.createElement("a");
+          link.className = "result-link small flex-grow-1";
+          link.href = url;
+          link.target = "_blank";
+          link.rel = "noopener";
+          link.textContent = url;
+          row.appendChild(link);
+
+          const addBtn = document.createElement("button");
+          addBtn.type = "button";
+          addBtn.className = "btn btn-sm btn-outline-success";
+          addBtn.textContent = "Add";
+          addBtn.addEventListener("click", () => {
+            addUrlToQueue(url);
+            saveQueueState();
+            renderQueue();
+            setSavedStatus("Added to download queue.", "ok");
+          });
+          row.appendChild(addBtn);
+
+          svResults.appendChild(row);
+        });
+      }
+
+      function renderSavedMeta(payload) {
+        const parts = [
+          `reason: ${payload.reason || "unknown"}`,
+          `iterations: ${payload.iterations || 0}`,
+          `urls: ${payload.totalUrls || 0}`,
+          `posts: ${filterPostUrls(payload.urls || []).length}`,
+        ];
+        if (payload.matchedStopUrls && payload.matchedStopUrls.length) parts.push("stop matched");
+        svMeta.textContent = parts.join("  ·  ");
+      }
+
+      svForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const targetUrl = String(svUrl.value || "").trim();
+        if (!targetUrl) {
+          setSavedStatus("Enter a collection URL.", "error");
+          return;
+        }
+        const account = svAccount.value || "default";
+        const folder = String(svFolder.value || "").trim();
+        const endUrl = String(svEndUrl.value || "").trim();
+
+        svScanBtn.disabled = true;
+        setSavedStatus(`Scanning with account "${account}"... this can take a few minutes.`);
+        svMeta.textContent = "";
+        savedScanResults = [];
+        svResultsBox.classList.remove("d-none");
+        svResults.innerHTML = "";
+        svCount.textContent = "0";
+
+        try {
+          const response = await fetch("/scan-saved", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url: targetUrl, endUrls: endUrl ? [endUrl] : [], account }),
+          });
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok || !payload.ok) {
+            throw new Error(payload.error || "Scan failed.");
+          }
+          savedScanResults = Array.isArray(payload.urls) ? payload.urls : [];
+          renderSavedResults();
+          renderSavedMeta(payload);
+          setSavedStatus("Scan complete.", "ok");
+        } catch (err) {
+          setSavedStatus(err && err.message ? err.message : "Scan failed.", "error");
+        } finally {
+          svScanBtn.disabled = false;
+        }
+      });
+
+      svAddAllBtn.addEventListener("click", () => {
+        const urls = filterPostUrls(savedScanResults);
+        if (!urls.length) {
+          setSavedStatus("No post URLs to add.", "error");
+          return;
+        }
+        let added = 0;
+        urls.forEach((url) => {
+          const before = queueState.items.length;
+          addUrlToQueue(url);
+          if (queueState.items.length > before) added += 1;
+        });
+        saveQueueState();
+        renderQueue();
+        setSavedStatus(`Added ${added} post(s) to the download queue.`, "ok");
+        location.hash = "#downloads";
+      });
+
+      svEnqueueBtn.addEventListener("click", async () => {
+        const urls = filterPostUrls(savedScanResults);
+        if (!urls.length) {
+          setSavedStatus("No post URLs to enqueue.", "error");
+          return;
+        }
+        const folder = String(svFolder.value || "").trim();
+        svEnqueueBtn.disabled = true;
+        try {
+          const payload = await postJson("/sync-queue/pending/add", { urls, folder });
+          setSavedStatus(
+            `Enqueued ${payload.added || 0} post(s) for sync (skipped ${payload.skipped || 0}). The daemon downloads them on its schedule.`,
+            "ok"
+          );
+          await loadSyncData();
+        } catch (err) {
+          setSavedStatus(err && err.message ? err.message : "Failed to enqueue.", "error");
+        } finally {
+          svEnqueueBtn.disabled = false;
+        }
+      });
+
+      svCopyBtn.addEventListener("click", async () => {
+        const urls = filterPostUrls(savedScanResults);
+        if (!urls.length) return;
+        try {
+          await navigator.clipboard.writeText(urls.join("\n"));
+          setSavedStatus(`Copied ${urls.length} URL(s) to clipboard.`, "ok");
+        } catch {
+          setSavedStatus("Could not copy (clipboard blocked).", "error");
+        }
+      });
+
+      // ---------------- Auto-sync lists ----------------
+      function renderSavedLists() {
+        listsBox.innerHTML = "";
+        const lists = Array.isArray(syncData.config.savedLists) ? syncData.config.savedLists : [];
+
+        if (!lists.length) {
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = "No auto-sync lists configured yet. Add one above.";
+          listsBox.appendChild(empty);
+          return;
+        }
+
+        lists.forEach((list) => {
+          const row = document.createElement("div");
+          row.className = "saved-list-row";
+
+          const head = document.createElement("div");
+          head.className = "d-flex justify-content-between align-items-start gap-2 flex-wrap";
+
+          const info = document.createElement("div");
+          info.className = "min-w-0";
+
+          const nameRow = document.createElement("div");
+          nameRow.className = "d-flex align-items-center gap-2 flex-wrap";
+          const folder = document.createElement("span");
+          folder.className = "fw-semibold small";
+          folder.textContent = list.folder || "(no folder)";
+          const acc = document.createElement("span");
+          acc.className = "badge badge-domain";
+          acc.textContent = list.account || "default";
+          nameRow.appendChild(folder);
+          nameRow.appendChild(acc);
+          info.appendChild(nameRow);
+
+          const urlEl = document.createElement("div");
+          urlEl.className = "queue-url small text-muted";
+          urlEl.textContent = list.url;
+          info.appendChild(urlEl);
+
+          const state = syncData.lists && syncData.lists[list.url];
+          if (state) {
+            const meta = document.createElement("div");
+            meta.className = "small text-muted";
+            const lastRun = state.lastRunAt ? new Date(state.lastRunAt).toLocaleString() : "never scanned";
+            meta.textContent = `last scan: ${lastRun} · urls found: ${state.lastScannedCount != null ? state.lastScannedCount : "-"}`;
+            info.appendChild(meta);
+            if (state.lastSeenUrl) {
+              const seen = document.createElement("div");
+              seen.className = "file-path";
+              seen.textContent = `stop: ${state.lastSeenUrl}`;
+              info.appendChild(seen);
+            }
+          }
+
+          head.appendChild(info);
+
+          const removeBtn = document.createElement("button");
+          removeBtn.type = "button";
+          removeBtn.className = "btn btn-sm btn-outline-danger";
+          removeBtn.innerHTML = '<i class="bi bi-trash me-1"></i>Remove';
+          removeBtn.addEventListener("click", () => removeSavedList(list.url));
+          head.appendChild(removeBtn);
+
+          row.appendChild(head);
+          listsBox.appendChild(row);
+        });
+      }
+
+      async function saveSyncConfig(savedLists) {
+        const payload = await postJson("/sync-config", {
+          accounts: Array.isArray(syncData.config.accounts) ? syncData.config.accounts : [],
+          savedLists,
+        });
+        syncData.config = payload.config || syncData.config;
+      }
+
+      listForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const url = String(listUrl.value || "").trim();
+        const folder = String(listFolder.value || "").trim();
+        const account = listAccount.value || "default";
+        if (!url) return;
+
+        const lists = Array.isArray(syncData.config.savedLists) ? syncData.config.savedLists : [];
+        if (lists.some((list) => list.url === url)) {
+          setSavedStatus("That list is already configured.", "error");
+          return;
+        }
+
+        listSubmit.disabled = true;
+        try {
+          await saveSyncConfig(lists.concat([{ url, folder, account }]));
+          renderSavedLists();
+          setSavedStatus("List added. The sync daemon picks it up on its next scan.", "ok");
+          listUrl.value = "";
+          listFolder.value = "";
+        } catch (err) {
+          setSavedStatus(err && err.message ? err.message : "Failed to add list.", "error");
+        } finally {
+          listSubmit.disabled = false;
+        }
+      });
+
+      async function removeSavedList(url) {
+        const lists = Array.isArray(syncData.config.savedLists) ? syncData.config.savedLists : [];
+        try {
+          await saveSyncConfig(lists.filter((list) => list.url !== url));
+          renderSavedLists();
+          setSavedStatus("List removed.", "ok");
+        } catch (err) {
+          setSavedStatus(err && err.message ? err.message : "Failed to remove list.", "error");
+        }
+      }
+
+      // ---------------- Sync queue ----------------
+      function renderSyncQueue() {
+        const pending = Array.isArray(syncData.queue.pending) ? syncData.queue.pending : [];
+        const completed = Array.isArray(syncData.queue.completed) ? syncData.queue.completed : [];
+
+        syncPendingCount.textContent = `${pending.length} pending`;
+        syncCompletedCount.textContent = `${completed.length} completed`;
+
+        dashPending.textContent = String(pending.length);
+        dashCompleted.textContent = `${completed.length} completed`;
+
+        syncPending.innerHTML = "";
+        if (!pending.length) {
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = "Nothing pending.";
+          syncPending.appendChild(empty);
+        }
+        pending.forEach((item) => {
+          const row = document.createElement("div");
+          row.className = "sync-item";
+
+          const head = document.createElement("div");
+          head.className = "d-flex justify-content-between align-items-start gap-2 flex-wrap";
+          const urlEl = document.createElement("div");
+          urlEl.className = "queue-url small flex-grow-1";
+          urlEl.textContent = item.url;
+          head.appendChild(urlEl);
+
+          const removeBtn = document.createElement("button");
+          removeBtn.type = "button";
+          removeBtn.className = "btn btn-sm btn-outline-danger";
+          removeBtn.textContent = "Remove";
+          removeBtn.addEventListener("click", () => removePendingItem(item.url));
+          head.appendChild(removeBtn);
+          row.appendChild(head);
+
+          const meta = document.createElement("div");
+          meta.className = "file-path";
+          const bits = [];
+          if (item.folder) bits.push(`folder: ${item.folder}`);
+          if (item.addedAt) bits.push(new Date(item.addedAt).toLocaleString());
+          meta.textContent = bits.join(" · ");
+          row.appendChild(meta);
+
+          syncPending.appendChild(row);
+        });
+
+        syncCompleted.innerHTML = "";
+        if (!completed.length) {
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = "Nothing completed yet.";
+          syncCompleted.appendChild(empty);
+        }
+        completed.forEach((item) => {
+          const row = document.createElement("div");
+          row.className = "sync-item";
+          const urlEl = document.createElement("div");
+          urlEl.className = "queue-url small";
+          urlEl.textContent = item.url;
+          row.appendChild(urlEl);
+          const meta = document.createElement("div");
+          meta.className = "file-path";
+          const bits = [];
+          if (item.folder) bits.push(`folder: ${item.folder}`);
+          if (item.downloadedAt) bits.push(new Date(item.downloadedAt).toLocaleString());
+          meta.textContent = bits.join(" · ");
+          row.appendChild(meta);
+          syncCompleted.appendChild(row);
+        });
+      }
+
+      async function removePendingItem(url) {
+        try {
+          const payload = await postJson("/sync-queue/pending/remove", { url });
+          setSavedStatus(`Removed ${payload.removed || 0} pending item(s).`, "ok");
+          await loadSyncData();
+        } catch (err) {
+          setSavedStatus(err && err.message ? err.message : "Failed to remove item.", "error");
+        }
+      }
+
+      syncAddForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const urls = parseLinks(syncAddUrls.value);
+        if (!urls.length) {
+          setStatus(syncStatus, "Enter at least one URL.", "error");
+          return;
+        }
+        const folder = String(syncAddFolder.value || "").trim();
+        syncAddBtn.disabled = true;
+        try {
+          const payload = await postJson("/sync-queue/pending/add", { urls, folder });
+          setStatus(
+            syncStatus,
+            `Added ${payload.added || 0} URL(s) to the sync queue (skipped ${payload.skipped || 0}).`,
+            "ok"
+          );
+          syncAddUrls.value = "";
+          await loadSyncData();
+        } catch (err) {
+          setStatus(syncStatus, err && err.message ? err.message : "Failed to enqueue.", "error");
+        } finally {
+          syncAddBtn.disabled = false;
+        }
+      });
+
+      syncClearBtn.addEventListener("click", async () => {
+        try {
+          const payload = await postJson("/sync-queue/clear", {});
+          setStatus(syncStatus, `Cleared ${payload.cleared || 0} completed item(s).`, "ok");
+          await loadSyncData();
+        } catch (err) {
+          setStatus(syncStatus, err && err.message ? err.message : "Failed to clear completed.", "error");
+        }
+      });
+
+      async function loadSyncData() {
+        try {
+          const payload = await getJson("/sync-config");
+          if (!payload || !payload.ok) return;
+          syncData = payload;
+          renderSavedLists();
+          renderSyncQueue();
+        } catch {
+          // ignore
+        }
+      }
+
+      // ---------------- Media browser ----------------
+      function mediaPathToUrl(folder, name) {
+        const parts = folder ? `${folder}/${name}`.split("/") : [name];
+        return `/media/${parts.map((part) => encodeURIComponent(part)).join("/")}`;
+      }
+
+      function renderMediaCrumbs() {
+        const parts = mediaFolder ? mediaFolder.split("/") : [];
+        mediaCrumbs.innerHTML = "";
+        mediaBefore.classList.toggle("d-none", !parts.length);
+        let acc = "";
+        parts.forEach((part, index) => {
+          const sep = document.createElement("span");
+          sep.className = "text-muted mx-1";
+          sep.textContent = "/";
+          mediaCrumbs.appendChild(sep);
+
+          const crumb = document.createElement("span");
+          crumb.className = "crumb-link";
+          crumb.textContent = part;
+          crumb.dataset.mediaPath = acc ? `${acc}/${part}` : part;
+          acc = acc ? `${acc}/${part}` : part;
+          mediaCrumbs.appendChild(crumb);
+        });
+        Array.from(mediaCrumbs.querySelectorAll('[data-media-path]')).forEach((el) => {
+          el.addEventListener("click", () => {
+            mediaFolder = el.dataset.mediaPath;
+            loadMedia();
+          });
+        });
+      }
+
+      function renderMediaRows(items) {
+        mediaRows.innerHTML = "";
+        const filter = String(mediaFilter.value || "").toLowerCase();
+        const filtered = filter
+          ? items.filter((item) => item.name.toLowerCase().includes(filter))
+          : items;
+
+        filtered.forEach((item) => {
+          const tr = document.createElement("tr");
+          tr.className = "media-row";
+
+          const nameTd = document.createElement("td");
+          if (item.dir) {
+            const link = document.createElement("a");
+            link.className = "crumb-link";
+            link.innerHTML = '<i class="bi bi-folder-fill me-1"></i>';
+            link.appendChild(document.createTextNode(item.name));
+            link.addEventListener("click", () => {
+              mediaFolder = mediaFolder ? `${mediaFolder}/${item.name}` : item.name;
+              loadMedia();
+            });
+            nameTd.appendChild(link);
+          } else {
+            const link = document.createElement("a");
+            link.href = mediaPathToUrl(mediaFolder, item.name);
+            link.target = "_blank";
+            link.rel = "noopener";
+            link.innerHTML = '<i class="bi bi-file-earmark-play me-1 text-secondary"></i>';
+            link.appendChild(document.createTextNode(item.name));
+            nameTd.appendChild(link);
+          }
+          tr.appendChild(nameTd);
+
+          const sizeTd = document.createElement("td");
+          sizeTd.className = "text-end text-muted small";
+          sizeTd.textContent = item.dir ? "" : formatBytes(item.size);
+          tr.appendChild(sizeTd);
+
+          const mtimeTd = document.createElement("td");
+          mtimeTd.className = "text-muted small";
+          mtimeTd.textContent = formatDate(item.mtime);
+          tr.appendChild(mtimeTd);
+
+          const actionsTd = document.createElement("td");
+          actionsTd.className = "text-end";
+          if (!item.dir) {
+            const url = mediaPathToUrl(mediaFolder, item.name);
+            const copyBtn = document.createElement("button");
+            copyBtn.type = "button";
+            copyBtn.className = "btn btn-sm btn-outline-secondary";
+            copyBtn.title = "Copy relative path";
+            copyBtn.innerHTML = '<i class="bi bi-clipboard"></i>';
+            copyBtn.addEventListener("click", async () => {
+              try {
+                await navigator.clipboard.writeText(mediaFolder ? `${mediaFolder}/${item.name}` : item.name);
+                setStatus(mediaError, "Path copied.", "ok");
+              } catch {
+                setStatus(mediaError, "Clipboard blocked.", "error");
+              }
+            });
+            actionsTd.appendChild(copyBtn);
+            void url;
+          }
+          tr.appendChild(actionsTd);
+
+          mediaRows.appendChild(tr);
+        });
+
+        mediaEmpty.classList.toggle("d-none", filtered.length > 0);
+      }
+
+      async function loadMedia() {
+        renderMediaCrumbs();
+        mediaError.textContent = "";
+        try {
+          const payload = await getJson(`/api/media?folder=${encodeURIComponent(mediaFolder)}`);
+          if (!payload || !payload.ok) {
+            setStatus(mediaError, (payload && payload.error) || "Failed to list media.", "error");
+            return;
+          }
+          lastMediaItems = payload.items || [];
+          renderMediaRows(lastMediaItems);
+        } catch (err) {
+          setStatus(mediaError, err && err.message ? err.message : "Failed to list media.", "error");
+        }
+      }
+
+      mediaBack.addEventListener("click", () => {
+        const parts = mediaFolder.split("/").filter(Boolean);
+        parts.pop();
+        mediaFolder = parts.join("/");
+        loadMedia();
+      });
+
+      mediaRefresh.addEventListener("click", loadMedia);
+      mediaFilter.addEventListener("input", () => {
+        if (currentView() === "media") renderMediaRows(lastMediaItems);
+      });
+
+      // ---------------- Console ----------------
+      consoleClearBtn.addEventListener("click", clearLog);
+
+      // ---------------- Init ----------------
       loadQueueState();
-      folderInput.value = queueState.folder || "";
-      maxQualityInput.value = queueState.maxQuality || "";
-      input.value = "";
+      dlFolder.value = queueState.folder || "";
+      dlQuality.value = queueState.maxQuality || "";
+      dlUrls.value = "";
       queueState.items.forEach((item) => {
         if (item.status === "running") {
           item.status = "queued";
@@ -784,7 +2534,17 @@
         }
       });
       saveQueueState();
+
+      refreshHealth();
+      refreshAccounts();
+      loadSyncData();
+      setInterval(refreshHealth, 5000);
+      setInterval(refreshAccounts, 15000);
+      setInterval(loadSyncData, 15000);
+
       renderQueue();
+      renderLogs();
+      navigate(currentView());
     </script>
   </body>
 </html>
