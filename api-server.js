@@ -24,6 +24,24 @@ const browsersByAccount = new Map();
 const manualBrowsersByAccount = new Map();
 const manualBrowserTimeoutMs = parsePositiveInt(process.env.MANUAL_BROWSER_TIMEOUT_MS, 900000);
 
+function browserIsAlive(browser) {
+  if (!browser) return false;
+  try {
+    if (browser.isConnected && !browser.isConnected()) return false;
+  } catch {
+    return false;
+  }
+  const proc = browser.process ? browser.process() : null;
+  if (proc && proc.pid) {
+    try {
+      process.kill(proc.pid, 0);
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: false }));
 app.use("/media", express.static(mediaDir));
@@ -107,15 +125,78 @@ app.get("/accounts", async (_req, res) => {
         const isShared = account.name === "default" && sharedBrowser;
         return {
           ...account,
-          manualOpen: Boolean(manual && manual.browser && manual.browser.isConnected && manual.browser.isConnected()),
-          sharedOpen: Boolean(isShared && sharedBrowser.isConnected && sharedBrowser.isConnected()),
-          accountBrowserOpen: Boolean(accountBrowser && accountBrowser.isConnected && accountBrowser.isConnected()),
+          manualOpen: browserIsAlive(manual && manual.browser),
+          sharedOpen: Boolean(isShared && browserIsAlive(sharedBrowser)),
+          accountBrowserOpen: browserIsAlive(accountBrowser),
           openedAt: manual ? manual.openedAt : null,
         };
       }),
     });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+app.post("/accounts", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const name = String(body.name || "").trim();
+    if (!/^[a-z0-9][a-z0-9_-]{0,39}$/i.test(name)) {
+      return res.status(400).json({ ok: false, error: "Account name must be letters/digits/dashes, 1-40 chars, no spaces." });
+    }
+    const key = name.toLowerCase();
+    if (key === "default") {
+      return res.status(400).json({ ok: false, error: "\"default\" is the built-in account; use another name." });
+    }
+
+    const state = await readStateFile();
+    const accounts = Array.isArray(state.config?.accounts) ? state.config.accounts : [];
+    if (accounts.some((a) => a && String(a.name || "").trim().toLowerCase() === key)) {
+      return res.status(409).json({ ok: false, error: `An account named "${name}" already exists.` });
+    }
+
+    const defaults = resolveProfileConfig();
+    const baseDir = path.dirname(defaults.userDataDir);
+    const autoUserDataDir = path.join(baseDir, `account-${key}`);
+    const userDataDir = String(body.userDataDir || "").trim() || autoUserDataDir;
+    const profileDir = String(body.profileDir || "Default").trim() || "Default";
+
+    const account = { name, userDataDir, profileDir };
+    accounts.push(account);
+    state.config = state.config || {};
+    state.config.accounts = accounts;
+    state.updatedAt = new Date().toISOString();
+    await writeStateFile(state);
+
+    return res.status(201).json({ ok: true, account });
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error.message });
+  }
+});
+
+app.delete("/accounts/:name", async (req, res) => {
+  try {
+    const name = String(req.params.name || "").trim();
+    const key = name.toLowerCase();
+    if (key === "default") {
+      return res.status(400).json({ ok: false, error: "The built-in \"default\" account cannot be deleted." });
+    }
+
+    await closeManualBrowser(name);
+    await closeBrowserForAccount(name);
+
+    const state = await readStateFile();
+    const accounts = Array.isArray(state.config?.accounts) ? state.config.accounts : [];
+    state.config = state.config || {};
+    state.config.accounts = accounts.filter(
+      (a) => a && String(a.name || "").trim().toLowerCase() !== key
+    );
+    state.updatedAt = new Date().toISOString();
+    await writeStateFile(state);
+
+    return res.json({ ok: true, account: name });
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error.message });
   }
 });
 
@@ -319,13 +400,10 @@ app.post("/open-browser", async (req, res) => {
     });
 
     const page = await browser.newPage();
-    await page.goto("https://www.instagram.com/accounts/login/", {
-      waitUntil: "domcontentloaded",
-      timeout: 60000,
-    });
+    page.setDefaultTimeout(60000);
 
     logToClientAndConsole(
-      "\n[open-browser] Browser is open and visible in the VNC session. Log in now."
+      "\n[open-browser] Browser is open and visible in the VNC session. It starts on a blank tab."
     );
     logToClientAndConsole(
       `[open-browser] Use http://${req.hostname.split(":")[0]}:7906 to control it.`

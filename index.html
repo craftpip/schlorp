@@ -6,13 +6,7 @@
     <title>xdl</title>
     <link
       rel="icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2310b981'/%3E%3Cpath d='M12 9v14l11-7z' fill='white'/%3E%3C/svg%3E"
-    />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
-      rel="stylesheet"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231d4ed8'/%3E%3Cpath d='M12 9v14l11-7z' fill='white'/%3E%3C/svg%3E"
     />
     <link
       rel="stylesheet"
@@ -21,244 +15,173 @@
     />
     <style>
       :root {
-        --bg: #0b0b0e;
-        --bg-2: #101015;
-        --panel: #16161b;
-        --panel-2: #1c1c22;
-        --border: #26262e;
-        --border-2: #31313b;
-        --text: #f2f2f4;
-        --muted: #90909b;
-        --muted-2: #666672;
-        --accent: #10b981;
-        --accent-bright: #34d399;
-        --accent-dim: rgba(16, 185, 129, 0.12);
-        --accent-border: rgba(16, 185, 129, 0.42);
-        --danger: #f05454;
-        --ok: #22c55e;
-        --warn: #f59e0b;
-        --info: #38bdf8;
-        --radius: 14px;
-        --font: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-        --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        --bg: #faf9f7;
+        --surface: #ffffff;
+        --surface-2: #f4f3ef;
+        --border: #e5e3dc;
+        --border-strong: #c9c6bb;
+        --text: #22211e;
+        --muted: #6f6c63;
+        --faint: #9a978d;
+        --accent: #1d4ed8;
+        --accent-dark: #1e40af;
+        --accent-soft: #eaf0fb;
+        --accent-bright: #3b82f6;
+        --accent-dim: rgba(29, 78, 216, 0.12);
+        --accent-border: rgba(29, 78, 216, 0.42);
+        --danger: #b3261e;
+        --ok: #1a7f37;
+        --warn: #9a6700;
+        --info: #0a6fa8;
+        --radius: 6px;
+        --serif: Georgia, "Times New Roman", "Palatino Linotype", serif;
+        --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
       }
 
-      * {
-        box-sizing: border-box;
-      }
+      * { box-sizing: border-box; }
 
-      html,
-      body {
-        margin: 0;
-      }
+      html, body { margin: 0; }
 
       body {
-        background: radial-gradient(1200px 700px at 85% -10%, rgba(16, 185, 129, 0.09), transparent 60%),
-          var(--bg);
+        background: var(--bg);
         color: var(--text);
-        font-family: var(--font);
+        font-family: var(--sans);
+        font-size: 14px;
+        line-height: 1.55;
         -webkit-font-smoothing: antialiased;
-        text-rendering: optimizeLegibility;
+        padding: 24px;
       }
 
-      ::selection {
-        background: rgba(16, 185, 129, 0.35);
-      }
+      ::selection { background: rgba(29, 78, 216, 0.18); }
 
-      ::-webkit-scrollbar {
-        width: 10px;
-        height: 10px;
-      }
-      ::-webkit-scrollbar-track {
-        background: transparent;
-      }
-      ::-webkit-scrollbar-thumb {
-        background: #2b2b33;
-        border-radius: 8px;
-        border: 2px solid var(--bg);
-        background-clip: content-box;
-      }
-      ::-webkit-scrollbar-thumb:hover {
-        background: #3a3a44;
-        background-clip: content-box;
-        border: 2px solid var(--bg);
-      }
+      ::-webkit-scrollbar { width: 12px; height: 12px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb { background: #d3d1c8; border-radius: 8px; border: 3px solid var(--bg); background-clip: content-box; }
+      ::-webkit-scrollbar-thumb:hover { background: #b7b4a9; background-clip: content-box; border: 3px solid var(--bg); }
 
-      button {
-        font-family: inherit;
-      }
+      a { color: var(--accent); }
+      a:hover { color: var(--accent-dark); }
 
-      :focus-visible {
-        outline: 2px solid var(--accent);
-        outline-offset: 2px;
-      }
+      button { font-family: inherit; }
 
+      :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+      /* ---------- App window ---------- */
       .app-shell {
         display: flex;
-        min-height: 100vh;
+        flex-direction: column;
+        width: 100%;
+        max-width: 1120px;
+        height: calc(100vh - 48px);
+        min-height: 480px;
+        margin: 0 auto;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        overflow: hidden;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
       }
 
-      .sidebar {
-        width: 236px;
-        flex-shrink: 0;
-        background: linear-gradient(180deg, #0e0e12, #0b0b0e);
-        border-right: 1px solid var(--border);
+      .topbar {
+        flex: 0 0 auto;
         display: flex;
-        flex-direction: column;
-        position: sticky;
-        top: 0;
-        height: 100vh;
-        padding: 18px 12px;
-        gap: 4px;
+        align-items: center;
+        gap: 20px;
+        padding: 0 24px;
+        min-height: 54px;
+        background: var(--surface);
+        border-bottom: 1px solid var(--border);
       }
 
       .brand {
         display: flex;
         align-items: center;
-        gap: 10px;
-        padding: 6px 10px 20px;
-        font-size: 20px;
-        font-weight: 800;
-        letter-spacing: 0.01em;
-        color: #fff;
+        gap: 8px;
+        font-family: var(--serif);
+        font-size: 21px;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+        color: var(--text);
+        white-space: nowrap;
       }
 
       .brand .mark {
-        width: 30px;
-        height: 30px;
-        border-radius: 9px;
-        background: linear-gradient(135deg, var(--accent), #047857);
+        width: 26px;
+        height: 26px;
+        border-radius: 5px;
+        background: var(--accent);
+        color: #fff;
         display: grid;
         place-items: center;
-        font-size: 15px;
-        color: #fff;
-        box-shadow: 0 0 16px rgba(16, 185, 129, 0.45);
+        font-size: 12px;
       }
 
-      .sidebar nav {
+      .sidebar {
         flex: 1;
         display: flex;
-        flex-direction: column;
+        align-items: center;
         gap: 2px;
+        overflow-x: auto;
+        scrollbar-width: none;
       }
+      .sidebar::-webkit-scrollbar { display: none; }
 
       .sidebar .nav-link {
-        position: relative;
-        display: flex;
+        display: inline-flex;
         align-items: center;
-        gap: 10px;
+        gap: 7px;
+        padding: 7px 11px;
+        border-radius: 4px;
         color: var(--muted);
         text-decoration: none;
-        padding: 9px 12px;
-        border-radius: 10px;
-        font-size: 14px;
+        font-size: 13.5px;
         font-weight: 500;
-        transition: background 0.15s ease, color 0.15s ease;
+        white-space: nowrap;
+        transition: color 0.12s ease, background-color 0.12s ease;
       }
+      .sidebar .nav-link:hover { color: var(--text); background: var(--surface-2); }
+      .sidebar .nav-link.active { color: var(--accent); background: var(--accent-soft); }
 
-      .sidebar .nav-link i {
-        width: 18px;
-        text-align: center;
-        font-size: 15px;
-      }
-
-      .sidebar .nav-link:hover {
-        color: #fff;
-        background: rgba(255, 255, 255, 0.05);
-      }
-
-      .sidebar .nav-link.active {
-        color: #fff;
-        background: linear-gradient(90deg, var(--accent-dim), transparent);
-      }
-
-      .sidebar .nav-link.active::before {
-        content: "";
-        position: absolute;
-        left: -12px;
-        top: 8px;
-        bottom: 8px;
-        width: 3px;
-        border-radius: 0 3px 3px 0;
-        background: linear-gradient(180deg, var(--accent), var(--accent-bright));
-        box-shadow: 0 0 10px rgba(16, 185, 129, 0.6);
-      }
+      .sidebar .nav-link i { width: 16px; text-align: center; font-size: 13px; }
 
       .sidebar-footer {
-        border-top: 1px solid var(--border);
-        padding: 14px 10px 4px;
-        font-size: 12.5px;
-        color: var(--muted);
         display: flex;
         align-items: center;
         gap: 8px;
+        font-size: 12.5px;
+        color: var(--muted);
+        white-space: nowrap;
       }
 
-      .health-dot {
-        width: 9px;
-        height: 9px;
-        border-radius: 50%;
-        background: #3a3a44;
-      }
+      .health-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex-shrink: 0; }
+      .health-dot.online { background: var(--ok); }
+      .health-dot.offline { background: var(--danger); }
 
-      .health-dot.online {
-        background: var(--ok);
-        animation: pulse 2s infinite;
-      }
-
-      .health-dot.offline {
-        background: var(--danger);
-        box-shadow: 0 0 8px rgba(240, 84, 84, 0.7);
-      }
-
-      @keyframes pulse {
-        0%, 100% {
-          box-shadow: 0 0 4px rgba(34, 197, 94, 0.4);
-        }
-        50% {
-          box-shadow: 0 0 12px rgba(34, 197, 94, 0.95);
-        }
-      }
-
+      /* ---------- Content ---------- */
       .content {
-        flex: 1;
-        min-width: 0;
+        flex: 1 1 auto;
+        overflow-y: auto;
         width: 100%;
-        max-width: 1320px;
-        margin: 0 auto;
-        padding: 28px 32px 48px;
+        padding: 28px 24px 56px;
       }
 
-      .view {
-        display: none;
-      }
-
-      .view.active {
-        display: block;
-        animation: fadeIn 0.18s ease;
-      }
-
-      @keyframes fadeIn {
-        from {
-          opacity: 0;
-          transform: translateY(4px);
-        }
-        to {
-          opacity: 1;
-          transform: none;
-        }
-      }
+      .view { display: none; }
+      .view.active { display: block; }
 
       .view-title {
+        font-family: var(--serif);
         font-size: 26px;
-        font-weight: 800;
+        font-weight: 700;
         letter-spacing: -0.01em;
+        line-height: 1.25;
         margin: 0 0 4px;
+        color: var(--text);
       }
 
       .view-sub {
         color: var(--muted);
-        margin: 0 0 22px;
+        margin: 0 0 24px;
         font-size: 13.5px;
       }
 
@@ -266,68 +189,48 @@
       .card {
         border-radius: var(--radius);
         border: 1px solid var(--border);
-        background: var(--panel);
+        background: var(--surface);
       }
 
-      .card-body {
-        padding: 20px;
-      }
+      .card-body { padding: 20px; }
 
       .card-title {
-        font-size: 13.5px;
+        font-family: var(--serif);
+        font-size: 15px;
         font-weight: 700;
-        letter-spacing: 0.01em;
         margin: 0 0 14px;
-        color: #e8e8ec;
+        color: var(--text);
         display: flex;
         align-items: center;
         gap: 8px;
       }
 
-      .card-title i {
-        color: var(--accent);
-      }
+      .card-title i { color: var(--accent); font-size: 14px; }
 
       /* ---------- Stat cards ---------- */
       .stat-card {
-        position: relative;
-        overflow: hidden;
         border-radius: var(--radius);
         border: 1px solid var(--border);
-        background: linear-gradient(160deg, var(--panel), var(--bg-2));
-        padding: 18px;
+        background: var(--surface);
+        padding: 16px 18px;
         height: 100%;
-        transition: border-color 0.15s ease, transform 0.15s ease;
-      }
-
-      .stat-card:hover {
-        border-color: var(--border-2);
-        transform: translateY(-1px);
-      }
-
-      .stat-card::after {
-        content: "";
-        position: absolute;
-        inset: auto -30% -70% auto;
-        width: 60%;
-        height: 130%;
-        background: radial-gradient(closest-side, var(--accent-dim), transparent);
-        pointer-events: none;
       }
 
       .stat-label {
         font-size: 11px;
         text-transform: uppercase;
-        letter-spacing: 0.09em;
-        color: var(--muted-2);
+        letter-spacing: 0.08em;
+        color: var(--faint);
         font-weight: 600;
       }
 
       .stat-value {
-        font-size: 30px;
-        font-weight: 800;
-        line-height: 1.1;
+        font-family: var(--serif);
+        font-size: 28px;
+        font-weight: 700;
+        line-height: 1.15;
         margin: 2px 0;
+        color: var(--text);
       }
 
       /* ---------- Buttons ---------- */
@@ -336,121 +239,89 @@
         align-items: center;
         justify-content: center;
         gap: 7px;
-        border: 1px solid transparent;
-        border-radius: 10px;
-        padding: 9px 16px;
-        font-size: 13.5px;
+        border: 1px solid var(--border-strong);
+        border-radius: var(--radius);
+        padding: 8px 16px;
+        font-size: 13px;
         font-weight: 600;
         font-family: inherit;
         cursor: pointer;
-        transition: all 0.15s ease;
+        transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
         text-decoration: none;
-        color: #fff;
-        background: var(--panel-2);
+        color: var(--text);
+        background: var(--surface);
         white-space: nowrap;
+        line-height: 1.4;
       }
 
-      .btn:hover {
-        filter: brightness(1.1);
-      }
+      .btn:hover { background: var(--surface-2); }
 
-      .btn:disabled {
-        opacity: 0.5;
-        cursor: not-allowed;
-        filter: none;
-      }
+      .btn:disabled { opacity: 0.55; cursor: not-allowed; }
 
-      .btn-success,
-      .btn-primary {
-        background: linear-gradient(135deg, var(--accent), #047857);
-        box-shadow: 0 2px 14px rgba(16, 185, 129, 0.35);
+      .btn-success, .btn-primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
       }
-
-      .btn-success:hover,
-      .btn-primary:hover {
-        background: linear-gradient(135deg, #34d399, #10b981);
-        box-shadow: 0 4px 22px rgba(16, 185, 129, 0.5);
-      }
-
-      .btn-outline-success {
-        background: transparent;
-        border-color: var(--accent-border);
-        color: var(--accent-bright);
-      }
-
-      .btn-outline-success:hover {
-        background: var(--accent-dim);
+      .btn-success:hover, .btn-primary:hover {
+        background: var(--accent-dark);
+        border-color: var(--accent-dark);
         color: #fff;
       }
 
-      .btn-outline-danger {
-        background: transparent;
-        border-color: rgba(240, 84, 84, 0.35);
-        color: var(--danger);
-      }
+      .btn-outline-primary { background: transparent; border-color: var(--accent); color: var(--accent); }
+      .btn-outline-primary:hover { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 
-      .btn-outline-danger:hover {
-        background: rgba(240, 84, 84, 0.15);
-        color: #fff;
-      }
+      .btn-outline-success { background: transparent; border-color: #3f9d57; color: var(--ok); }
+      .btn-outline-success:hover { background: rgba(26, 127, 55, 0.08); border-color: var(--ok); color: var(--ok); }
 
-      .btn-outline-secondary {
-        background: transparent;
-        border-color: var(--border-2);
-        color: var(--muted);
-      }
+      .btn-outline-danger { background: transparent; border-color: #c96a64; color: var(--danger); }
+      .btn-outline-danger:hover { background: rgba(179, 38, 30, 0.08); border-color: var(--danger); color: var(--danger); }
 
-      .btn-outline-secondary:hover {
-        background: rgba(255, 255, 255, 0.05);
-        color: #fff;
-        border-color: var(--muted);
-      }
+      .btn-outline-secondary { background: transparent; border-color: var(--border-strong); color: var(--muted); }
+      .btn-outline-secondary:hover { background: var(--surface-2); color: var(--text); border-color: var(--border-strong); }
 
-      .btn-sm {
-        padding: 6px 11px;
-        font-size: 12.5px;
-        border-radius: 8px;
-      }
+      .btn-sm { padding: 5px 11px; font-size: 12.5px; border-radius: 4px; }
 
       /* ---------- Forms ---------- */
       .form-label {
         display: block;
         font-size: 12px;
         color: var(--muted);
-        margin: 0 0 6px;
-        font-weight: 500;
+        margin: 0 0 5px;
+        font-weight: 600;
       }
 
       .form-control {
         width: 100%;
-        background: var(--bg-2);
-        border: 1px solid var(--border);
-        border-radius: 10px;
+        background: var(--surface);
+        border: 1px solid var(--border-strong);
+        border-radius: var(--radius);
         color: var(--text);
-        padding: 10px 12px;
+        padding: 9px 12px;
         font-size: 13.5px;
         font-family: inherit;
-        transition: border-color 0.15s ease, box-shadow 0.15s ease;
+        transition: border-color 0.12s ease, box-shadow 0.12s ease;
       }
 
-      textarea.form-control {
-        resize: vertical;
-      }
+      textarea.form-control { resize: vertical; }
 
       .form-control:focus {
         outline: none;
-        border-color: var(--accent-border);
-        box-shadow: 0 0 0 3px var(--accent-dim);
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px var(--accent-soft);
       }
+
+      .form-control-sm { padding: 6px 10px; font-size: 12.5px; }
 
       .form-select {
         width: 100%;
         appearance: none;
-        background-color: var(--bg-2);
-        border: 1px solid var(--border);
-        border-radius: 10px;
+        background-color: var(--surface);
+        border: 1px solid var(--border-strong);
+        border-radius: var(--radius);
         color: var(--text);
-        padding: 10px 32px 10px 12px;
+        padding: 9px 32px 9px 12px;
         font-size: 13.5px;
         font-family: inherit;
         cursor: pointer;
@@ -459,26 +330,20 @@
         background-position: calc(100% - 18px) 50%, calc(100% - 13px) 50%;
         background-size: 5px 5px;
         background-repeat: no-repeat;
-        transition: border-color 0.15s ease, box-shadow 0.15s ease;
       }
 
       .form-select:focus {
         outline: none;
-        border-color: var(--accent-border);
-        box-shadow: 0 0 0 3px var(--accent-dim);
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px var(--accent-soft);
       }
 
-      .form-select option {
-        background: var(--bg-2);
-        color: var(--text);
-      }
+      .form-select option { background: var(--surface); color: var(--text); }
 
       /* ---------- Grid ---------- */
-      .row {
-        display: grid;
-        grid-template-columns: repeat(12, 1fr);
-        gap: 16px;
-      }
+      .row { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; }
+      .row.g-2 { gap: 8px; }
+      .row.g-3 { gap: 16px; }
 
       .col-12 { grid-column: span 12; }
       .col-sm-6 { grid-column: span 12; }
@@ -488,20 +353,14 @@
       .col-lg-6 { grid-column: span 12; }
       .col-xl-3 { grid-column: span 12; }
 
-      @media (min-width: 576px) {
-        .col-sm-6 { grid-column: span 6; }
-      }
+      @media (min-width: 576px) { .col-sm-6 { grid-column: span 6; } }
       @media (min-width: 768px) {
         .col-md-4 { grid-column: span 4; }
         .col-md-6 { grid-column: span 6; }
         .col-md-8 { grid-column: span 8; }
       }
-      @media (min-width: 992px) {
-        .col-lg-6 { grid-column: span 6; }
-      }
-      @media (min-width: 1200px) {
-        .col-xl-3 { grid-column: span 3; }
-      }
+      @media (min-width: 992px) { .col-lg-6 { grid-column: span 6; } }
+      @media (min-width: 1200px) { .col-xl-3 { grid-column: span 3; } }
 
       /* ---------- Layout utilities ---------- */
       .d-flex { display: flex; }
@@ -509,6 +368,7 @@
       .flex-wrap { flex-wrap: wrap; }
       .align-items-center { align-items: center; }
       .align-items-start { align-items: flex-start; }
+      .align-items-end { align-items: flex-end; }
       .justify-content-between { justify-content: space-between; }
       .justify-content-end { justify-content: flex-end; }
       .gap-1 { gap: 4px; }
@@ -529,53 +389,96 @@
       .mt-3 { margin-top: 16px; }
       .me-1 { margin-right: 4px; }
       .ms-2 { margin-left: 8px; }
+      .mx-1 { margin-left: 4px; margin-right: 4px; }
+      .py-2 { padding-top: 8px; padding-bottom: 8px; }
 
       .small { font-size: 12.5px; }
       .fw-semibold { font-weight: 600; }
       .text-muted { color: var(--muted); }
       .text-danger { color: var(--danger); }
+      .text-secondary { color: var(--muted); }
       .text-end { text-align: right; }
 
-      /* ---------- Badges / pills ---------- */
+      .table-responsive { overflow-x: auto; }
+
+      /* ---------- Badges / tags ---------- */
       .badge {
         display: inline-flex;
         align-items: center;
-        padding: 3px 9px;
-        border-radius: 999px;
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 0.03em;
+        padding: 2px 8px;
+        border-radius: 3px;
+        font-size: 11.5px;
+        font-weight: 600;
         line-height: 1.5;
         white-space: nowrap;
       }
 
-      .text-bg-success { background: rgba(34, 197, 94, 0.14); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.3); }
-      .text-bg-danger { background: rgba(240, 84, 84, 0.14); color: #ff8f8f; border: 1px solid rgba(240, 84, 84, 0.35); }
-      .text-bg-primary { background: rgba(16, 185, 129, 0.18); color: #6ee7b7; border: 1px solid rgba(16, 185, 129, 0.45); }
-      .text-bg-secondary { background: rgba(255, 255, 255, 0.06); color: var(--muted); border: 1px solid var(--border-2); }
-      .text-bg-warning { background: rgba(245, 158, 11, 0.14); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.35); }
-      .text-bg-info { background: rgba(56, 189, 248, 0.14); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.35); }
+      .text-bg-success { background: #e7f3ea; color: #175a2b; }
+      .text-bg-danger { background: #fbeceb; color: #a01d16; }
+      .text-bg-primary { background: #e8eefc; color: #1a3f93; }
+      .text-bg-secondary { background: #efeee9; color: #5b5850; }
+      .text-bg-warning { background: #fdf3dd; color: #7c5a06; }
+      .text-bg-info { background: #e0f1fa; color: #0a547a; }
 
       .badge-domain {
-        background: var(--bg-2);
+        background: var(--surface-2);
         color: var(--muted);
-        border: 1px solid var(--border-2);
+        border: 1px solid var(--border);
+      }
+
+      /* ---------- Button group / filters ---------- */
+      .btn-group {
+        display: inline-flex;
+        align-items: stretch;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        overflow: hidden;
+        background: var(--surface-2);
+      }
+
+      .btn-group .btn {
+        border: 0;
+        border-radius: 0;
+        background: transparent;
+        color: var(--muted);
+        box-shadow: none;
+      }
+
+      .btn-group .btn + .btn {
+        border-left: 1px solid var(--border);
+      }
+
+      .btn-group .btn:hover {
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--text);
+      }
+
+      .btn-group .btn.active {
+        background: var(--accent-dim);
+        color: var(--text);
+      }
+
+      .btn-group .badge {
+        font-size: 10px;
+        padding: 1px 6px;
       }
 
       /* ---------- Progress ---------- */
       .progress {
         height: 8px;
-        border-radius: 999px;
-        background: var(--bg-2);
+        border-radius: 4px;
+        background: var(--surface-2);
         overflow: hidden;
       }
 
       .progress-bar {
         height: 100%;
-        border-radius: 999px;
-        background: linear-gradient(90deg, var(--accent), #34d399);
+        border-radius: 4px;
+        background: var(--accent);
         transition: width 0.3s ease;
       }
+
+      .bg-success { background-color: var(--ok); }
 
       /* ---------- Status ---------- */
       .status-text {
@@ -583,21 +486,15 @@
         min-height: 18px;
         color: var(--muted);
       }
-
-      .status-text.error {
-        color: var(--danger);
-      }
-
-      .status-text.ok {
-        color: #4ade80;
-      }
+      .status-text.error { color: var(--danger); }
+      .status-text.ok { color: var(--ok); }
 
       /* ---------- Console ---------- */
       .console {
-        background: #0a0a0d;
+        background: #f6f5f1;
         border: 1px solid var(--border);
-        color: #c9c9d4;
-        border-radius: 12px;
+        color: #35342f;
+        border-radius: var(--radius);
         padding: 14px 16px;
         font-size: 12.5px;
         line-height: 1.55;
@@ -608,10 +505,7 @@
         font-family: var(--mono);
       }
 
-      .console.small {
-        max-height: 280px;
-        font-size: 12px;
-      }
+      .console.small { max-height: 280px; font-size: 12px; }
 
       summary.small {
         color: var(--muted);
@@ -620,88 +514,205 @@
         display: inline-flex;
         align-items: center;
         gap: 6px;
+        font-size: 12.5px;
       }
 
       summary.small::before {
-        content: "";
-        width: 0;
-        height: 0;
-        border-left: 5px solid var(--accent);
-        border-top: 4px solid transparent;
-        border-bottom: 4px solid transparent;
-        transition: transform 0.15s ease;
+        content: "\25B8";
+        font-size: 10px;
+        color: var(--accent);
+        transition: transform 0.12s ease;
       }
 
-      details[open] summary.small::before {
-        transform: rotate(90deg);
-      }
+      details[open] summary.small::before { transform: rotate(90deg); }
 
       /* ---------- Lists / rows ---------- */
-      .empty {
-        color: var(--muted-2);
-        font-size: 13px;
-        padding: 14px 0;
-      }
+      .empty { color: var(--faint); font-size: 13px; padding: 14px 0; }
 
-      .queue-url {
-        word-break: break-all;
-        font-size: 13px;
-        color: #e8e8ec;
-      }
+      .queue-url { word-break: break-all; font-size: 13px; color: var(--text); }
 
       .file-path {
         font-size: 11.5px;
-        color: var(--muted-2);
+        color: var(--faint);
         word-break: break-all;
         font-family: var(--mono);
       }
+
+      /* ---------- Profiles (custom) ---------- */
+      .pr-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-bottom: 16px;
+      }
+
+      .pr-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 14px;
+        font: inherit;
+        font-size: 13px;
+        font-weight: 600;
+        color: #fff;
+        background: var(--accent);
+        border: 1px solid var(--accent);
+        border-radius: var(--radius);
+        cursor: pointer;
+        text-decoration: none;
+        line-height: 1.2;
+        transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+      }
+      .pr-btn:hover:not(:disabled) { background: var(--accent-dark); border-color: var(--accent-dark); }
+      .pr-btn:disabled { opacity: 0.5; cursor: default; }
+      .pr-btn:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-dim); }
+      .pr-btn-ghost {
+        background: transparent;
+        color: var(--text);
+        border-color: var(--border-strong);
+      }
+      .pr-btn-ghost:hover:not(:disabled) { background: transparent; border-color: var(--accent); color: var(--accent); }
+      .pr-btn-danger {
+        background: transparent;
+        color: var(--danger);
+        border-color: #d8b4b0;
+      }
+      .pr-btn-danger:hover:not(:disabled) { background: rgba(179, 38, 30, 0.06); border-color: var(--danger); }
+      .pr-icon-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 30px;
+        height: 30px;
+        background: transparent;
+        color: var(--faint);
+        border: 1px solid transparent;
+        border-radius: var(--radius);
+        cursor: pointer;
+        transition: color 0.15s ease, background 0.15s ease;
+      }
+      .pr-icon-btn:hover:not(:disabled) { color: var(--danger); background: rgba(179, 38, 30, 0.06); }
+
+      .pr-create {
+        display: flex;
+        align-items: flex-end;
+        gap: 10px;
+        flex-wrap: wrap;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 14px 16px;
+        margin-bottom: 10px;
+      }
+      .pr-field { display: flex; flex-direction: column; gap: 5px; flex: 1 1 220px; min-width: 180px; }
+      .pr-field-sm { flex: 0 1 240px; }
+      .pr-field label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); }
+      .pr-input {
+        font: inherit;
+        font-size: 13.5px;
+        color: var(--text);
+        background: var(--surface);
+        border: 1px solid var(--border-strong);
+        border-radius: var(--radius);
+        padding: 8px 10px;
+        transition: border-color 0.15s ease, box-shadow 0.15s ease;
+      }
+      .pr-input::placeholder { color: var(--faint); }
+      .pr-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+
+      .pr-status-wrap { margin-bottom: 12px; }
+      .pr-status { font-size: 13px; color: var(--muted); }
+      .pr-status.ok { color: var(--ok); }
+      .pr-status.error { color: var(--danger); }
+
+      .pr-list { display: flex; flex-direction: column; gap: 8px; }
+      .pr-empty { color: var(--faint); font-size: 13px; padding: 12px 2px; }
+
+      .pr-item {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        flex-wrap: wrap;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 12px 16px;
+        transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+      }
+      .pr-item:hover { border-color: var(--accent-border); }
+      .pr-item.open {
+        border-color: var(--accent-border);
+        background: linear-gradient(180deg, var(--accent-soft), var(--surface));
+      }
+
+      .pr-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        flex: 0 0 auto;
+        background: var(--border-strong);
+        transition: background 0.2s ease;
+      }
+      .pr-item.open .pr-dot {
+        background: var(--accent-bright);
+        box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.45);
+        animation: pr-pulse 1.6s ease-out infinite;
+      }
+      @keyframes pr-pulse {
+        0% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.45); }
+        70% { box-shadow: 0 0 0 8px rgba(59, 130, 246, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+      }
+
+      .pr-info { flex: 1 1 180px; min-width: 0; }
+      .pr-name { font-weight: 600; font-size: 14px; color: var(--text); }
+      .pr-path {
+        font-family: var(--mono);
+        font-size: 11.5px;
+        color: var(--faint);
+        word-break: break-all;
+        margin-top: 2px;
+      }
+      .pr-hint { font-size: 12px; color: var(--muted); flex: 1 1 160px; min-width: 0; }
+      .pr-hint.working { color: var(--accent-dark); }
+      .pr-actions { display: flex; gap: 8px; align-items: center; }
 
       .result-row,
       .sync-item,
       .saved-list-row {
         border: 1px solid var(--border);
-        border-radius: 12px;
-        background: var(--panel);
+        border-radius: var(--radius);
+        background: var(--surface);
         padding: 10px 14px;
       }
 
       .result-link {
         word-break: break-all;
-        color: var(--accent-bright);
+        color: var(--accent);
         text-decoration: none;
       }
-
-      .result-link:hover {
-        text-decoration: underline;
-      }
+      .result-link:hover { text-decoration: underline; }
 
       .crumb-link {
-        color: var(--accent-bright);
+        color: var(--accent);
         cursor: pointer;
         text-decoration: none;
         font-weight: 500;
       }
+      .crumb-link:hover { text-decoration: underline; }
 
-      .crumb-link:hover {
-        text-decoration: underline;
-      }
-
-      .media-row:hover {
-        background: rgba(255, 255, 255, 0.02);
-      }
+      .media-row:hover { background: var(--surface-2); }
 
       /* ---------- Table ---------- */
-      .table {
-        width: 100%;
-        border-collapse: collapse;
-        font-size: 13.5px;
-      }
+      .table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 
       .table thead th {
         font-size: 11px;
         text-transform: uppercase;
-        letter-spacing: 0.07em;
-        color: var(--muted-2);
+        letter-spacing: 0.06em;
+        color: var(--faint);
         font-weight: 600;
         text-align: left;
         padding: 8px 10px;
@@ -710,61 +721,40 @@
 
       .table td {
         padding: 10px;
-        border-bottom: 1px solid #1e1e24;
+        border-bottom: 1px solid var(--border);
         vertical-align: middle;
       }
 
-      .table tbody tr:hover {
-        background: rgba(255, 255, 255, 0.02);
-      }
+      .table tbody tr:hover { background: var(--surface-2); }
 
-      .table-sm td,
-      .table-sm th {
-        padding: 8px 10px;
-      }
+      .table-sm td, .table-sm th { padding: 8px 10px; }
 
-      .align-middle {
-        vertical-align: middle;
-      }
-
-      .mb-0 {
-        margin-bottom: 0;
-      }
+      .align-middle { vertical-align: middle; }
 
       @media (max-width: 768px) {
-        .sidebar {
-          width: 64px;
-          padding: 16px 8px;
+        body { padding: 0; }
+        .app-shell {
+          height: 100vh;
+          min-height: 0;
+          max-width: none;
+          border-radius: 0;
+          border: 0;
         }
-        .brand span:last-child,
-        .sidebar .nav-link {
-          font-size: 0;
-        }
-        .sidebar .nav-link i {
-          font-size: 17px;
-          width: auto;
-        }
-        .sidebar .nav-link.active::before {
-          left: -8px;
-        }
-        .sidebar-footer span:last-child {
-          display: none;
-        }
-        .content {
-          padding: 18px 16px 40px;
-        }
+        .topbar { flex-wrap: wrap; padding: 8px 16px; row-gap: 6px; }
+        .sidebar { flex: 1 1 100%; order: 3; padding-bottom: 2px; }
+        .sidebar-footer { order: 2; }
+        .content { padding: 20px 16px 40px; }
       }
-
     </style>
   </head>
-  <body>
+    <body>
     <div class="app-shell">
-      <aside class="sidebar">
+      <header class="topbar">
         <div class="brand">
           <span class="mark"><i class="bi bi-play-fill"></i></span>
           <span>xdl</span>
         </div>
-        <nav>
+        <nav class="sidebar">
           <a class="nav-link" data-view="dashboard" href="#dashboard"><i class="bi bi-speedometer2"></i> Dashboard</a>
           <a class="nav-link" data-view="downloads" href="#downloads"><i class="bi bi-download"></i> Downloads</a>
           <a class="nav-link" data-view="saved" href="#saved"><i class="bi bi-bookmark-star"></i> Saved &amp; Lists</a>
@@ -777,7 +767,7 @@
           <span id="health-dot" class="health-dot"></span>
           <span id="health-text">Offline</span>
         </div>
-      </aside>
+      </header>
 
       <main class="content">
         <!-- ============ Dashboard ============ -->
@@ -837,50 +827,57 @@
         <!-- ============ Downloads ============ -->
         <section id="view-downloads" class="view">
           <div class="view-title">Downloads</div>
-          <div class="view-sub">Add URLs, then run the queue. Downloads stream into the log below.</div>
+          <div class="view-sub">Add URLs and the queue plays automatically. Downloads stream into the log below.</div>
 
           <form id="dl-form" class="card mb-3">
             <div class="card-body">
-              <div class="row g-2">
+              <div class="row g-2 align-items-end">
                 <div class="col-12">
                   <label class="form-label mb-1" for="dl-urls">URLs (one per line)</label>
-                  <textarea id="dl-urls" class="form-control" rows="4" placeholder="https://www.instagram.com/reel/...&#10;https://www.xvideos.com/video..."></textarea>
+                  <textarea id="dl-urls" class="form-control" rows="3" placeholder="https://www.instagram.com/reel/...&#10;https://www.xvideos.com/video..."></textarea>
                 </div>
                 <div class="col-md-6">
                   <label class="form-label mb-1" for="dl-folder">Folder (inside media, optional)</label>
                   <input id="dl-folder" class="form-control" type="text" placeholder="e.g. mylist or instagram/2026" />
                 </div>
-                <div class="col-md-6">
+                <div class="col-md-4">
                   <label class="form-label mb-1" for="dl-quality">Max quality (optional)</label>
-                  <input id="dl-quality" class="form-control" type="number" min="1" placeholder="e.g. 720 or 1080" />
+                  <input id="dl-quality" class="form-control" type="number" min="1" placeholder="e.g. 720" />
                 </div>
-              </div>
-              <div class="mt-3 d-flex flex-wrap gap-2">
-                <button id="dl-add-btn" type="submit" class="btn btn-success"><i class="bi bi-plus-lg me-1"></i>Add to queue</button>
-                <button id="dl-play-btn" type="button" class="btn btn-primary"><i class="bi bi-play-fill me-1"></i>Run queue</button>
-                <button id="dl-remove-done-btn" type="button" class="btn btn-outline-secondary">Remove completed</button>
-                <button id="dl-remove-all-btn" type="button" class="btn btn-outline-danger">Clear queue</button>
+                <div class="col-md-2">
+                  <button id="dl-add-btn" type="submit" class="btn btn-success w-100"><i class="bi bi-plus-lg me-1"></i>Add</button>
+                </div>
               </div>
             </div>
           </form>
 
           <div class="card mb-3">
-            <div class="card-body">
-              <div class="d-flex justify-content-between align-items-center mb-1 flex-wrap gap-2">
-                <span id="dl-progress-label" class="small fw-semibold">No items yet</span>
+            <div class="card-body py-2">
+              <div class="d-flex align-items-center flex-wrap gap-2">
+                <div id="dl-filters" class="btn-group" role="group" aria-label="Queue filters">
+                  <button type="button" class="btn btn-sm filter-btn active" data-filter="all">All <span class="badge text-bg-secondary ms-1" data-count="all">0</span></button>
+                  <button type="button" class="btn btn-sm filter-btn" data-filter="running">Active <span class="badge text-bg-primary ms-1" data-count="running">0</span></button>
+                  <button type="button" class="btn btn-sm filter-btn" data-filter="done">Done <span class="badge text-bg-success ms-1" data-count="done">0</span></button>
+                  <button type="button" class="btn btn-sm filter-btn" data-filter="error">Failed <span class="badge text-bg-danger ms-1" data-count="error">0</span></button>
+                </div>
+                <span class="flex-grow-1"></span>
                 <span id="dl-progress-pct" class="small text-muted"></span>
+                <button id="dl-play-btn" type="button" class="btn btn-sm btn-primary"></button>
+                <button id="dl-remove-done-btn" type="button" class="btn btn-sm btn-outline-secondary" title="Remove completed items"><i class="bi bi-check2-all"></i> Clear done</button>
+                <button id="dl-remove-all-btn" type="button" class="btn btn-sm btn-outline-danger" title="Remove all items"><i class="bi bi-trash"></i> Clear all</button>
               </div>
-              <div class="progress" style="height: 8px">
+              <div class="d-flex align-items-center gap-2 mt-2">
+                <span id="dl-progress-label" class="small fw-semibold">No items yet</span>
+                <span class="flex-grow-1"></span>
+                <span id="dl-progress-small" class="small text-muted">0 of 0</span>
+              </div>
+              <div class="progress mt-1" style="height: 6px">
                 <div id="dl-progress-bar" class="progress-bar bg-success" style="width: 0%"></div>
               </div>
-              <div class="d-flex justify-content-between align-items-center mt-1 flex-wrap gap-2">
-                <span id="dl-progress-small" class="small text-muted">0 of 0</span>
-                <span id="dl-status" class="status-text"></span>
-              </div>
+              <div class="mt-1"><span id="dl-status" class="status-text"></span></div>
+              <div id="dl-queue" class="mt-3"></div>
             </div>
           </div>
-
-          <div id="dl-queue" class="mb-3"></div>
 
           <details class="mb-4">
             <summary class="small text-muted">Live output</summary>
@@ -1028,44 +1025,32 @@
 
         <!-- ============ Profiles ============ -->
         <section id="view-profiles" class="view">
-          <div class="view-title">Profiles</div>
-          <div class="view-sub">Open a visible browser for an account to log in via VNC, then close it.</div>
-
-          <div class="card mb-3">
-            <div class="card-body">
-              <div class="row g-2 align-items-end">
-                <div class="col-md-4">
-                  <label class="form-label mb-1" for="pr-account">Account</label>
-                  <select id="pr-account" class="form-select"></select>
-                </div>
-                <div class="col-md-8 d-flex gap-2 flex-wrap">
-                  <button id="pr-open-btn" type="button" class="btn btn-success"><i class="bi bi-window me-1"></i>Open browser</button>
-                  <button id="pr-close-btn" type="button" class="btn btn-outline-danger"><i class="bi bi-x-circle me-1"></i>Close browser</button>
-                  <a id="pr-novnc-link" class="btn btn-outline-secondary" href="#" target="_blank" rel="noopener"><i class="bi bi-broadcast me-1"></i>VNC session</a>
-                </div>
-              </div>
-              <div id="pr-status" class="status-text mt-2"></div>
+          <div class="pr-head">
+            <div>
+              <div class="view-title">Browser accounts</div>
+              <div class="view-sub">Each account runs in its own browser profile on the shared VNC desktop. Close the window there — or press Close here.</div>
             </div>
+            <a id="pr-novnc-link" class="pr-btn pr-btn-ghost" href="#" target="_blank" rel="noopener"><i class="bi bi-broadcast"></i>VNC desktop</a>
           </div>
 
-          <div class="card">
-            <div class="card-body">
-              <h6 class="card-title"><i class="bi bi-people me-1"></i>Accounts</h6>
-              <div class="table-responsive">
-                <table class="table table-sm align-middle mb-0">
-                  <thead>
-                    <tr>
-                      <th>Name</th>
-                      <th>Profile</th>
-                      <th>Status</th>
-                      <th>Opened</th>
-                    </tr>
-                  </thead>
-                  <tbody id="pr-accounts"></tbody>
-                </table>
-              </div>
+          <form id="pr-create-form" class="pr-create">
+            <div class="pr-field">
+              <label for="pr-name">Account name</label>
+              <input id="pr-name" class="pr-input" type="text" maxlength="40" placeholder="e.g. work" required />
             </div>
+            <div class="pr-field pr-field-sm">
+              <label for="pr-profile-dir">Profile folder</label>
+              <input id="pr-profile-dir" class="pr-input" type="text" placeholder="Default" />
+            </div>
+            <button id="pr-create-btn" type="submit" class="pr-btn"><i class="bi bi-plus-lg"></i>Create account</button>
+          </form>
+
+          <div class="pr-status-wrap">
+            <div id="pr-status" class="pr-status"></div>
           </div>
+
+          <div id="pr-accounts" class="pr-list"></div>
+          <div id="pr-empty" class="pr-empty">No accounts yet — create one above.</div>
         </section>
 
         <!-- ============ Media ============ -->
@@ -1147,6 +1132,7 @@
       const dlProgressBar = $("dl-progress-bar");
       const dlStatus = $("dl-status");
       const dlQueue = $("dl-queue");
+      const dlFilters = $("dl-filters");
       const dlLive = $("dl-live");
 
       const healthDot = $("health-dot");
@@ -1198,12 +1184,14 @@
       const syncClearBtn = $("sync-clear-btn");
 
       // Profiles view
-      const prAccount = $("pr-account");
-      const prOpenBtn = $("pr-open-btn");
-      const prCloseBtn = $("pr-close-btn");
+      const prCreateForm = $("pr-create-form");
+      const prName = $("pr-name");
+      const prProfileDir = $("pr-profile-dir");
+      const prCreateBtn = $("pr-create-btn");
       const prNovncLink = $("pr-novnc-link");
       const prStatus = $("pr-status");
       const prAccounts = $("pr-accounts");
+      const prEmpty = $("pr-empty");
 
       // Media view
       const mediaFilter = $("media-filter");
@@ -1233,6 +1221,7 @@
       let logPartial = "";
 
       let queueState = { folder: "", maxQuality: "", items: [] };
+      let queueFilter = "all";
 
       // ---------------- Log ----------------
       function appendLog(text) {
@@ -1386,7 +1375,7 @@
       }
 
       function currentView() {
-        const hash = String(location.hash || "").replace(/^#\/?/, "").trim();
+        const hash = String(location.hash || "").replace(/^#\/?/, "").split("?")[0].trim();
         const known = navLinks.some((link) => link.dataset.view === hash);
         return known ? hash : "dashboard";
       }
@@ -1448,7 +1437,7 @@
 
       function populateAccountSelects() {
         const names = knownAccounts.map((account) => account.name);
-        [svAccount, listAccount, prAccount].forEach((select) => {
+        [svAccount, listAccount].forEach((select) => {
           if (!select) return;
           const previous = select.value;
           select.innerHTML = names.map((name) => `<option value="${name}">${name}</option>`).join("");
@@ -1459,30 +1448,79 @@
       function renderProfilesTable() {
         if (!prAccounts) return;
         prAccounts.innerHTML = "";
+        if (!knownAccounts.length) {
+          if (prEmpty) prEmpty.style.display = "";
+          dashOpen.textContent = "0";
+          dashOpenSub.textContent = "manual sessions";
+          return;
+        }
+        if (prEmpty) prEmpty.style.display = "none";
+
         knownAccounts.forEach((account) => {
-          const tr = document.createElement("tr");
-          const nameTd = document.createElement("td");
-          nameTd.textContent = account.name;
-          tr.appendChild(nameTd);
+          const open = Boolean(account.manualOpen);
 
-          const profileTd = document.createElement("td");
-          profileTd.textContent = `${account.profileDir || "Default"}${account.userDataDir ? ` (${account.userDataDir})` : ""}`;
-          tr.appendChild(profileTd);
+          const row = document.createElement("div");
+          row.className = `pr-item${open ? " open" : ""}`;
 
-          const statusTd = document.createElement("td");
-          const badges = [];
-          if (account.manualOpen) badges.push('<span class="badge text-bg-success">manual open</span>');
-          if (account.sharedOpen) badges.push('<span class="badge text-bg-primary">shared</span>');
-          if (account.accountBrowserOpen) badges.push('<span class="badge text-bg-info">active</span>');
-          statusTd.innerHTML = badges.length ? badges.join(" ") : '<span class="text-muted">closed</span>';
-          tr.appendChild(statusTd);
+          const dot = document.createElement("span");
+          dot.className = "pr-dot";
+          dot.title = open ? "Browser is running on the VNC desktop" : "Browser is closed";
+          row.appendChild(dot);
 
-          const openedTd = document.createElement("td");
-          openedTd.textContent = account.openedAt ? new Date(account.openedAt).toLocaleString() : "—";
-          openedTd.className = "text-muted small";
-          tr.appendChild(openedTd);
+          const info = document.createElement("div");
+          info.className = "pr-info";
+          const name = document.createElement("div");
+          name.className = "pr-name";
+          name.textContent = account.name;
+          info.appendChild(name);
+          const path = document.createElement("div");
+          path.className = "pr-path";
+          path.textContent = account.userDataDir
+            ? `${account.userDataDir}/${account.profileDir || "Default"}`
+            : account.profileDir || "Default";
+          info.appendChild(path);
+          row.appendChild(info);
 
-          prAccounts.appendChild(tr);
+          const hint = document.createElement("div");
+          hint.className = "pr-hint";
+          if (open) {
+            hint.textContent = "Running — close the window in VNC or press Close.";
+            hint.classList.add("working");
+          } else if (account.name === "default" && account.sharedOpen) {
+            hint.textContent = "In use by background scans.";
+          } else {
+            hint.textContent = "Closed.";
+          }
+          row.appendChild(hint);
+
+          const actions = document.createElement("div");
+          actions.className = "pr-actions";
+
+          const toggleBtn = document.createElement("button");
+          toggleBtn.type = "button";
+          if (open) {
+            toggleBtn.className = "pr-btn pr-btn-danger";
+            toggleBtn.innerHTML = '<i class="bi bi-x-circle"></i>Close browser';
+            toggleBtn.addEventListener("click", () => closeManualBrowser(account.name));
+          } else {
+            toggleBtn.className = "pr-btn";
+            toggleBtn.innerHTML = '<i class="bi bi-window"></i>Open browser';
+            toggleBtn.addEventListener("click", () => openManualBrowser(account.name, toggleBtn));
+          }
+          actions.appendChild(toggleBtn);
+
+          if (account.name !== "default") {
+            const deleteBtn = document.createElement("button");
+            deleteBtn.type = "button";
+            deleteBtn.className = "pr-icon-btn";
+            deleteBtn.innerHTML = '<i class="bi bi-trash"></i>';
+            deleteBtn.title = `Delete account "${account.name}"`;
+            deleteBtn.addEventListener("click", () => deleteAccount(account.name, deleteBtn));
+            actions.appendChild(deleteBtn);
+          }
+
+          row.appendChild(actions);
+          prAccounts.appendChild(row);
         });
 
         const open = knownAccounts.filter((account) => account.manualOpen);
@@ -1490,16 +1528,23 @@
         dashOpenSub.textContent = open.length ? `manual: ${open.map((a) => a.name).join(", ")}` : "manual sessions";
       }
 
+      let prStatusTimer = null;
       function setProfileStatus(message, kind) {
-        setStatus(prStatus, message, kind);
+        prStatus.className = "pr-status" + (kind === "ok" ? " ok" : kind === "error" ? " error" : "");
+        prStatus.textContent = message || "";
+        if (kind === "ok") {
+          clearTimeout(prStatusTimer);
+          prStatusTimer = setTimeout(() => {
+            prStatus.className = "pr-status";
+            prStatus.textContent = "";
+          }, 8000);
+        }
       }
 
-      prOpenBtn.addEventListener("click", async () => {
+      async function openManualBrowser(account, triggerBtn) {
         if (browserOpenInProgress) return;
-        const account = prAccount.value || "default";
         browserOpenInProgress = true;
-        prOpenBtn.disabled = true;
-        prCloseBtn.disabled = true;
+        if (triggerBtn) triggerBtn.disabled = true;
         setProfileStatus(`Opening browser for "${account}"...`);
         appendLog(`\n=== Opening browser for profile "${account}" ===\n`);
 
@@ -1534,7 +1579,7 @@
           }
 
           setProfileStatus(
-            `Browser for "${account}" is open. Log in at ${novncUrl()}, then press Close browser when done.`,
+            `Browser for "${account}" is open. Log in at ${novncUrl()}, then press Close when done.`,
             "ok"
           );
         } catch (err) {
@@ -1542,14 +1587,11 @@
           appendLog(`[browser] Failed to open browser for "${account}": ${err.message}\n`);
         } finally {
           browserOpenInProgress = false;
-          prOpenBtn.disabled = false;
-          prCloseBtn.disabled = false;
           refreshAccounts();
         }
-      });
+      }
 
-      prCloseBtn.addEventListener("click", async () => {
-        const account = prAccount.value || "default";
+      async function closeManualBrowser(account) {
         try {
           const payload = await postJson("/close-browser", { account });
           setProfileStatus(
@@ -1560,10 +1602,48 @@
           setProfileStatus(err && err.message ? err.message : "Failed to close browser.", "error");
         }
         refreshAccounts();
+      }
+
+      async function deleteAccount(account, triggerBtn) {
+        if (!confirm(`Delete account "${account}"? The profile folder and its logins will be removed.`)) return;
+        if (triggerBtn) triggerBtn.disabled = true;
+        try {
+          const payload = await fetch(`/accounts/${encodeURIComponent(account)}`, { method: "DELETE" });
+          const body = await payload.json();
+          if (!payload.ok || !body.ok) throw new Error((body && body.error) || "Failed to delete account.");
+          setProfileStatus(`Account "${account}" deleted.`, "ok");
+        } catch (err) {
+          setProfileStatus(err && err.message ? err.message : "Failed to delete account.", "error");
+        }
+        refreshAccounts();
+      }
+
+      prCreateForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const name = String(prName.value || "").trim();
+        const profileDir = String(prProfileDir.value || "").trim() || "Default";
+        if (!name) {
+          setProfileStatus("Enter an account name.", "error");
+          return;
+        }
+        prCreateBtn.disabled = true;
+        setProfileStatus(`Creating account "${name}"...`);
+        try {
+          const payload = await postJson("/accounts", { name, profileDir });
+          if (!payload.ok) throw new Error(payload.error || "Failed to create account.");
+          setProfileStatus(`Account "${name}" created.`, "ok");
+          prName.value = "";
+          prProfileDir.value = "";
+        } catch (err) {
+          setProfileStatus(err && err.message ? err.message : "Failed to create account.", "error");
+        } finally {
+          prCreateBtn.disabled = false;
+          refreshAccounts();
+        }
       });
 
       prNovncLink.href = novncUrl();
-      prNovncLink.title = `Open VNC session at ${novncUrl()}`;
+      prNovncLink.title = `Open the shared VNC desktop at ${novncUrl()}`;
 
       // ---------------- Download queue ----------------
       function saveQueueState() {
@@ -1620,8 +1700,8 @@
         if (dlAddBtn) dlAddBtn.disabled = busy;
         dlPlayBtn.disabled = !hasPendingItems() && !busy;
         dlPlayBtn.innerHTML = busy
-          ? '<i class="bi bi-pause-fill me-1"></i>Pause'
-          : '<i class="bi bi-play-fill me-1"></i>Run queue';
+          ? '<i class="bi bi-pause-fill"></i> Pause'
+          : '<i class="bi bi-play-fill"></i> Play';
         dlRemoveDoneBtn.disabled = busy;
         dlRemoveAllBtn.disabled = busy;
       }
@@ -1702,15 +1782,20 @@
       function renderQueue() {
         dlQueue.innerHTML = "";
         const total = queueState.items.length;
+        const visible = queueState.items.filter((item) =>
+          queueFilter === "all" ? true : item.status === queueFilter
+        );
 
-        if (!total) {
+        if (!visible.length) {
           const empty = document.createElement("div");
           empty.className = "empty";
-          empty.textContent = "Queue is empty — add some URLs above.";
+          empty.textContent = total
+            ? `No ${queueFilter === "all" ? "" : queueFilter + " "}items — try another filter.`
+            : "Queue is empty — add some URLs above.";
           dlQueue.appendChild(empty);
         }
 
-        queueState.items.forEach((item, index) => {
+        visible.forEach((item, index) => {
           const card = document.createElement("article");
           card.className = "card mb-2";
           card.style.borderLeftWidth = "3px";
@@ -1810,6 +1895,19 @@
 
         updateQueueProgress();
         updateControls();
+        updateFilterCounts();
+      }
+
+      function updateFilterCounts() {
+        const counts = {
+          all: queueState.items.length,
+          running: queueState.items.filter((i) => i.status === "running").length,
+          done: queueState.items.filter((i) => i.status === "done").length,
+          error: queueState.items.filter((i) => i.status === "error").length,
+        };
+        dlFilters.querySelectorAll("[data-count]").forEach((el) => {
+          el.textContent = counts[el.getAttribute("data-count")] ?? 0;
+        });
       }
 
       async function runQueue() {
@@ -1936,10 +2034,20 @@
           renderQueue();
           setStatus(dlStatus, `Queued ${newItems.length} item(s).`, "ok");
           dlUrls.value = "";
+          if (!isRunning) startQueue();
         } catch (error) {
           setStatus(dlStatus, error.message || "Failed to add to queue.", "error");
         }
       });
+
+      function startQueue() {
+        if (isRunning) return;
+        clearLog();
+        appendLog("=== Queue started ===\n");
+        runQueue().catch((error) => {
+          setStatus(dlStatus, error.message || "Queue run failed.", "error");
+        });
+      }
 
       dlPlayBtn.addEventListener("click", () => {
         if (isRunning) {
@@ -1950,15 +2058,19 @@
           }
           return;
         }
-        clearLog();
-        appendLog("=== Queue started ===\n");
-        runQueue().catch((error) => {
-          setStatus(dlStatus, error.message || "Queue run failed.", "error");
-        });
+        startQueue();
       });
 
       dlRemoveDoneBtn.addEventListener("click", removeDownloaded);
       dlRemoveAllBtn.addEventListener("click", removeAllItems);
+
+      dlFilters.addEventListener("click", (event) => {
+        const btn = event.target.closest(".filter-btn");
+        if (!btn) return;
+        queueFilter = btn.getAttribute("data-filter");
+        dlFilters.querySelectorAll(".filter-btn").forEach((b) => b.classList.toggle("active", b === btn));
+        renderQueue();
+      });
 
       // ---------------- Saved collections ----------------
       function setSavedStatus(message, kind) {
@@ -2539,12 +2651,22 @@
       refreshAccounts();
       loadSyncData();
       setInterval(refreshHealth, 5000);
-      setInterval(refreshAccounts, 15000);
+      setInterval(refreshAccounts, 4000);
       setInterval(loadSyncData, 15000);
+      document.addEventListener(
+        "visibilitychange",
+        () => {
+          if (document.visibilityState === "visible") {
+            refreshAccounts();
+          }
+        },
+        { passive: true }
+      );
 
       renderQueue();
       renderLogs();
       navigate(currentView());
+      if (hasPendingItems()) startQueue();
     </script>
   </body>
 </html>
