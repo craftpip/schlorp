@@ -255,6 +255,7 @@ async function gotoWithInstagram429Retry(page, targetUrl, isInstagramTarget, log
 
 async function run(options = {}) {
   const log = resolveLogger(options.log);
+  const onProgress = typeof options.onProgress === "function" ? options.onProgress : () => {};
 
   const hasProgrammaticOptions =
     Array.isArray(options.urls) ||
@@ -764,7 +765,10 @@ async function run(options = {}) {
                 outputDir,
                 headers,
                 filePrefix,
-                { includeTimestamp: !isInstagramTarget }
+                {
+                  includeTimestamp: !isInstagramTarget,
+                  onProgress: (p) => onProgress({ ...p, stage: p.stage || "downloading", candidate }),
+                }
               );
             } catch (err) {
               if (isInstagramTarget && isInstagram429Error(err)) {

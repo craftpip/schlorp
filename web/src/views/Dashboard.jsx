@@ -1,0 +1,264 @@
+import { useState, useEffect } from "react";
+import { useSearchParams } from "react-router-dom";
+import { useQueue } from "../store/QueueContext";
+
+function toMediaUrl(fp) {
+  if (!fp) return "";
+  const s = String(fp);
+  const idx = s.indexOf("/media/");
+  if (idx !== -1) return s.slice(idx);
+  return s;
+}
+function deriveTitle(url, filePath) {
+  if (filePath) {
+    const base = String(filePath).split("/").pop() || "";
+    return base.replace(/-\d+\.[a-z0-9]+$/i, "").replace(/[-_]+/g, " ").trim() || url;
+  }
+  try {
+    const u = new URL(url);
+    if (u.hostname.includes("pornhub") && u.pathname.includes("view_video")) {
+      const key = u.searchParams.get("viewkey");
+      return key ? `Pornhub • ${key.slice(0, 16)}` : "Pornhub video";
+    }
+    const seg = u.pathname.split("/").filter(Boolean).pop() || "";
+    if (seg.toLowerCase() === "view_video.php") return `${u.hostname.replace(/^www\./, "")} • ${seg}`;
+    const decoded = decodeURIComponent(seg).replace(/[-_]+/g, " ").trim();
+    if (decoded.length > 3) return decoded.length > 60 ? decoded.slice(0, 60) + "…" : decoded;
+    return u.hostname.replace(/^www\./, "") + u.pathname.slice(0, 40);
+  } catch { return url; }
+}
+function stageLabel(stage, pct) {
+  const map = { queued: "Queued", browser: "Starting browser", navigating: "Opening page", capturing: "Capturing media", extracting: "Extracting", downloading: "Downloading", muxing: "Muxing", done: "Done", error: "Failed" };
+  return `${map[stage] || stage} ${pct != null ? `· ${pct}%` : ""}`;
+}
+function barBackground(stage) {
+  switch (stage) {
+    case "browser":
+    case "navigating":
+    case "capturing":
+    case "extracting":
+      return "linear-gradient(90deg,#f59e0b,#f97316)"; // amber — internal navigation / prep (5→55%)
+    case "downloading":
+    case "muxing":
+      return "linear-gradient(90deg,#6366f1,#8b5cf6)"; // violet — actual file download (70→100%)
+    case "queued":
+      return "#475569";
+    case "done":
+      return "#22c55e";
+    case "error":
+      return "#ef4444";
+    default:
+      return "linear-gradient(90deg,#6366f1,#8b5cf6)";
+  }
+}
+const GAP_FULL = /^\d+(?:\.\d+)?[ms]$/i;
+function parseGapText(text) {
+  const t = String(text || "").trim().toLowerCase();
+  if (!t) return 0;
+  const m = t.match(/^(\d+(?:\.\d+)?)([ms])$/i);
+  if (!m) return null;
+  const n = parseFloat(m[1]);
+  return Math.round(m[2].toLowerCase() === "s" ? n * 1000 : n * 60000);
+}
+function fmtGapMs(ms) {
+  if (!ms || ms <= 0) return "";
+  return ms % 60000 === 0 ? `${Math.round(ms / 60000)}m` : `${Math.round(ms / 1000)}s`;
+}
+
+export default function Dashboard() {
+  const { active, completed, logsById, gap, gapWait, setGap, add, remove, retry, clearCompleted } = useQueue();
+  const [urls, setUrls] = useState("");
+  const [folder, setFolder] = useState("");
+  const [folderOptions, setFolderOptions] = useState([]);
+  const [maxQuality, setMaxQuality] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [gapMin, setGapMin] = useState("");
+  const [gapMax, setGapMax] = useState("");
+  const [gapErr, setGapErr] = useState("");
+  useEffect(() => {
+    if (gap?.maxMs > 0) {
+      setGapMin(fmtGapMs(gap.minMs));
+      setGapMax(fmtGapMs(gap.maxMs));
+    }
+  }, [gap?.minMs, gap?.maxMs]);
+  const saveGap = () => {
+    const mn = parseGapText(gapMin), mx = parseGapText(gapMax);
+    if (mn === null || mx === null) { setGapErr("Use format: 90s or 5m"); return; }
+    setGapErr("");
+    let a = Math.max(0, mn), b = Math.max(0, mx);
+    if (a > 0 && b <= 0) b = a;
+    if (b < a) { const t = a; a = b; b = t; }
+    setGap(a, b).catch(() => {});
+  };
+  const clearGap = () => { setGapMin(""); setGapMax(""); setGapErr(""); setGap(0, 0).catch(() => {}); };
+  const fmtSecs = (s) => `${Math.floor(s / 60)}:${String(Math.max(0, s) % 60).padStart(2, "0")}`;
+  const firstQueuedId = active.find((i) => i.status === "queued")?.id;
+  const [displayGapWait, setDisplayGapWait] = useState(null);
+  useEffect(() => {
+    if (gapWait?.waiting) setDisplayGapWait(gapWait);
+    else {
+      const t = setTimeout(() => setDisplayGapWait(null), 800);
+      return () => clearTimeout(t);
+    }
+  }, [gapWait]);
+
+  useEffect(() => {
+    fetch("/api/media").then((r) => r.json()).then((j) => {
+      if (j.ok && Array.isArray(j.items)) {
+        const dirs = j.items.filter((it) => it.dir).map((it) => it.name);
+        setFolderOptions(dirs);
+      }
+    }).catch(() => {});
+  }, []);
+
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tab = searchParams.get("tab") === "completed" ? "completed" : "active";
+  const setTab = (v) => setSearchParams(v === "active" ? {} : { tab: v }, { replace: true });
+  const total = active.length + completed.length;
+  const done = completed.filter((i) => i.status === "done").length;
+  const pct = total ? Math.round((done / Math.max(1, total)) * 100) : 0;
+
+  const onAdd = async (e) => {
+    e.preventDefault();
+    const list = urls.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    if (!list.length) { setErr("Add at least one URL"); return; }
+    setErr(""); setBusy(true);
+    try {
+      await add(list, folder, maxQuality || null);
+      setUrls("");
+    } catch (ex) { setErr(ex.message); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div>
+      <div className="hero-download" style={{ marginBottom: 18 }}>
+        <div className="hero-inner">
+          <form onSubmit={onAdd}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+              <div style={{ fontWeight: 700, fontSize: 15 }}>Add videos</div>
+              <span className="badge text-bg-primary"><i className="bi bi-lightning-charge" /> Auto-queue</span>
+            </div>
+            <label className="form-label">Video URLs — one per line</label>
+            <textarea className="form-control" rows={3} placeholder={"https://www.instagram.com/reel/XXXX\nhttps://www.xvideos.com/video1234/title"} value={urls} onChange={(e) => setUrls(e.target.value)} />
+            <div className="row g-2" style={{ marginTop: 12, alignItems: "end" }}>
+              <div className="col-md-6">
+                <label className="form-label"><i className="bi bi-folder2" /> Folder <span style={{ color: "var(--faint)", fontWeight: 400 }}>inside /media</span></label>
+                <input className="form-control" type="text" list="folder-list" placeholder="e.g. instagram / favorites — type or pick" value={folder} onChange={(e) => setFolder(e.target.value)} />
+                <datalist id="folder-list">
+                  {folderOptions.map((n) => <option key={n} value={n} />)}
+                </datalist>
+              </div>
+              <div className="col-md-4">
+                <label className="form-label"><i className="bi bi-badge-hd" /> Max quality</label>
+                <select className="form-control" value={maxQuality} onChange={(e) => setMaxQuality(e.target.value)}>
+                  <option value="">Best (auto)</option>
+                  <option value="1080">1080p (max)</option>
+                  <option value="720">720p</option>
+                  <option value="480">480p</option>
+                  <option value="360">360p</option>
+                  <option value="240">240p</option>
+                </select>
+              </div>
+              <div className="col-md-2">
+                <button type="submit" className="btn btn-primary btn-block btn-lg" disabled={busy}><i className="bi bi-plus-lg" /> Add to queue</button>
+              </div>
+            </div>
+            {err && <div className="status-text" style={{ color: "var(--danger)", marginTop: 8 }}>{err}</div>}
+          </form>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, borderBottom: "1px solid var(--border)", paddingBottom: 10 }}>
+        <button className={`btn btn-sm ${tab === "active" ? "btn-primary" : "btn-outline-secondary"}`} onClick={() => setTab("active")}>
+          <i className="bi bi-collection-play" /> Active <span className="badge text-bg-secondary" style={{ marginLeft: 6 }}>{active.length}</span>
+          {active.filter((i) => i.status === "running").length > 0 && <span className="badge text-bg-primary" style={{ marginLeft: 4 }}>● {active.filter((i) => i.status === "running").length} running</span>}
+        </button>
+        <button className={`btn btn-sm ${tab === "completed" ? "btn-primary" : "btn-outline-secondary"}`} onClick={() => setTab("completed")}>
+          <i className="bi bi-check2-all" /> Completed <span className="badge text-bg-success" style={{ marginLeft: 6 }}>{completed.filter((i) => i.status === "done").length}</span>
+          <span className="badge text-bg-danger" style={{ marginLeft: 4 }}>{completed.filter((i) => i.status === "error").length}</span>
+        </button>
+        <span style={{ flex: 1 }} />
+        <span className="small" style={{ color: "var(--muted)", display: "inline-flex", alignItems: "center", gap: 4 }} title="Wait between downloads — same values = fixed, different = random range. Format: 90s or 5m"><i className="bi bi-hourglass-split" /> Gap</span>
+        <div style={{ position: "relative", display: "inline-flex", alignItems: "stretch" }}>
+          <input type="text" className={`form-control form-control-sm ${gapErr ? "is-invalid" : ""}`} style={{ width: 72, borderTopRightRadius: 0, borderBottomRightRadius: 0 }} value={gapMin} placeholder="5m" onChange={(e) => { if (gapErr) setGapErr(""); setGapMin(e.target.value); }} onKeyDown={(e) => { if (e.key === "Enter") saveGap(); }} />
+          <span className="small" style={{ display: "inline-flex", alignItems: "center", padding: "0 7px", border: "1px solid var(--border)", background: "var(--surface-2)", color: "var(--muted)", marginLeft: -1 }}>–</span>
+          <input type="text" className={`form-control form-control-sm ${gapErr ? "is-invalid" : ""}`} style={{ width: 72, borderRadius: 0, marginLeft: -1 }} value={gapMax} placeholder="15m" onChange={(e) => { if (gapErr) setGapErr(""); setGapMax(e.target.value); }} onKeyDown={(e) => { if (e.key === "Enter") saveGap(); }} />
+          <button type="button" className="btn btn-sm btn-outline-secondary" style={(gap?.maxMs > 0 || gapMin || gapMax) ? { borderRadius: 0, marginLeft: -1 } : { borderTopLeftRadius: 0, borderBottomLeftRadius: 0, marginLeft: -1 }} onClick={saveGap} title="Apply gap"><i className="bi bi-check-lg" /></button>
+          {(gap?.maxMs > 0 || gapMin || gapMax) && (
+            <button type="button" className="btn btn-sm btn-outline-secondary" style={{ borderTopLeftRadius: 0, borderBottomLeftRadius: 0, marginLeft: -1 }} onClick={clearGap} title="Disable gap"><i className="bi bi-x-lg" /></button>
+          )}
+          {gapErr && (
+            <div style={{ position: "absolute", top: "100%", right: 0, marginTop: 6, background: "#2a1215", border: "1px solid #7f1d1d", color: "#fca5a5", padding: "6px 10px", borderRadius: 8, fontSize: 12, zIndex: 20, whiteSpace: "nowrap", boxShadow: "0 4px 16px rgba(0,0,0,.35)" }}>
+              <i className="bi bi-exclamation-triangle" /> {gapErr}
+            </div>
+          )}
+        </div>
+        {tab === "completed" && (
+          <button type="button" className="btn btn-sm btn-outline-secondary" onClick={clearCompleted} disabled={!completed.length} title="Clear entries only — files stay in /media" style={{ alignSelf: "stretch", display: "inline-flex", alignItems: "center" }}><i className="bi bi-x-lg" /> Clear</button>
+        )}
+      </div>
+
+          {tab === "active" ? (
+            <>
+              <div style={{ background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 12, padding: "12px 14px", marginBottom: 12 }}>
+                <div style={{ display: "flex", gap: 10 }}><span className="small fw-semibold">{total ? `${done} of ${total} done` : "No items yet"}</span><span style={{ flex: 1 }} /><span className="small" style={{ fontWeight: 700, color: "var(--accent)" }}>{pct}%</span></div>
+                <div className="progress" style={{ marginTop: 8, height: 8 }}><div className="progress-bar" style={{ width: `${pct}%`, background: "linear-gradient(90deg,#6366f1,#8b5cf6)", transition: "width .3s" }} /></div>
+                <div className="small" style={{ color: "var(--muted)", marginTop: 6, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>{active.length ? <><span>{active.filter((i) => i.status === "running").length} running · {active.filter((i) => i.status === "queued").length} queued</span>{displayGapWait?.waiting && <span style={{ color: "var(--text)", fontWeight: 600 }}><i className="bi bi-hourglass-split" style={{ marginRight: 4 }} />next in {fmtSecs(displayGapWait.remainingSec || 0)}{displayGapWait.paused ? " · paused" : ""}</span>}</> : "idle — add URLs above"}</div>
+              </div>
+              {active.length === 0 ? <div className="empty"><i className="bi bi-inbox" /> Queue is empty — paste URLs above.</div> : (
+                <div style={{ display: "grid", gap: 10 }}>
+                  {active.map((it) => (
+                    <div key={it.id} className={`queue-card ${it.status}`} style={{ border: "1px solid var(--border)", background: "var(--surface)", boxShadow: "0 1px 2px rgba(0,0,0,.04)", borderRadius: 12 }}>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                        <span className={`badge ${it.status === "running" ? "text-bg-primary" : "text-bg-secondary"} badge-dot`}>{it.status}</span>
+                    <span className="small" style={{ color: "var(--muted)" }}>{stageLabel(it.stage, it.pct)}</span>
+                    {it.detail && <span className="small" style={{ color: "var(--faint)", marginLeft: 6, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 280, fontFamily: "var(--mono)", fontSize: 11 }}>{it.detail}</span>}
+                    <span style={{ flex: 1 }} />
+                    {it.status === "running" ? (
+                      <button className="btn btn-sm btn-outline-secondary" disabled title="Running — cannot remove until it finishes or fails"><i className="bi bi-x-lg" /> Remove</button>
+                    ) : (
+                      <button className="btn btn-sm btn-outline-secondary" onClick={() => remove(it.id)} title="Remove from queue"><i className="bi bi-x-lg" /> Remove</button>
+                    )}
+                      </div>
+                  <div style={{ fontWeight: 600, fontSize: 13, marginTop: 6, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={deriveTitle(it.url, it.filePath)}>{deriveTitle(it.url, it.filePath)}</div>
+                  <div className="queue-url" style={{ marginTop: 2, fontSize: 11, color: "var(--faint)" }}>{it.url}</div>
+                  <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}><i className="bi bi-folder2" /> {it.folder || "—"}</div>
+                  <div className="progress" style={{ height: 6, marginTop: 8 }}><div className="progress-bar" style={{ width: `${it.pct || 0}%`, background: barBackground(it.stage), transition: "width .4s ease, background .3s ease" }} /></div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              {completed.length === 0 ? <div className="empty"><i className="bi bi-check-circle" /> Nothing completed yet.</div> : (
+                <div style={{ display: "grid", gap: 10 }}>
+                  {completed.map((it) => (
+                    <div key={it.id} className={`queue-card ${it.status}`}>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <span className={`badge ${it.status === "done" ? "text-bg-success" : "text-bg-danger"} badge-dot`}>{it.status}</span>
+                        <span className="small" style={{ color: "var(--muted)" }}>{it.stage}</span>
+                        <span style={{ flex: 1 }} />
+                        {it.status === "error" && <button className="btn btn-sm btn-outline-secondary" onClick={() => retry(it.id)}><i className="bi bi-arrow-counterclockwise" /> Retry</button>}
+                        <button className="btn btn-sm btn-outline-secondary" onClick={() => remove(it.id)} title="Remove entry only — keeps file in /media"><i className="bi bi-x-lg" /> Remove</button>
+                      </div>
+                  <div style={{ fontWeight: 600, fontSize: 13, marginTop: 6, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={deriveTitle(it.url, it.filePath)}>{deriveTitle(it.url, it.filePath)}</div>
+                  <div className="queue-url" style={{ marginTop: 2, fontSize: 11, color: "var(--faint)" }}>{it.url}</div>
+                  {it.status === "done" && it.filePath && (
+                    <div className="small" style={{ marginTop: 6, padding: "8px 10px", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 8 }}>
+                      <a href={toMediaUrl(it.filePath)} target="_blank" rel="noopener" style={{ fontWeight: 600 }}>{toMediaUrl(it.filePath)}</a>
+                      <div style={{ color: "var(--muted)", fontSize: 11, marginTop: 2 }}>Saved to: {it.filePath}</div>
+                    </div>
+                  )}
+                  {it.status === "error" && <div className="small" style={{ color: "var(--danger)", marginTop: 4 }}>{it.error || "Failed"}</div>}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+    </div>
+  );
+}

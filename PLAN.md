@@ -3,125 +3,125 @@
 > Project: **xdl** (media downloader: CloakBrowser + Puppeteer visiting Instagram / xHamster / xVideos / Pornhub / generic)
 > Runtime: Node 18+ / CommonJS / no build step. Docker: `node:20-bookworm-slim`.
 > This file is the source of truth for the UI revamp. Update it as we go — we may lose context between sessions.
+>
+> **Detailed plans now live in `plans/`** — active: `plans/002-react-panel.md` (React rebuild + WebSocket + sequential queue, 2026-08-22). 001 archived to `/tmp`.
 
 ---
 
 ## 1. User requests (all, in order)
 
-1. **Create a React app** for the UI. → *Superseded by #3 (user chose vanilla JS).*
+1. **Create a React app** for the UI. → *Superseded by vanilla JS.*
 2. **Make a revamp plan** for a good interface to manage "my things" (downloads, queue, saved lists, accounts/profiles, console, media).
 3. **Scope = everything**: Dashboard, Downloads, Saved Lists, Sync Queue, Profiles, Console **+ new Media browser**. Replaces both `index.html` and `scan-saved.html`.
 4. Build tooling: **keep vanilla JS** (no React, no Vite) — stays compatible with Docker live-mount, no build step.
-5. Styling: **Bootstrap or something simple** — "simple ass app". → *Superseded by #8 (user hated Bootstrap look).*
+5. Styling: **Bootstrap or something simple** → superseded.
 6. **Make the software better / smooth functioning.**
-7. **Save the plan to a file** (token-limit safety). ← *This file.*
-8. **Modern UI, red and black themed.** Project name is **xdl**. → Bootstrap dropped, hand-rolled theme.
-9. **Add all requests to the plan** and keep going. ← *This section.*
+7. **Save the plan to a file** (token-limit safety).
+8. **Modern UI, red and black themed.** → superseded by lovable light theme (2026-08-22).
+9. **Add all requests to the plan** and keep going.
+10. **2026-08-22: How good is http://10.69.1.164:7866/#dashboard, make the UI lovable and good looking, organize the items nicely, it should be logically placed. The main goal is to download video files.** ← *Current work.*
 
 ---
 
-## 2. Decisions locked in
+## 2. Decisions locked in (2026-08-22 — lovable revamp)
 
 | Topic | Decision |
 |---|---|
-| Framework | Vanilla JS single-page app (no build step, no TypeScript) |
-| Styling | Hand-rolled CSS, **red & black** dark theme, Inter + JetBrains Mono fonts, Bootstrap Icons (icon font only) |
-| Layout | Fixed dark sidebar (236px, collapses to 64px on mobile) + content area, hash-based routing |
-| Backend | Express API untouched except: new `GET /api/media` + `GET /scan-saved` → redirect |
-| Deployment | `index.html` still served by Express at `/`; works with Docker live-mount as-is |
-| Media browser | New feature — directory listing via `GET /api/media?folder=`, filter client-side |
+| Framework | Vanilla JS single-page app, hash routing `#dashboard` `#downloads` `#saved` `#sync` `#profiles` `#media` `#console` — no build step |
+| Styling | Hand-rolled CSS, **lovable light theme**: `Instrument Sans` + `JetBrains Mono`, violet/indigo gradient `6366f1 → 8b5cf6 → ec4899`, Bootstrap Icons only |
+| Layout | **App shell → responsive layout**: Desktop: dark sidenav (272px, `0f172a → 1e1b4b` gradient) + main column with sticky blurred topbar (`f6f7fb` backdrop). Mobile: sidenav becomes drawer with backdrop. Fixes previous horizontal topbar overflow. |
+| IA principle | **Download is hero**: Dashboard *is* the download entry point. Logical order by frequency: `Main (Dashboard/Downloads/Media)` → `Sources (Saved/Sync)` → `System (Profiles/Console)` |
+| Backend | Express API untouched except `GET /api/media` + `GET /scan-saved → 302 /#saved` (from earlier revamp) |
+| Deployment | `index.html` served at `/` (105k bytes), Docker live-mount compatible |
 
 ---
 
-## 3. What has been done (state at last save)
+## 3. Dashboard assessment — http://10.69.1.164:7866/#dashboard
+
+### Before (2026-08-22 pre-revamp) — 6/10
+- Beige `faf9f7` paper theme, 6px radius, flat cards — utilitarian, not delightful. No visual hierarchy.
+- Horizontal topbar held 7 nav links + health — overflow on laptop, no grouping, hard to scan (`index.html:71` topbar).
+- Dashboard showed 4 stat cards + quick-action buttons but **no download input above the fold** — user had to switch to Downloads tab to do the primary job.
+- Downloads form was cramped 3-col row, tiny textarea, generic `Add` — didn't feel primary.
+- Media was plain table without breadcrumbs/pills, saved/sync all same card style.
+
+### After — lovable (2026-08-22)
+Score: **9/10 for the goal (download-first)** — needs real-user validation on queue throughput.
+
+**What changed in `index.html`:**
+- **Sidenav grouping**: `Main` (Dashboard, Downloads, Media library) / `Sources` (Saved & Lists, Sync Queue) / `System` (Profiles, Console) with active gradient (`6366f1 → 8b5cf6`) and icon badges. Health card + VNC link in footer. Pro-tip card.
+- **Topbar**: sticky `rgba(246,247,251,.85)` blurred, shows current view title/sub + health pill, mobile menu button.
+- **Dashboard hero**: `hero-download` gradient-bordered card (`6366f1 → 8b5cf6 → ec4899` outer, white inner) with title `Quick download`, description, **supported pills** (IG pink, xH red, xV blue, PH orange, +generic) and full-width textarea + folder/quality row + `Add to queue` gradient button. This makes download possible without leaving dashboard.
+- **Stats**: 4 cards with colored icons (indigo/violet/emerald/amber), hover lift, radial accent, badge `OK/READY`.
+- **Downloads view**: filter pill group `All/Active/Done/Failed` with counts, progress card (`f8fafc` bg, 8px gradient bar with shimmer), `queue-card` with left-border state (`running` indigo wash, `done` green, `error` red wash), drag-over highlight on textarea.
+- **Saved**: two-column cards, `LIVE SCAN` badge, helpers under inputs, results with per-row `Add`.
+- **Media**: breadcrumb pills (`House > Media`), folder-fill amber icon, filter + refresh topbar action.
+- **Console**: dark `0f172a` terminal shared buffer, 500-line cap.
+- **UX polish**: `eyebrow` pill, `supported-pill`, `quick-action primary`, `healthPulse` dot animation, `fadeIn` view transition, drag & drop for URLs, local filter, 272→280px responsive.
+
+All JS IDs preserved (`dl-form`, `dl-urls`, `dl-folder`, `dl-quality`, `dl-filters`, `sv-form`, `media-rows`, etc.) — logic in `index.html:650` intact.
+
+---
+
+## 4. What has been done (cumulative)
 
 ### Backend (`api-server.js`)
-- **Added** `GET /api/media?folder=<rel>` → `{ ok, folder, items:[{name,dir,size,mtime}] }`. Reuses `resolveMediaOutputDir()` for safe path containment. Sorts dirs first then name. Returns 400 on invalid paths.
-- **Changed** `GET /scan-saved` from serving `scan-saved.html` → `302 redirect` to `/#saved` (feature now lives in the SPA).
+- `GET /api/media?folder=<rel>` → `{ ok, folder, items:[{name,dir,size,mtime}] }` with `resolveMediaOutputDir()` containment, dirs-first sort, 400 on invalid.
+- `GET /scan-saved` → `302` to `/#saved`.
+- Health: `GET /health` returns `busy`, `browserReady`, `accountBrowsersReady`.
 
-### Frontend (`index.html` — full rewrite, vanilla JS, red/black theme)
-Single-page app, 7 views behind a sidebar, hash routing (`#dashboard` `#downloads` `#saved` `#sync` `#profiles` `#media` `#console`):
-
-- **Dashboard**: stat cards (server online/busy, sync queue depth, shared browser status, open profiles), busy badge, quick-action buttons.
-- **Downloads**: multi-URL queue (localStorage persisted), folder + max quality, Run/Pause, retry/remove/clear, thin progress bar, per-item status cards (colored left border), streaming log panel (`<details>`), parses `Downloaded media to: <path>` lines into clickable file links.
-- **Saved & Lists**: scan IG saved collection (url, account, folder, optional stop-url) → filtered post URLs with per-row "Add", plus "Add all to download queue" / "Enqueue for sync" / "Copy"; and auto-sync list management (add/remove, per-list last-scan/stop state).
-- **Sync Queue**: add URLs form + pending list (remove each) + completed list + clear completed.
-- **Profiles**: account select, open/close visible browser (streams log), VNC session link, accounts table with live status.
-- **Media**: breadcrumb navigation, up-one-level, table (name/size/modified), copy relative path, client-side filter.
-- **Console**: shared streaming log (500-line cap) shared by downloads + browser-open, clear button.
-- Polling: `/health` 5s, `/accounts` 15s, `/sync-config` 15s. Global log buffer reused by all streamers.
-
-### Smoothness fixes (from request #6)
-- Media filter is now **local** (no refetch per keystroke).
-- Log rendering capped + shared buffer; scroll pinned to bottom.
-- Queue pauses gracefully after the in-flight item.
-- Added red SVG **favicon** (was 404 before).
+### Frontend (`index.html` — current 105k, lovable theme)
+- 7 views, hash routing, `localStorage` queue (`xdl.queue.v1`), streaming `/download` logs, `Downloaded media to:` → clickable `/media/...` links, polling `/health` 5s / `/accounts` 4s / `/sync-config` 15s.
+- Verification: `node -e` html length 105601 + ids present OK, `curl /health` OK, `curl /` 105665 bytes, DOM audit via CloakBrowser (`4153d56b2180`) shows `Download videos, effortlessly.` hero visible at `x:496 y:70`.
 
 ---
 
-## 4. Design system (red & black)
+## 5. Roadmap — next
 
-- `--bg #0b0b0e`, panels `#16161b` / `#1c1c22`, borders `#26262e`.
-- Accent `--accent #10b981`, bright `#34d399`, dim glows `rgba(16,185,129,*)` + green radial gradient in page background. Danger/error semantic red `--danger #f05454`.
-- Brand: red gradient play-mark + "xdl". Sidebar active item gets red left bar + gradient wash.
-- Buttons: red gradient primary with glow; ghost/outline variants; status pills (`success/danger/primary/secondary/warning/info`) all dark translucent.
-- Console: near-black `#0a0a0d`, mono font, red detail accents.
-- Custom scrollbars, `::selection` red, `:focus-visible` red ring, view fade-in animation.
+### Done (2026-08-22)
+- [x] Lovable light theme + dark sidenav
+- [x] Download-first IA (hero on dashboard, logical grouping)
+- [x] Drag & drop, gradient progress, queue states, supported pills
+- [x] Responsive drawer, topbar viewMeta, health pill
 
----
+### Next (priority)
+1. **Inline media preview** — `<video>` modal in Media instead of only new-tab.
+2. **Per-file download/re-queue** from Media.
+3. **Global job banner** — show active job type in topbar everywhere (now only badge + health).
+4. **Media watch mode** — auto-poll 15s toggle so new files appear live.
+5. **429 cooldown banner** — surface Instagram rate-limit instead of raw error.
+6. **Dashboard batch box** already done (hero is the box) — consider adding recent downloads list on dashboard.
+7. **Confirm dialogs** for destructive clears.
+8. **Keyboard shortcuts** `1..7` switch views.
 
-## 5. Redesign roadmap for "smooth functioning"
-
-### Done
-- [x] New `GET /api/media` listing endpoint
-- [x] `/scan-saved` → SPA redirect
-- [x] Full SPA with 7 views, all old features ported + Media browser
-- [x] Red/black modern theme (Bootstrap CSS removed)
-- [x] Local media filtering
-
-### Next (in priority order)
-1. **Preview media inline** — play video/audio files in the Media view (`<video>`/`<audio>` modal) instead of only opening a new tab. (Small JS addition.)
-2. **Download button per file** in Media (re-download to a chosen folder) or at least a "reveal" path.
-3. **Job status feedback** — show active job type in header everywhere (currently only dashboard badge + health busy flag).
-4. **Auto-refresh Media view** with optional "watch mode" toggle (poll every 15s) so newly downloaded files appear live.
-5. **Retry-on-429 UX** — surface 429 cooldown in the UI ("Instagram rate-limited, cooling down" banner) instead of a raw error line.
-6. **Batch URL field on Dashboard** quick download box (currently only quick-action nav buttons).
-7. **Confirmation dialogs** for destructive actions (clear queue / clear completed / remove list).
-8. **Keyboard shortcuts** (e.g. `1..7` switch views, `Enter` runs queue from Downloads).
-9. **Better sync status** — show daemon uptime / last task from state (`lists[].lastRunAt`) on Dashboard.
-
-### Backend candidates (only if needed)
-- `GET /api/job` — expose current active job (type, startedAt) so UI can show live "busy" detail.
-- `DELETE /media/:path` guarded delete (with trash instead of rm) — only if user wants in-app deletion.
+### Backend candidates
+- `GET /api/job` expose active job detail
+- `DELETE /media/:path` with trash
 
 ---
 
 ## 6. Testing / verification
 
-- `node --check` on extracted `<script>` → **OK**
-- `node --check api-server.js` → **OK**
-- CSS brace balance → **152/152 OK**
-- **Live HTTP test** (api-server on `:3211`): `/health` OK, `/api/media` OK (empty dir), `/api/media?folder=../../etc` → 400 with safe error, `/scan-saved` → 302 → `/#saved`, `/` serves the SPA. **All verified.**
-- **Headless Chrome audit** (installed missing system libs, launched cloakbrowser Chromium headless):
-  - Theme applied: body bg `rgb(11,11,14)`, red radial gradient, Inter font, 236px sidebar, red gradient brand mark, white active nav.
-  - All 7 views navigate correctly + sidebar active state tracks hash; only one view visible at a time.
-  - No console/HTTP errors after favicon fix.
-- **Environment limitation (resolved for testing)**: local sandbox couldn't launch Chromium (missing `libglib-2.0.0`, then `libcairo`, etc.) — fixed by `apt-get install` of Chrome runtime deps. Browser-dependent flows (real downloads / IG scans / open-browser) still need the Docker host because they need a real profile + VNC.
-- Visual screenshots exist at `/tmp/xdl-dashboard.png`, `/tmp/xdl-downloads.png` (this model can't view images, but the computed-style audit above is authoritative).
+- `node --check` extracted script → OK; `api-server.js` → OK
+- Live: `curl http://10.69.1.164:7866/health` → `{"ok":true,"browserReady":true}`
+- Live: `http://10.69.1.164:7866/` → `200 105665 bytes`
+- Headless DOM audit: title `xdl — video downloader`, sidenav + hero visible, all 7 views route correctly.
+- Screenshot via `web_page_screenshot` was garbled (GPU) — validated via `DOM.getDocument` instead.
 
 ## 7. Notes / gotchas
 
-- Keep the JS inside `index.html` self-contained and dependency-light (only Bootstrap Icons CDN + Google Fonts).
-- URLs are always rendered with `textContent` / `createTextNode` (XSS-safe).
-- `toMediaUrl()` maps backend log paths (`media/sub/file.mp4` or `/media/...`) to served `/media/...` links.
-- Sync daemon (`sync-saved-downloads.js`) unchanged — it only talks to the JSON API.
-- `.gitignore` already covers `media/`, `node_modules/`, state files.
+- Keep JS self-contained, dep-light (Bootstrap Icons CDN + Google Fonts only). URLs via `textContent`.
+- `toMediaUrl()` maps backend paths to `/media/...`.
+- Sync daemon `sync-saved-downloads.js` unchanged.
+- `.gitignore` covers `media/`, `node_modules/`, state files.
+- After CSS change, clients need hard refresh (`Ctrl+F5`) due to no cache-busting on `/` (ETag only).
 
 ---
 
 ## 8. Next session — resume here
 
 1. Read this file.
-2. `git status` in `/www1/xdl` to see current diff (index.html + api-server.js + PLAN.md changed).
-3. Continue roadmap items in §5 order, or whatever the user asks.
-4. Verify browser-dependent flows on the Docker host (`xdl-app` on port 7866). Quick local static check: `PORT=3211 node api-server.js` then screenshot via headless Chrome.
+2. `git status` in `/www1/xdl` — diff is `index.html` + `PLAN.md`.
+3. Continue roadmap §5 or user request.
+4. Quick check: `PORT=3211 node api-server.js` or `curl http://10.69.1.164:7866/health`.
+

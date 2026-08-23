@@ -3,10 +3,7 @@ services:
     build: .
     image: xdl-app-image:local
     container_name: xdl-app
-    # network_mode: "container:gluetun-global"
-    ports:
-      - "7866:3000"
-      - "7906:7900"
+    network_mode: "container:gluetun-nordvpn2"
     environment:
       PORT: 3000
       API_HEADLESS: 0
@@ -32,17 +29,13 @@ services:
   sync:
     image: xdl-app-image:local
     container_name: xdl-sync
-    depends_on:
-      app:
-        condition: service_healthy
+    network_mode: "container:gluetun-nordvpn2"
     command: node sync-saved-downloads.js
     environment:
-      API_BASE: http://app:3000
+      API_BASE: http://localhost:3000
     volumes:
       - .:/app
       - /app/node_modules
-    # Long-running daemon: randomizes scan/download tasks throughout the day.
-    # Restarts automatically if it crashes.
     restart: unless-stopped
 
 volumes:

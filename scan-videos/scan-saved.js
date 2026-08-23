@@ -54,11 +54,12 @@ function sleep(ms) {
 
 async function readItemsOnPage(page) {
   return page.evaluate(() => {
+    const isPostUrl = (href) => /^https:\/\/[^/]*instagram\.com\/(?:p|reel|tv)\/[^/?#]+/i.test(String(href || ""));
     const rootAnchors = document.querySelectorAll("._ac7v.x1ty9z65.xzboxd6 a[href]");
     const anchors = rootAnchors.length ? rootAnchors : document.querySelectorAll("a[href]");
     const urls = Array.from(anchors)
       .map((anchor) => (anchor && typeof anchor.href === "string" ? anchor.href.trim() : ""))
-      .filter(Boolean);
+      .filter((href) => href && isPostUrl(href));
 
     return {
       urls,
@@ -103,7 +104,7 @@ async function scanSavedPage(options = {}) {
   const log = typeof options.log === "function" ? options.log : () => {};
   const waitMs = Number.isFinite(Number(options.waitMs)) && Number(options.waitMs) > 0
     ? Math.floor(Number(options.waitMs))
-    : 1000;
+    : 2000;
   const exitWaitMs = Number.isFinite(Number(options.exitWaitMs)) && Number(options.exitWaitMs) > 0
     ? Math.floor(Number(options.exitWaitMs))
     : 4500;
@@ -142,8 +143,8 @@ async function scanSavedPage(options = {}) {
       );
     }
 
-    const noIncreaseTimeoutMs = 20000;
-    const increaseDelayMs = 5000;
+    const noIncreaseTimeoutMs = 5000;
+    const increaseDelayMs = 1000;
     let lastSeenCount = 0;
     let lastIncreaseAt = Date.now();
 
@@ -151,6 +152,7 @@ async function scanSavedPage(options = {}) {
       iterations = index + 1;
 
       const pass = await readItemsOnPage(page);
+      const beforeSize = collectedUrls.size;
       let newCount = 0;
 
       for (const url of pass.urls) {
@@ -172,19 +174,24 @@ async function scanSavedPage(options = {}) {
 
       if (matchedStopUrls.size > 0 || matchedStopIds.size > 0) {
         reason = "stop_url_found";
+        log(`loop=${iterations} collected=${collectedUrls.size} visible=${pass.count} new=${newCount} matchedStop=1 → stop`);
         break;
       }
 
-      const currentCount = pass.count;
+      const currentCollected = collectedUrls.size;
       let increased = false;
-      if (currentCount > lastSeenCount) {
+      if (currentCollected > lastSeenCount) {
         increased = true;
-        lastSeenCount = currentCount;
+        lastSeenCount = currentCollected;
+        lastIncreaseAt = Date.now();
+      } else if (newCount > 0) {
+        // fallback: new unique found even if visible count didn't grow (virtualized DOM)
+        increased = true;
         lastIncreaseAt = Date.now();
       }
 
       const noIncreaseForMs = Date.now() - lastIncreaseAt;
-      log(`loop=${iterations} items=${currentCount} new=${newCount} noIncreaseMs=${noIncreaseForMs}`);
+      log(`loop=${iterations} collected=${currentCollected} visible=${pass.count} new=${newCount} noIncreaseMs=${noIncreaseForMs}`);
 
       if (noIncreaseForMs >= noIncreaseTimeoutMs) {
         reason = "end_reached";
@@ -206,11 +213,12 @@ async function scanSavedPage(options = {}) {
     await sleep(exitWaitMs);
 
     const finalUrls = await page.evaluate(() => {
+      const isPostUrl = (href) => /^https:\/\/[^/]*instagram\.com\/(?:p|reel|tv)\//i.test(String(href || ""));
       const rootAnchors = document.querySelectorAll("._ac7v.x1ty9z65.xzboxd6 a[href]");
       const anchors = rootAnchors.length ? rootAnchors : document.querySelectorAll("a[href]");
       return Array.from(anchors)
         .map((anchor) => (anchor && typeof anchor.href === "string" ? anchor.href.trim() : ""))
-        .filter(Boolean);
+        .filter((href) => href && isPostUrl(href));
     });
 
     for (const url of finalUrls) {

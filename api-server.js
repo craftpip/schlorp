@@ -8,21 +8,39 @@ const { run } = require("./scan-videos/index");
 const { buildBrowserFromLocalProfile } = require("./scan-videos/browser");
 const { scanSavedPage } = require("./scan-videos/scan-saved");
 const { loadAppConfig, normalizeAccountName, resolveAccountConfig, resolveProfileConfig, getStateFilePath } = require("./scan-videos/config");
+const { WebSocketServer } = require("ws");
+const http = require("http");
+const { EventEmitter } = require("events");
 
 const app = express();
 const rootDir = __dirname;
 const mediaDir = path.join(rootDir, "media");
+const webDistDir = path.join(rootDir, "web", "dist");
+const legacyDir = path.join(rootDir, "legacy");
 const port = Number(process.env.PORT) || 3000;
 const apiJobTimeoutMs = parsePositiveInt(process.env.API_JOB_TIMEOUT_MS, 1800000);
 
 let shuttingDown = false;
 let jobCounter = 0;
 let activeJob = null;
+let scanActiveJob = null;
+let queueActiveJob = null;
+const scanningUrls = new Set();
 let sharedBrowser = null;
 let browserInitPromise = null;
 const browsersByAccount = new Map();
 const manualBrowsersByAccount = new Map();
 const manualBrowserTimeoutMs = parsePositiveInt(process.env.MANUAL_BROWSER_TIMEOUT_MS, 900000);
+
+// --- Web queue (active = queued|running, completed = done|error) ---
+const webQueueFile = path.join(rootDir, ".web-queue.json");
+let webQueue = { active: [], completed: [], gap: { minMs: 0, maxMs: 0 } };
+const queueEmitter = new EventEmitter();
+let queueWorkerRunning = false;
+let queueLoaded = false;
+let queuePaused = false;
+let cancelRequestedId = null;
+let gapWaitState = null;
 
 function browserIsAlive(browser) {
   if (!browser) return false;
@@ -42,16 +60,424 @@ function browserIsAlive(browser) {
   return true;
 }
 
+// --- Web queue persistence ---
+async function loadWebQueue() {
+  try {
+    const raw = await fs.readFile(webQueueFile, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") throw new Error("invalid");
+    webQueue.active = Array.isArray(parsed.active) ? parsed.active : [];
+    webQueue.completed = Array.isArray(parsed.completed) ? parsed.completed : [];
+    const g = parsed.gap && typeof parsed.gap === "object" ? parsed.gap : {};
+    webQueue.gap = { minMs: Number(g.minMs) || 0, maxMs: Number(g.maxMs) || 0 };
+    // stale running -> error
+    let changed = false;
+    for (const it of webQueue.active) {
+      if (it.status === "running") {
+        it.status = "error";
+        it.error = "Interrupted — server restarted";
+        it.stage = "error";
+        it.finishedAt = new Date().toISOString();
+        changed = true;
+      }
+    }
+    if (changed) await saveWebQueue();
+  } catch (e) {
+    if (e.code !== "ENOENT") console.error("[queue] load failed:", e.message);
+    webQueue = { active: [], completed: [], gap: { minMs: 0, maxMs: 0 } };
+  }
+  // move any done/error mistakenly in active to completed (migration)
+  const stillActive = [];
+  for (const it of webQueue.active) {
+    if (it.status === "done" || it.status === "error") webQueue.completed.unshift(it);
+    else stillActive.push(it);
+  }
+  if (stillActive.length !== webQueue.active.length) {
+    webQueue.active = stillActive;
+    await saveWebQueue();
+  }
+  queueLoaded = true;
+}
+let saveWebQueueChain = Promise.resolve();
+let queueFileChain = Promise.resolve();
+async function withQueueFile(fn) {
+  let result, error;
+  const task = async () => {
+    try { result = await fn(); } catch (e) { error = e; }
+  };
+  queueFileChain = queueFileChain.then(task, task);
+  await queueFileChain;
+  if (error) throw error;
+  return result;
+}
+async function saveWebQueue() {
+  const snapshot = JSON.stringify(webQueue, null, 2);
+  const dir = path.dirname(webQueueFile);
+  const task = async () => {
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(webQueueFile, snapshot, "utf8");
+  };
+  saveWebQueueChain = saveWebQueueChain.then(task, task);
+  await saveWebQueueChain;
+}
+function wsBroadcast(obj) {
+  const data = JSON.stringify(obj);
+  if (!wss) return;
+  for (const c of wss.clients) {
+    if (c.readyState === 1) c.send(data);
+  }
+}
+function wsBroadcastQueue() {
+  wsBroadcast({ type: "queue:snapshot", active: webQueue.active, completed: webQueue.completed, gap: webQueue.gap || { minMs: 0, maxMs: 0 }, gapWait: gapWaitState });
+}
+function wsBroadcastProgress(id, stage, pct, detail, filePath) {
+  wsBroadcast({ type: "job:progress", id, stage, pct, detail, filePath });
+}
+function wsBroadcastLog(id, chunk) {
+  wsBroadcast({ type: "job:log", id, chunk });
+}
+async function queueAddUrls(urls, folder, maxQuality) {
+  if (!queueLoaded) await loadWebQueue();
+  const now = Date.now();
+  const added = [];
+  const seen = new Set();
+  // only skip what is literally in-flight right now; everything else queues visibly
+  for (const it of webQueue.active) {
+    const u1 = it.url ? normalizeSyncUrl(it.url) : "";
+    const u2 = it.link ? normalizeSyncUrl(it.link) : "";
+    if (u1) seen.add(u1);
+    if (u2) seen.add(u2);
+  }
+  for (let i = 0; i < urls.length; i++) {
+    const url = String(urls[i] || "").trim();
+    if (!url) continue;
+    const norm = normalizeSyncUrl(url);
+    if (!norm) continue;
+    if (seen.has(norm)) continue;
+    // dedupe within this batch
+    if (added.some((a) => normalizeSyncUrl(a.url) === norm)) continue;
+    seen.add(norm);
+    const id = `${now}-${i}-${Math.random().toString(36).slice(2, 6)}`;
+    const item = {
+      id,
+      url,
+      link: url,
+      folder: String(folder || "").trim(),
+      maxQuality: maxQuality ?? null,
+      status: "queued",
+      stage: "queued",
+      pct: 0,
+      createdAt: new Date().toISOString(),
+      logs: [],
+    };
+    webQueue.active.push(item);
+    added.push(item);
+  }
+  if (added.length) {
+    await saveWebQueue();
+    wsBroadcastQueue();
+    queueEmitter.emit("wake");
+    ensureQueueWorker();
+  }
+  return added;
+}
+async function waitGap(initialMs) {
+  let totalMs = initialMs;
+  let startedAt = Date.now();
+  let cancelled = false;
+  // live re-read: config edits mid-wait redraw the target (measured from original start)
+  const onChange = () => {
+    const cfg = webQueue.gap || { minMs: 0, maxMs: 0 };
+    if ((cfg.maxMs || 0) <= 0) { cancelled = true; return; }
+    const min = Math.max(0, cfg.minMs || 0);
+    const max = Math.max(min, cfg.maxMs);
+    totalMs = min + Math.floor(Math.random() * (max - min + 1));
+  };
+  queueEmitter.on("gapchange", onChange);
+  console.log(`[queue] gap: waiting ${Math.round(totalMs / 60000)} min before next download`);
+  try {
+    while (!cancelled) {
+      const remaining = totalMs - (Date.now() - startedAt);
+      if (remaining <= 0) break;
+      gapWaitState = { waiting: true, remainingSec: Math.ceil(remaining / 1000), paused: queuePaused };
+      wsBroadcast({ type: "queue:gap", waiting: true, remainingSec: gapWaitState.remainingSec, paused: queuePaused });
+      if (queuePaused) {
+        const frozen = remaining;
+        await new Promise((res) => {
+          const onResume = () => { queueEmitter.off("resume", onResume); res(); };
+          queueEmitter.once("resume", onResume);
+          setTimeout(() => { queueEmitter.off("resume", onResume); res(); }, 30000);
+        });
+        startedAt = Date.now() - (totalMs - frozen);
+        continue;
+      }
+      await new Promise((res) => setTimeout(res, Math.min(1000, remaining)));
+    }
+  } finally {
+    queueEmitter.off("gapchange", onChange);
+    gapWaitState = null;
+    wsBroadcast({ type: "queue:gap", waiting: false });
+    console.log("[queue] gap finished — starting next download");
+  }
+}
+async function queueWorkerLoop() {
+  if (queueWorkerRunning) return;
+  queueWorkerRunning = true;
+  console.log("[queue] worker started");
+  while (true) {
+    if (queuePaused) {
+      await new Promise((res) => {
+        const onResume = () => { queueEmitter.off("resume", onResume); res(); };
+        queueEmitter.once("resume", onResume);
+        setTimeout(() => { queueEmitter.off("resume", onResume); res(); }, 30000);
+      });
+      if (queuePaused) continue;
+    }
+    if (!queueLoaded) await loadWebQueue();
+    const item = webQueue.active.find((it) => it.status === "queued");
+    if (!item) {
+      await new Promise((res) => {
+        const onWake = () => {
+          queueEmitter.off("wake", onWake);
+          res();
+        };
+        queueEmitter.once("wake", onWake);
+        setTimeout(() => {
+          queueEmitter.off("wake", onWake);
+          res();
+        }, 30000);
+      });
+      if (queuePaused) continue;
+      const still = webQueue.active.find((it) => it.status === "queued");
+      if (!still) continue;
+      else {
+        const next = webQueue.active.find((it) => it.status === "queued");
+        if (!next) continue;
+      }
+    }
+    const nextItem = webQueue.active.find((it) => it.status === "queued");
+    if (!nextItem) continue;
+    // process nextItem
+    nextItem.status = "running";
+    nextItem.stage = "browser";
+    nextItem.pct = 5;
+    nextItem.startedAt = new Date().toISOString();
+    await saveWebQueue();
+    wsBroadcastQueue();
+    wsBroadcastProgress(nextItem.id, "browser", 5, "acquiring browser");
+    let outputDir;
+    try {
+      outputDir = resolveMediaOutputDir(nextItem.folder);
+    } catch (e) {
+      nextItem.status = "error";
+      nextItem.stage = "error";
+      nextItem.error = e.message;
+      nextItem.finishedAt = new Date().toISOString();
+      // move to completed
+      webQueue.active = webQueue.active.filter((it) => it.id !== nextItem.id);
+      webQueue.completed.unshift(nextItem);
+      await saveWebQueue();
+      wsBroadcastQueue();
+      continue;
+    }
+    const maxQuality = (() => {
+      try {
+        return resolveMaxQuality(nextItem.maxQuality);
+      } catch {
+        return null;
+      }
+    })();
+    const jobId = ++jobCounter;
+    queueActiveJob = { id: jobId, type: "queue", startedAt: Date.now(), queueId: nextItem.id };
+    const logToWs = (msg) => {
+      const text = String(msg ?? "");
+      if (!text) return;
+      nextItem.logs.push(text);
+      if (nextItem.logs.length > 500) nextItem.logs.shift();
+      wsBroadcastLog(nextItem.id, text);
+      const lower = text.toLowerCase();
+      let stage = null;
+      let pct = null;
+      if (lower.includes("preparing browser") || lower.includes("acquiring browser")) {
+        stage = "browser";
+        pct = 10;
+      } else if (lower.includes("browser ready")) {
+        stage = "navigating";
+        pct = 20;
+      } else if (lower.includes("navigating") || lower.includes("page.goto")) {
+        stage = "navigating";
+        pct = 25;
+      } else if (lower.includes("auto-capture") || lower.includes("capturing")) {
+        stage = "capturing";
+        pct = 40;
+      } else if (lower.includes("extracting") || lower.includes("extractor")) {
+        stage = "extracting";
+        pct = 55;
+      } else if (lower.includes("downloading") || lower.includes("downloadmedia")) {
+        stage = "downloading";
+        pct = 70;
+      } else if (lower.includes("ffmpeg") || lower.includes("muxing")) {
+        stage = "muxing";
+        pct = 90;
+      }
+      if (stage) {
+        nextItem.stage = stage;
+        nextItem.pct = pct;
+        wsBroadcastProgress(nextItem.id, stage, pct, text.slice(0, 200));
+      }
+      console.log(`[queue:${nextItem.id}] ${text.split("\n")[0].slice(0, 200)}`);
+    };
+    let browser = null;
+    let hlsTimer = null;
+    const startHlsTick = () => {
+      if (hlsTimer) return;
+      hlsTimer = setInterval(() => {
+        if (nextItem.stage !== "downloading" || nextItem.pct >= 90) return;
+        nextItem.pct = Math.min(90, nextItem.pct + 1);
+        wsBroadcastProgress(nextItem.id, "downloading", nextItem.pct, nextItem.detail || "HLS · ffmpeg (streaming)");
+        void saveWebQueue();
+      }, 2500);
+      if (hlsTimer.unref) hlsTimer.unref();
+    };
+    const stopHlsTick = () => { if (hlsTimer) clearInterval(hlsTimer); hlsTimer = null; };
+    try {
+      logToWs("[queue] preparing browser...");
+      browser = await getSharedBrowser(logToWs);
+      logToWs("[queue] browser ready, starting scan...");
+      nextItem.stage = "navigating";
+      nextItem.pct = 20;
+      wsBroadcastProgress(nextItem.id, "navigating", 20, nextItem.url);
+      const result = await runWithJobTimeout(
+        run({
+          urls: [nextItem.url],
+          linkOnly: false,
+          outputDir,
+          maxQuality,
+          browser,
+          autoContinuePrompts: true,
+          waitForCompletionPrompt: false,
+          log: logToWs,
+          onProgress: (p) => {
+            let detail = p.detail || "";
+            // never show raw candidate URL as detail for downloading — show method instead
+            if (p.stage === "downloading" && !detail) {
+              if (p.candidate && String(p.candidate).includes("m3u8")) detail = "HLS · ffmpeg";
+              else if (p.candidate) detail = "Direct";
+            }
+            if (p.filePath && !nextItem.filePath) {
+              nextItem.filePath = p.filePath;
+              wsBroadcastProgress(nextItem.id, nextItem.stage || "downloading", nextItem.pct, nextItem.detail || detail, p.filePath);
+              wsBroadcastQueue();
+            }
+            const isHls = detail.includes("HLS");
+            if (p.stage === "downloading") {
+              if (isHls && p.pct == null) {
+                nextItem.stage = "downloading";
+                nextItem.detail = detail;
+                if (p.filePath) nextItem.filePath = p.filePath;
+                if (nextItem.pct < 70) nextItem.pct = 70;
+                wsBroadcastProgress(nextItem.id, "downloading", nextItem.pct, detail, p.filePath || nextItem.filePath);
+                startHlsTick();
+                return;
+              }
+              const downloadPct = Math.max(0, Math.min(100, Number(p.pct) || 0));
+              const overall = 70 + Math.round(downloadPct * 0.3);
+              nextItem.stage = "downloading";
+              nextItem.pct = overall;
+              nextItem.detail = detail;
+              if (p.filePath) nextItem.filePath = p.filePath;
+              wsBroadcastProgress(nextItem.id, "downloading", overall, detail, p.filePath || nextItem.filePath);
+              if (!isHls) stopHlsTick();
+            } else if (p.stage) {
+              nextItem.stage = p.stage;
+              if (p.pct != null) nextItem.pct = p.pct;
+              nextItem.detail = detail;
+              if (p.filePath) nextItem.filePath = p.filePath;
+              wsBroadcastProgress(nextItem.id, p.stage, p.pct ?? nextItem.pct, detail, p.filePath || nextItem.filePath);
+            }
+          },
+        }),
+        {
+          timeoutMs: apiJobTimeoutMs,
+          jobId,
+          jobType: "queue",
+          log: logToWs,
+          recycleBrowser: closeSharedBrowser,
+        }
+      );
+      const failed = Array.isArray(result?.failedTargets) ? result.failedTargets : [];
+      if (failed.length) {
+        throw new Error(failed[0].reason || "No media downloaded");
+      }
+      // parse downloaded file paths from logs (fallback)
+      const allLogs = nextItem.logs.join("\n");
+      const matches = [...allLogs.matchAll(/Downloaded media to:\s*(.+)/g)].map((m) => m[1].trim());
+      nextItem.filePath = matches[matches.length - 1] || null;
+      nextItem.status = "done";
+      nextItem.stage = "done";
+      nextItem.pct = 100;
+      nextItem.finishedAt = new Date().toISOString();
+    } catch (e) {
+      const msg = e && e.message ? e.message : String(e);
+      console.error(`[queue:${nextItem.id}] failed: ${msg}`);
+      nextItem.status = "error";
+      nextItem.stage = "error";
+      nextItem.pct = 100;
+      nextItem.error = msg;
+      nextItem.finishedAt = new Date().toISOString();
+      logToWs(`[queue] failed: ${msg}`);
+      if (sharedBrowser && sharedBrowser.isConnected && !sharedBrowser.isConnected()) {
+        await closeSharedBrowser();
+      }
+    } finally {
+      stopHlsTick();
+      queueActiveJob = null;
+      // move from active to completed
+      webQueue.active = webQueue.active.filter((it) => it.id !== nextItem.id);
+      webQueue.completed.unshift(nextItem);
+      // keep completed capped at 500
+      if (webQueue.completed.length > 500) webQueue.completed.length = 500;
+      await saveWebQueue();
+      wsBroadcastQueue();
+    }
+    // inter-download gap (only when another item is queued)
+    const gapCfg = webQueue.gap || { minMs: 0, maxMs: 0 };
+    if ((gapCfg.maxMs || 0) > 0 && webQueue.active.some((it) => it.status === "queued")) {
+      const min = Math.max(0, gapCfg.minMs || 0);
+      const max = Math.max(min, gapCfg.maxMs);
+      await waitGap(min + Math.floor(Math.random() * (max - min + 1)));
+    }
+  }
+}
+function ensureQueueWorker() {
+  if (!queueWorkerRunning) void queueWorkerLoop();
+}
+
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: false }));
 app.use("/media", express.static(mediaDir));
 
+// Legacy: old vanilla site lives at /legacy (preserved verbatim)
+app.use("/legacy", express.static(legacyDir));
+app.get("/legacy", (_req, res) => {
+  res.sendFile(path.join(legacyDir, "index.html"));
+});
+
+// New React app at / (web/dist). Fallback to legacy if dist not built yet.
+const fsSync = require("fs");
+app.use(express.static(webDistDir));
 app.get("/", (_req, res) => {
-  res.sendFile(path.join(rootDir, "index.html"));
+  const distIndex = path.join(webDistDir, "index.html");
+  if (fsSync.existsSync(distIndex)) {
+    return res.sendFile(distIndex);
+  }
+  // fallback: no React build yet — serve legacy with header so we know
+  res.setHeader("X-Legacy-Fallback", "1");
+  return res.sendFile(path.join(legacyDir, "index.html"));
 });
 
 app.get("/scan-saved", (_req, res) => {
-  res.redirect("/#saved");
+  res.redirect("/dashboard");
 });
 
 app.get("/api/media", async (req, res) => {
@@ -79,6 +505,7 @@ app.get("/api/media", async (req, res) => {
 
     items.sort((a, b) => {
       if (a.dir !== b.dir) return a.dir ? -1 : 1;
+      if (!a.dir && !b.dir) return new Date(b.mtime) - new Date(a.mtime);
       return a.name.localeCompare(b.name);
     });
 
@@ -87,12 +514,31 @@ app.get("/api/media", async (req, res) => {
     return res.status(400).json({ ok: false, error: error.message });
   }
 });
+app.delete("/api/media", async (req, res) => {
+  try {
+    const folder = String(req.query?.folder || req.body?.folder || "").trim();
+    const name = String(req.query?.name || req.body?.name || "").trim();
+    if (!name) return res.status(400).json({ ok: false, error: "name required" });
+    if (name.includes("/") || name.includes("\\")) return res.status(400).json({ ok: false, error: "invalid name" });
+    const dir = resolveMediaOutputDir(folder);
+    const fullPath = path.join(dir, name);
+    const rel = path.relative(mediaDir, fullPath);
+    if (rel.startsWith("..") || path.isAbsolute(rel)) return res.status(400).json({ ok: false, error: "invalid path" });
+    const stat = await fs.stat(fullPath).catch(() => null);
+    if (!stat) return res.status(404).json({ ok: false, error: "not found" });
+    if (stat.isDirectory()) return res.status(400).json({ ok: false, error: "use folder delete for dirs" });
+    await fs.unlink(fullPath);
+    return res.json({ ok: true });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
 
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     shuttingDown,
-    busy: Boolean(activeJob),
+    busy: Boolean(activeJob || scanActiveJob || queueActiveJob),
     browserReady: Boolean(sharedBrowser && sharedBrowser.isConnected && sharedBrowser.isConnected()),
     accountBrowsersReady: Array.from(browsersByAccount.values()).filter(
       (browser) => browser && browser.isConnected && browser.isConnected()
@@ -174,12 +620,26 @@ app.post("/accounts", async (req, res) => {
   }
 });
 
+app.post("/accounts/default/reset", async (_req, res) => {
+  try {
+    await closeSharedBrowser();
+    await closeManualBrowser("default");
+    await closeBrowserForAccount("default");
+    const defaults = resolveProfileConfig();
+    const profilePath = path.join(defaults.userDataDir, defaults.profileDir);
+    try { await fs.rm(profilePath, { recursive: true, force: true }); } catch {}
+    await fs.mkdir(profilePath, { recursive: true });
+    return res.json({ ok: true, reset: "default" });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
 app.delete("/accounts/:name", async (req, res) => {
   try {
     const name = String(req.params.name || "").trim();
     const key = name.toLowerCase();
     if (key === "default") {
-      return res.status(400).json({ ok: false, error: "The built-in \"default\" account cannot be deleted." });
+      return res.status(400).json({ ok: false, error: "The built-in \"default\" account cannot be deleted. Use Reset instead." });
     }
 
     await closeManualBrowser(name);
@@ -230,20 +690,59 @@ app.post("/sync-config", async (req, res) => {
     state.config.savedLists = savedLists;
     state.updatedAt = new Date().toISOString();
     await writeStateFile(state);
+    // trigger real-time sync soon after list change
+    setTimeout(() => { void backgroundSyncTick(); }, 5000);
 
     return res.json({ ok: true, config: state.config });
   } catch (error) {
     return res.status(400).json({ ok: false, error: error.message });
   }
 });
+app.post("/collections/clear-memory", async (req, res) => {
+  try {
+    const url = String(req.body?.url || "").trim();
+    if (!url) return res.status(400).json({ ok: false, error: "url required" });
+    const state = await readStateFile();
+    if (state.lists[url]) {
+      delete state.lists[url].lastSeenUrl;
+      delete state.lists[url].lastRunAt;
+      delete state.lists[url].lastScannedCount;
+      await writeStateFile(state);
+    }
+    return res.json({ ok: true });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+app.post("/collections/set-last-seen", async (req, res) => {
+  try {
+    const url = String(req.body?.url || "").trim();
+    const lastSeenUrl = String(req.body?.lastSeenUrl || "").trim();
+    if (!url) return res.status(400).json({ ok: false, error: "url required" });
+    if (!lastSeenUrl) return res.status(400).json({ ok: false, error: "lastSeenUrl required" });
+    try { new URL(lastSeenUrl); } catch { return res.status(400).json({ ok: false, error: "lastSeenUrl must be a valid URL" }); }
+    const state = await readStateFile();
+    if (!state.lists[url]) state.lists[url] = {};
+    state.lists[url].lastSeenUrl = lastSeenUrl;
+    state.lists[url].lastRunAt = new Date().toISOString();
+    if (!Number.isFinite(Number(state.lists[url].lastScannedCount))) state.lists[url].lastScannedCount = 0;
+    await writeStateFile(state);
+    return res.json({ ok: true, lastSeenUrl });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
 
 app.post("/sync-queue/clear", async (_req, res) => {
   try {
-    const queue = await readQueueFile();
-    const cleared = Array.isArray(queue.completed) ? queue.completed.length : 0;
-    queue.completed = [];
-    await writeQueueFile(queue);
-    return res.json({ ok: true, cleared });
+    const result = await withQueueFile(async () => {
+      const queue = await readQueueFile();
+      const cleared = Array.isArray(queue.completed) ? queue.completed.length : 0;
+      queue.completed = [];
+      await writeQueueFile(queue);
+      return cleared;
+    });
+    return res.json({ ok: true, cleared: result });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message });
   }
@@ -256,37 +755,29 @@ app.post("/sync-queue/pending/add", async (req, res) => {
     if (!rawUrls.length) {
       return res.status(400).json({ ok: false, error: "Field 'urls' is required (array of URLs)." });
     }
-
     const folder = String(body.folder || "").trim();
-    const [queue, state] = await Promise.all([readQueueFile(), readStateFile()]);
-
-    const seenUrls = new Set();
-    for (const item of queue.pending) {
-      if (item && item.url) seenUrls.add(normalizeSyncUrl(item.url));
-    }
-    for (const item of queue.completed) {
-      if (item && item.url) seenUrls.add(normalizeSyncUrl(item.url));
-    }
-    for (const key of Object.keys(state.lists || {})) {
-      const lastSeenUrl = String((state.lists[key] || {}).lastSeenUrl || "").trim();
-      if (lastSeenUrl) seenUrls.add(normalizeSyncUrl(lastSeenUrl));
-    }
-
-    let added = 0;
-    let skipped = 0;
-    for (const rawUrl of rawUrls) {
-      const normalized = normalizeSyncUrl(rawUrl);
-      if (!normalized || seenUrls.has(normalized)) {
-        skipped += 1;
-        continue;
+    const result = await withQueueFile(async () => {
+      const queue = await readQueueFile();
+      const pendingSet = new Set();
+      for (const item of queue.pending) {
+        if (item && item.url) pendingSet.add(normalizeSyncUrl(item.url));
       }
-      queue.pending.push({ url: rawUrl, folder, addedAt: new Date().toISOString() });
-      seenUrls.add(normalized);
-      added += 1;
-    }
-
-    await writeQueueFile(queue);
-    return res.json({ ok: true, added, skipped, pending: queue.pending.length });
+      let added = 0;
+      let skipped = 0;
+      for (const rawUrl of rawUrls) {
+        const normalized = normalizeSyncUrl(rawUrl);
+        if (!normalized || pendingSet.has(normalized)) {
+          skipped += 1;
+          continue;
+        }
+        pendingSet.add(normalized);
+        queue.pending.push({ url: rawUrl, folder, addedAt: new Date().toISOString() });
+        added += 1;
+      }
+      await writeQueueFile(queue);
+      return { added, skipped, pending: queue.pending.length };
+    });
+    return res.json({ ok: true, ...result });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message });
   }
@@ -299,18 +790,19 @@ app.post("/sync-queue/pending/remove", async (req, res) => {
     if (!target) {
       return res.status(400).json({ ok: false, error: "Field 'url' is required." });
     }
-
-    const queue = await readQueueFile();
-    const normalizedTarget = normalizeSyncUrl(target);
-    const before = queue.pending.length;
-    queue.pending = queue.pending.filter((item) => {
-      if (!item || !item.url) return false;
-      const itemUrl = String(item.url).trim();
-      return !(itemUrl === target || normalizeSyncUrl(itemUrl) === normalizedTarget);
+    const removed = await withQueueFile(async () => {
+      const queue = await readQueueFile();
+      const normalizedTarget = normalizeSyncUrl(target);
+      const before = queue.pending.length;
+      queue.pending = queue.pending.filter((item) => {
+        if (!item || !item.url) return false;
+        const itemUrl = String(item.url).trim();
+        return !(itemUrl === target || normalizeSyncUrl(itemUrl) === normalizedTarget);
+      });
+      const removed = before - queue.pending.length;
+      await writeQueueFile(queue);
+      return removed;
     });
-    const removed = before - queue.pending.length;
-
-    await writeQueueFile(queue);
     return res.json({ ok: true, removed });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message });
@@ -574,10 +1066,10 @@ app.post("/scan-saved", async (req, res) => {
     return res.status(503).json({ ok: false, error: "Server is shutting down." });
   }
 
-  if (activeJob) {
+  if (scanActiveJob) {
     return res.status(429).json({
       ok: false,
-      error: `Another task is currently running (job ${activeJob.id}, type=${activeJob.type}). Try again when it finishes.`,
+      error: `Another scan is currently running (job ${scanActiveJob.id}). Try again when it finishes.`,
     });
   }
 
@@ -592,10 +1084,26 @@ app.post("/scan-saved", async (req, res) => {
     return res.status(400).json({ ok: false, error: "Field 'url' must be a valid absolute URL." });
   }
 
+  if (scanningUrls.has(targetUrl)) {
+    return res.status(429).json({ ok: false, error: `Scan for this collection is already running. Wait for it to finish.` });
+  }
+
   const account = normalizeAccountName(req.body?.account || req.query?.account);
   const endUrls = normalizeEndUrls(req.body?.endUrls ?? req.query?.endUrls);
+  const folderParam = String(req.body?.folder || req.query?.folder || "").trim();
+  // UI crawls never send endUrls — the server always uses the freshly stored
+  // lastSeenUrl so the marker can never be stale or wrong.
+  let effectiveEndUrls = endUrls;
+  if (folderParam && !effectiveEndUrls.length) {
+    try {
+      const stNow = await readStateFile();
+      const lsMarker = String((stNow.lists[targetUrl] || {}).lastSeenUrl || "").trim();
+      if (lsMarker) effectiveEndUrls = [lsMarker];
+    } catch {}
+  }
   const jobId = ++jobCounter;
-  activeJob = { id: jobId, type: "scan-saved", startedAt: Date.now() };
+  scanActiveJob = { id: jobId, type: "scan-saved", startedAt: Date.now() };
+  scanningUrls.add(targetUrl);
 
   const manualForAccount = manualBrowsersByAccount.get(account);
   if (manualForAccount && manualForAccount.browser && manualForAccount.browser.isConnected && manualForAccount.browser.isConnected()) {
@@ -606,6 +1114,7 @@ app.post("/scan-saved", async (req, res) => {
     });
   }
 
+  wsBroadcast({ type: "crawl:progress", url: targetUrl, stage: "crawling", detail: "Opening collection…" });
   try {
     const browser = account === "default"
       ? await getSharedBrowser((message) => {
@@ -619,11 +1128,16 @@ app.post("/scan-saved", async (req, res) => {
       scanSavedPage({
         browser,
         targetUrl,
-        endUrls,
+        endUrls: effectiveEndUrls,
         log: (message) => {
           const text = String(message == null ? "" : message).trim();
           if (!text) return;
           console.log(`[scan-saved:${jobId}] ${text}`);
+          // forward live crawl log (scrolling, items found)
+          wsBroadcast({ type: "crawl:progress", url: targetUrl, stage: "crawling", detail: text.slice(0, 200) });
+          if (text.toLowerCase().includes("found") || text.toLowerCase().includes("scroll")) {
+            wsBroadcast({ type: "crawl:log", url: targetUrl, text: text.slice(0, 300) });
+          }
         },
       }),
       {
@@ -636,20 +1150,195 @@ app.post("/scan-saved", async (req, res) => {
             : () => closeBrowserForAccount(account, browser),
       }
     );
+    const foundCount = Array.isArray(result.urls) ? result.urls.length : 0;
+    let collectInfo = null;
+    if (folderParam) {
+      collectInfo = await crawlCollectAndQueue(targetUrl, folderParam, result.urls, foundCount);
+      wsBroadcast({ type: "crawl:progress", url: targetUrl, stage: "done", detail: `Found ${foundCount} · queued ${collectInfo.added}`, count: foundCount });
+      console.log(`[scan-saved:${jobId}] ${folderParam}: found=${foundCount} new=${collectInfo.newCount} queued=${collectInfo.added} alreadyPending=${collectInfo.skippedPending}`);
+    } else {
+      wsBroadcast({ type: "crawl:progress", url: targetUrl, stage: "done", detail: `Found ${foundCount} items`, count: foundCount });
+      // persist last crawl time/count for Collections page (so "x ago" updates without refresh via background sync)
+      try {
+        const st = await readStateFile();
+        const key = String(targetUrl).trim();
+        if (st.lists[key] || (Array.isArray(st.config?.savedLists) && st.config.savedLists.some((l) => String(l.url).trim() === key))) {
+          const resultUrls = Array.isArray(result.urls) ? result.urls.map((u) => String(u).trim()) : [];
+          const firstPostUrl = resultUrls.find((u) => /instagram\.com\/(?:p|reel|tv)\//i.test(u)) || "";
+          st.lists[key] = { ...(st.lists[key] || {}), ...(firstPostUrl ? { lastSeenUrl: firstPostUrl } : {}), lastRunAt: new Date().toISOString(), lastScannedCount: foundCount, folder: st.lists[key]?.folder || "" };
+          await writeStateFile(st);
+        }
+      } catch {}
+    }
 
-    return res.json({ ok: true, ...result });
+    return res.json({
+      ok: true,
+      ...result,
+      ...(collectInfo ? { queued: collectInfo.added, skippedPending: collectInfo.skippedPending, pendingTotal: collectInfo.pendingTotal, newCount: collectInfo.newCount } : {}),
+    });
   } catch (error) {
     const message = error && error.message ? error.message : String(error);
     const statusCode = Number(error && error.status) === 429 || /429|too many requests/i.test(message) ? 429 : 500;
     console.error(`[scan-saved:${jobId}] failed: ${message}`);
+    wsBroadcast({ type: "crawl:progress", url: targetUrl, stage: "error", detail: message.slice(0, 200) });
     return res.status(statusCode).json({ ok: false, error: message });
   } finally {
-    activeJob = null;
+    scanActiveJob = null;
+    scanningUrls.delete(targetUrl);
   }
 });
 
-const server = app.listen(port, () => {
+// --- Queue API ---
+app.get("/queue", async (_req, res) => {
+  if (!queueLoaded) await loadWebQueue();
+  res.json({ ok: true, active: webQueue.active, completed: webQueue.completed, gap: webQueue.gap || { minMs: 0, maxMs: 0 }, gapWait: gapWaitState });
+});
+app.post("/queue/add", async (req, res) => {
+  const urls = Array.isArray(req.body?.urls)
+    ? req.body.urls
+    : req.body?.url
+      ? [req.body.url]
+      : Array.isArray(req.body?.links)
+        ? req.body.links
+        : [];
+  const folder = String(req.body?.folder || "").trim();
+  const maxQuality = req.body?.maxQuality ?? null;
+  const link = String(req.body?.link || "").trim();
+  const allUrls = link ? [link, ...urls] : urls;
+  const normalized = allUrls.map((u) => String(u || "").trim()).filter(Boolean);
+  if (!normalized.length) return res.status(400).json({ ok: false, error: "No URLs provided" });
+  const added = await queueAddUrls(normalized, folder, maxQuality);
+  res.json({ ok: true, added: added.length, active: webQueue.active, completed: webQueue.completed });
+});
+app.post("/queue/remove", async (req, res) => {
+  const id = String(req.body?.id || "").trim();
+  if (!id) return res.status(400).json({ ok: false, error: "id required" });
+  if (!queueLoaded) await loadWebQueue();
+  const beforeA = webQueue.active.length;
+  const beforeC = webQueue.completed.length;
+  webQueue.active = webQueue.active.filter((it) => it.id !== id);
+  webQueue.completed = webQueue.completed.filter((it) => it.id !== id);
+  if (webQueue.active.length !== beforeA || webQueue.completed.length !== beforeC) {
+    wsBroadcastQueue();
+    await saveWebQueue();
+  }
+  res.json({ ok: true });
+});
+app.post("/queue/retry", async (req, res) => {
+  const id = String(req.body?.id || "").trim();
+  if (!id) return res.status(400).json({ ok: false, error: "id required" });
+  if (!queueLoaded) await loadWebQueue();
+  const item = webQueue.completed.find((it) => it.id === id);
+  if (!item) return res.status(404).json({ ok: false, error: "not found in completed" });
+  if (item.status !== "error" && item.status !== "done") return res.status(400).json({ ok: false, error: "only error/done can be retried" });
+  webQueue.completed = webQueue.completed.filter((it) => it.id !== id);
+  const retried = { ...item, status: "queued", stage: "queued", pct: 0, error: undefined, finishedAt: undefined, logs: [] };
+  webQueue.active.push(retried);
+  wsBroadcastQueue();
+  await saveWebQueue();
+  queueEmitter.emit("wake");
+  ensureQueueWorker();
+  res.json({ ok: true, item: retried });
+});
+app.post("/queue/clear", async (req, res) => {
+  const which = String(req.body?.which || "completed").trim();
+  if (!queueLoaded) await loadWebQueue();
+  if (which === "completed" || which === "all") webQueue.completed = [];
+  if (which === "all") {
+    webQueue.active = webQueue.active.filter((it) => it.status === "running");
+  }
+  if (which === "active") webQueue.active = webQueue.active.filter((it) => it.status === "running");
+  wsBroadcastQueue();
+  await saveWebQueue();
+  res.json({ ok: true });
+});
+app.post("/queue/cancel", async (req, res) => {
+  const id = String(req.body?.id || "").trim();
+  if (!id) return res.status(400).json({ ok: false, error: "id required" });
+  if (!queueLoaded) await loadWebQueue();
+  const running = webQueue.active.find((it) => it.id === id && it.status === "running");
+  if (!running) return res.status(404).json({ ok: false, error: "no running item with that id" });
+  cancelRequestedId = id;
+  queueEmitter.emit("cancel", id);
+  // try to abort browser to interrupt page.goto/download quickly
+  try { if (sharedBrowser) await closeSharedBrowser(); } catch {}
+  res.json({ ok: true, cancelling: id });
+});
+app.post("/queue/pause", async (_req, res) => {
+  queuePaused = true;
+  wsBroadcast({ type: "queue:paused", paused: true });
+  res.json({ ok: true, paused: true });
+});
+app.post("/queue/resume", async (_req, res) => {
+  queuePaused = false;
+  queueEmitter.emit("resume");
+  queueEmitter.emit("wake");
+  wsBroadcast({ type: "queue:paused", paused: false });
+  res.json({ ok: true, paused: false });
+});
+app.post("/queue/gap", async (req, res) => {
+  const minS = Math.max(0, Number(req.body?.minSeconds) || 0);
+  const maxS = Math.max(0, Number(req.body?.maxSeconds) || 0);
+  if (minS > 0 && maxS <= 0) { res.status(400).json({ ok: false, error: "maxSeconds required when minSeconds set" }); return; }
+  webQueue.gap = { minMs: Math.round(minS * 1000), maxMs: Math.round(Math.max(maxS, minS) * 1000) };
+  await saveWebQueue();
+  wsBroadcastQueue();
+  queueEmitter.emit("gapchange");
+  res.json({ ok: true, gap: webQueue.gap });
+});
+
+// SPA fallback for BrowserRouter — must be AFTER all /api, /queue, /health routes
+app.get("/{*splat}", (req, res, next) => {
+  if (req.path === "/media" || req.path === "/media/") {
+    const distIndex = path.join(webDistDir, "index.html");
+    if (fsSync.existsSync(distIndex)) return res.sendFile(distIndex);
+    return next();
+  }
+  if (req.path.startsWith("/api/") || req.path.startsWith("/queue") || req.path.startsWith("/media/") || req.path.startsWith("/legacy") || req.path === "/health" || req.path === "/ws" || req.path.startsWith("/health")) return next();
+  const distIndex = path.join(webDistDir, "index.html");
+  if (fsSync.existsSync(distIndex)) return res.sendFile(distIndex);
+  return next();
+});
+
+let wss = null;
+const server = http.createServer(app);
+wss = new WebSocketServer({ server, path: "/ws" });
+wss.on("connection", async (ws) => {
+  if (!queueLoaded) await loadWebQueue();
+  ws.send(JSON.stringify({ type: "queue:snapshot", active: webQueue.active, completed: webQueue.completed }));
+  ws.send(
+    JSON.stringify({
+      type: "health",
+      ok: true,
+      shuttingDown,
+      busy: Boolean(activeJob || scanActiveJob || queueActiveJob),
+      browserReady: Boolean(sharedBrowser && sharedBrowser.isConnected && sharedBrowser.isConnected()),
+    })
+  );
+  ws.on("message", async (data) => {
+    try {
+      const msg = JSON.parse(String(data));
+      if (msg.type === "queue:add" && Array.isArray(msg.urls)) {
+        await queueAddUrls(msg.urls, msg.folder, msg.maxQuality);
+      }
+    } catch {}
+  });
+});
+// broadcast health every 5s
+setInterval(() => {
+  if (!wss) return;
+  wsBroadcast({
+    type: "health",
+    ok: true,
+    shuttingDown,
+    busy: Boolean(activeJob || scanActiveJob || queueActiveJob),
+    browserReady: Boolean(sharedBrowser && sharedBrowser.isConnected && sharedBrowser.isConnected()),
+  });
+}, 5000);
+
+server.listen(port, () => {
   console.log(`API server listening on http://localhost:${port}`);
+  void loadWebQueue().then(() => ensureQueueWorker());
   void getSharedBrowser((message) => {
     const text = String(message == null ? "" : message).trim();
     if (!text) return;
@@ -657,9 +1346,99 @@ const server = app.listen(port, () => {
   }).catch((error) => {
     console.error(`[browser] initial launch failed: ${error.message}`);
   });
+  // background sync: real-time collection scanning inside app (replaces sync container)
+  void startBackgroundSync();
 });
 
 setupShutdownHandlers(server);
+
+function parseScheduleToMs(schedule) {
+  const s = String(schedule || "30m").trim().toLowerCase();
+  if (s === "manual" || s === "off" || s === "never") return Infinity;
+  const m = s.match(/^(\d+)\s*(m|min|h|hour|d|day)?$/);
+  if (m) {
+    const n = Number(m[1]);
+    const unit = (m[2] || "m").toLowerCase();
+    if (unit.startsWith("h")) return n * 60 * 60 * 1000;
+    if (unit.startsWith("d")) return n * 24 * 60 * 60 * 1000;
+    return n * 60 * 1000;
+  }
+  // fallback cron-like "0 */6 * * *" not parsed — treat as 30m
+  return 30 * 60 * 1000;
+}
+let syncRunning = false;
+async function backgroundSyncTick() {
+  if (syncRunning) return;
+  syncRunning = true;
+  try {
+    const state = await readStateFile();
+    const lists = Array.isArray(state.config?.savedLists) ? state.config.savedLists : [];
+    if (!lists.length) return;
+    console.log(`[sync] checking ${lists.length} collection(s)`);
+    for (const item of lists) {
+      // respect per-list schedule
+      const schedule = String(item.schedule || "30m");
+      const intervalMs = parseScheduleToMs(schedule);
+      if (!Number.isFinite(intervalMs)) continue; // manual
+      const listState = state.lists[String(item.url || "").trim()] || {};
+      const lastRun = listState.lastRunAt ? new Date(listState.lastRunAt).getTime() : 0;
+      if (Date.now() - lastRun < intervalMs) {
+        console.log(`[sync] skip ${item.folder || item.url} — schedule ${schedule}, next in ${Math.round((intervalMs - (Date.now() - lastRun))/60000)}m`);
+        continue;
+      }
+      if (shuttingDown) break;
+      const targetUrl = String(item.url || "").trim();
+      if (!targetUrl) continue;
+      const account = normalizeAccountName(item.account);
+      const folder = String(item.folder || "").trim();
+      const lastSeen = String(listState.lastSeenUrl || "").trim();
+      const endUrls = lastSeen ? [lastSeen] : [];
+      console.log(`[sync] scanning ${folder || targetUrl} (account:${account}) stop:${lastSeen || "<none>"})`);
+      let browser = null;
+      try {
+        browser = account === "default" ? await getSharedBrowser((m) => console.log(`[sync:${account}] ${m}`)) : await getBrowserForAccount(account, `sync-${Date.now()}`);
+        const result = await scanSavedPage({ browser, targetUrl, endUrls, log: (m) => console.log(`[sync] ${m}`) });
+        const urls = Array.isArray(result.urls) ? result.urls.map((u) => String(u).trim()).filter(Boolean) : [];
+        if (!urls.length) {
+          console.log(`[sync] ${folder} → 0 new`);
+          continue;
+        }
+        // filter to only new until lastSeen
+        const firstPostUrl = urls.find((u) => /instagram\.com\/(?:p|reel|tv)\//i.test(u)) || "";
+        let newUrls = urls;
+        if (lastSeen) {
+          const idx = urls.findIndex((u) => normalizeSyncUrl(u) === normalizeSyncUrl(lastSeen));
+          if (idx !== -1) newUrls = urls.slice(0, idx);
+        }
+        if (!newUrls.length) {
+          console.log(`[sync] ${folder} → 0 new (up to lastSeen)`);
+          state.lists[targetUrl] = { ...listState, lastRunAt: new Date().toISOString(), folder };
+          await writeStateFile(state);
+          continue;
+        }
+        const added = await queueAddUrls(newUrls, folder, null);
+        console.log(`[sync] ${folder} → ${newUrls.length} new, ${added} enqueued to web queue`);
+        state.lists[targetUrl] = { ...listState, ...(firstPostUrl ? { lastSeenUrl: firstPostUrl } : {}), lastRunAt: new Date().toISOString(), folder };
+        await writeStateFile(state);
+        wsBroadcast({ type: "sync:tick", folder, added, total: newUrls.length });
+      } catch (e) {
+        console.error(`[sync] ${folder} failed: ${e.message}`);
+      }
+    }
+  } catch (e) {
+    console.error(`[sync] tick failed: ${e.message}`);
+  } finally {
+    syncRunning = false;
+  }
+}
+function startBackgroundSync() {
+  // run 30s after boot, then every 5 min
+  setTimeout(() => {
+    void backgroundSyncTick();
+    setInterval(() => { void backgroundSyncTick(); }, 5 * 60 * 1000);
+  }, 30 * 1000);
+  console.log("[sync] background sync scheduled (30s → every 5m)");
+}
 
 async function getSharedBrowser(log) {
   if (sharedBrowser && sharedBrowser.isConnected && sharedBrowser.isConnected()) {
@@ -917,9 +1696,58 @@ async function readQueueFile() {
 }
 
 async function writeQueueFile(queue) {
+  const snapshot = JSON.stringify(queue, null, 2);
   const filePath = getQueueFilePath();
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, JSON.stringify(queue, null, 2), "utf8");
+  const dir = path.dirname(filePath);
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(filePath, snapshot, "utf8");
+}
+
+// One authority for the UI crawl flow: slice new items above the stored
+// lastSeenUrl, queue them into sync pending (skipping only URLs already in
+// that visible list), then advance lastSeenUrl to the newest post found.
+async function crawlCollectAndQueue(targetUrl, folder, scannedUrls, foundCount) {
+  const urls = (Array.isArray(scannedUrls) ? scannedUrls : []).map((u) => String(u || "").trim()).filter(Boolean);
+  const st = await readStateFile();
+  const listState = st.lists[targetUrl] || {};
+  const lastSeen = String(listState.lastSeenUrl || "").trim();
+  let newUrls = urls;
+  if (lastSeen) {
+    const idx = urls.findIndex((u) => normalizeSyncUrl(u) === normalizeSyncUrl(lastSeen));
+    if (idx !== -1) newUrls = urls.slice(0, idx);
+  }
+  const queuedResult = await withQueueFile(async () => {
+    const queue = await readQueueFile();
+    const pendingSet = new Set();
+    for (const item of queue.pending) {
+      if (item && item.url) pendingSet.add(normalizeSyncUrl(item.url));
+    }
+    let added = 0;
+    let skippedPending = 0;
+    for (const url of newUrls) {
+      const norm = normalizeSyncUrl(url);
+      if (!norm) continue;
+      if (pendingSet.has(norm)) { skippedPending += 1; continue; }
+      pendingSet.add(norm);
+      queue.pending.push({ url, folder: String(folder || "").trim(), addedAt: new Date().toISOString() });
+      added += 1;
+    }
+    await writeQueueFile(queue);
+    return { added, skippedPending, pendingTotal: queue.pending.length };
+  });
+  const firstPostUrl = urls.find((u) => /instagram\.com\/(?:p|reel|tv)\//i.test(u)) || "";
+  try {
+    const st2 = await readStateFile();
+    st2.lists[targetUrl] = {
+      ...(st2.lists[targetUrl] || {}),
+      ...(firstPostUrl ? { lastSeenUrl: firstPostUrl } : {}),
+      lastRunAt: new Date().toISOString(),
+      lastScannedCount: Number.isFinite(foundCount) ? foundCount : urls.length,
+      folder: st2.lists[targetUrl]?.folder || String(folder || "").trim(),
+    };
+    await writeStateFile(st2);
+  } catch {}
+  return { ...queuedResult, newCount: newUrls.length };
 }
 
 function normalizeSyncUrl(rawUrl) {
@@ -967,10 +1795,12 @@ function normalizeSavedListsInput(value) {
     if (seen.has(key)) continue;
     seen.add(key);
 
+    const schedule = String(raw.schedule || raw.cron || "30m").trim() || "30m";
     result.push({
       url,
       folder: String(raw.folder || "").trim(),
       account: String(raw.account || "").trim() || "default",
+      schedule,
     });
   }
   return result;

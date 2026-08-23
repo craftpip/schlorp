@@ -2,7 +2,7 @@ const fs = require("fs/promises");
 const path = require("path");
 const { createWriteStream } = require("fs");
 const { pipeline } = require("stream/promises");
-const { Readable } = require("stream");
+const { Readable, Transform } = require("stream");
 const { promisify } = require("util");
 const { execFile } = require("child_process");
 const {
@@ -193,6 +193,9 @@ async function downloadStreamingManifest(url, outDir, headers = {}, filePrefix =
 
   await fs.mkdir(outDir, { recursive: true });
   const filePath = buildOutputFilePath(outDir, filePrefix, "mp4", options);
+  if (typeof options.onProgress === "function") {
+    try { options.onProgress({ stage: "downloading", filePath }); } catch {}
+  }
 
   const args = ["-y"];
 
@@ -252,6 +255,7 @@ async function mediaHasAudio(filePath) {
 async function downloadMedia(url, outDir, headers = {}, filePrefix = "media", options = {}) {
   const targetUrl = stripByteRangeParams(url);
   if (isStreamingManifestUrl(targetUrl)) {
+    if (typeof options.onProgress === "function") options.onProgress({ stage: "downloading", detail: "HLS · ffmpeg (streaming)" });
     return downloadStreamingManifest(targetUrl, outDir, headers, filePrefix, options);
   }
 
@@ -276,8 +280,31 @@ async function downloadMedia(url, outDir, headers = {}, filePrefix = "media", op
     const extMatch = new URL(targetUrl).pathname.match(/\.([a-z0-9]+)$/i);
     const ext = extMatch ? extMatch[1] : "bin";
     const filePath = buildOutputFilePath(outDir, filePrefix, ext, options);
+    if (typeof options.onProgress === "function") {
+      try { options.onProgress({ stage: "downloading", filePath }); } catch {}
+    }
 
-    await pipeline(Readable.fromWeb(response.body), createWriteStream(filePath), { signal });
+    const total = Number(response.headers.get("content-length") || 0);
+    let received = 0;
+    const onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
+
+    const nodeStream = Readable.fromWeb(response.body);
+    const progressTransform = new Transform({
+      transform(chunk, _enc, cb) {
+        received += chunk.length;
+        if (onProgress) {
+          if (total) {
+            const pct = Math.round((received / total) * 100);
+            onProgress({ stage: "downloading", pct, received, total, detail: `${(received / 1024 / 1024).toFixed(1)} MB / ${(total / 1024 / 1024).toFixed(1)} MB` });
+          } else {
+            onProgress({ stage: "downloading", pct: 0, received, total: 0, detail: `${(received / 1024 / 1024).toFixed(1)} MB downloaded` });
+          }
+        }
+        cb(null, chunk);
+      },
+    });
+
+    await pipeline(nodeStream, progressTransform, createWriteStream(filePath), { signal });
     return { filePath, url: targetUrl };
   } catch (error) {
     const isAbortError = error && (error.name === "AbortError" || error.code === "ABORT_ERR");

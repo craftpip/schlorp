@@ -334,11 +334,12 @@ async function scanRandomList(state, queue, apiBase) {
     new Set((Array.isArray(scanResult.urls) ? scanResult.urls : []).map((x) => String(x || "").trim()).filter(Boolean))
   );
 
+  const firstPostUrl = scannedPageUrls.find((u) => /instagram\.com\/(?:p|reel|tv)\//i.test(u)) || "";
   const added = enqueueUrls(queue, scannedPageUrls, target.folder, scannedUrls);
 
   state.lists[target.url] = {
     ...listState,
-    lastSeenUrl: scannedPageUrls[0] || lastSeenUrl,
+    lastSeenUrl: firstPostUrl || lastSeenUrl,
     lastRunAt: new Date().toISOString(),
     lastScannedCount: scannedPageUrls.length,
     folder: target.folder,
