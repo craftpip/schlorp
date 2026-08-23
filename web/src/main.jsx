@@ -7,6 +7,7 @@ import Dashboard from "./views/Dashboard.jsx";
 import Media from "./views/Media.jsx";
 import Profiles from "./views/Profiles.jsx";
 import Saved from "./views/Saved.jsx";
+import Settings from "./views/Settings.jsx";
 import "./styles.css";
 
 createRoot(document.getElementById("root")).render(
@@ -20,6 +21,7 @@ createRoot(document.getElementById("root")).render(
             <Route path="media" element={<Media />} />
             <Route path="collections" element={<Saved />} />
             <Route path="profiles" element={<Profiles />} />
+            <Route path="settings" element={<Settings />} />
             <Route path="*" element={<Dashboard />} />
           </Route>
         </Routes>

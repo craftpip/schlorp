@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   novnc \
   websockify \
   procps \
+  socat \
   fonts-liberation \
   ca-certificates \
   libnspr4 \
@@ -28,7 +29,7 @@ RUN npm ci --omit=dev
 RUN mkdir -p /data/browser /data/cloakbrowser /app/media
 
 ENV NODE_ENV=production \
-  PORT=3000 \
+  PORT=6767 \
   BROWSER_USER_DATA_DIR=/data/browser \
   BROWSER_PROFILE_DIR=Default \
   CLOAKBROWSER_CACHE_DIR=/data/cloakbrowser \
@@ -36,10 +37,10 @@ ENV NODE_ENV=production \
   API_HEADLESS=1 \
   AUTO_CONTINUE=1 \
   ENABLE_VNC=0 \
-  VNC_PORT=5900 \
-  NOVNC_PORT=7900
+  VNC_PORT=6777 \
+  NOVNC_PORT=6778
 
-EXPOSE 3000 5900 7900
+EXPOSE 6767 6777 6778
 
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh

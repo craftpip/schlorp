@@ -173,11 +173,13 @@ scan-videos/scan-saved.js    → { scanSavedPage({ browser, targetUrl, endUrls?,
 
 ## Docker
 
-- **docker-compose.yml** defines `app` (web API + VNC) and `sync` (daemon, depends on app healthy)
-- `app` ports: 7866:3000 (app), 7906:7900 (noVNC)
+- **docker-compose.yml** defines `app` (web API + VNC) — single service `xdl` (container_name `xdl`), network_mode `container:gluetun-nordvpn2`
+- `app` internal: `6767` (API), `6777` (VNC), `6778` (noVNC) — forwards via `xdl-bridge` socat bridge (`6767:6767`, `6777:6777`, `6778:6778`); compat socat inside entrypoint keeps old `7866:3000`/`7906:7900` working
+- `gluetun-nordvpn2` no longer publishes host ports — all host publishing is via `xdl-bridge` (alpine/socat)
 - Volumes: `.` → `/app` (live code), `/mnt/media2t/downloads/studies/xdl` → `/app/media`, `browser-data` volume
-- `sync` connects to app via `API_BASE=http://app:3000`
-- Entrypoint (`docker/entrypoint.sh`): conditionally starts Xvfb + fluxbox + x11vnc + noVNC
+- Entrypoint (`docker/entrypoint.sh`): always starts Xvfb + fluxbox (needed for headful), conditionally starts x11vnc/noVNC when VNC enabled; VNC toggle persisted in `/data/browser/.vnc-enabled`
+
+> **RED LINE — VPN folder off-limits:** Never modify `/www1/vpn/*` (`gluetun-*` compose, keys, configs). VPN is managed separately. All host port publishing must go through `xdl-bridge` socat, not gluetun `ports:`.
 
 ## Notes for agents
 - All source files use CommonJS (`require`/`module.exports`)

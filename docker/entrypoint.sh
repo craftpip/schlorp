@@ -11,9 +11,16 @@ echo $! > /tmp/xvfb.pid
 fluxbox >/tmp/fluxbox.log 2>&1 &
 echo $! > /tmp/fluxbox.pid
 
+# Bridge old host ports (7866:3000 etc via gluetun) to new internal ports
+if command -v socat >/dev/null 2>&1; then
+  [ "${PORT:-6767}" != "3000" ] && socat TCP-LISTEN:3000,fork,reuseaddr TCP:127.0.0.1:${PORT:-6767} >/tmp/socat-3000.log 2>&1 & echo $! > /tmp/socat-3000.pid || true
+  [ "${VNC_PORT:-6777}" != "5900" ] && socat TCP-LISTEN:5900,fork,reuseaddr TCP:127.0.0.1:${VNC_PORT:-6777} >/tmp/socat-5900.log 2>&1 & echo $! > /tmp/socat-5900.pid || true
+  [ "${NOVNC_PORT:-6778}" != "7900" ] && socat TCP-LISTEN:7900,fork,reuseaddr TCP:127.0.0.1:${NOVNC_PORT:-6778} >/tmp/socat-7900.log 2>&1 & echo $! > /tmp/socat-7900.pid || true
+fi
+
 VNC_FLAG="/data/browser/.vnc-enabled"
-VNC_PORT_EFF="${VNC_PORT:-5900}"
-NOVNC_PORT_EFF="${NOVNC_PORT:-7900}"
+VNC_PORT_EFF="${VNC_PORT:-6777}"
+NOVNC_PORT_EFF="${NOVNC_PORT:-6778}"
 
 mkdir -p "$(dirname "$VNC_FLAG")"
 
@@ -21,8 +28,8 @@ mkdir -p "$(dirname "$VNC_FLAG")"
 cat > /usr/local/bin/vnc-start <<EOS2
 #!/usr/bin/env bash
 set -e
-VNC_PORT_EFF="\${VNC_PORT:-5900}"
-NOVNC_PORT_EFF="\${NOVNC_PORT:-7900}"
+VNC_PORT_EFF="\${VNC_PORT:-6777}"
+NOVNC_PORT_EFF="\${NOVNC_PORT:-6778}"
 DISPLAY_EFF="\${DISPLAY:-:99}"
 VNC_FLAG="/data/browser/.vnc-enabled"
 is_running_pid() { local pid="\$1"; [ -n "\$pid" ] && kill -0 "\$pid" 2>/dev/null; }
@@ -50,8 +57,8 @@ EOS2
 cat > /usr/local/bin/vnc-stop <<EOS2
 #!/usr/bin/env bash
 set -e
-VNC_PORT_EFF="\${VNC_PORT:-5900}"
-NOVNC_PORT_EFF="\${NOVNC_PORT:-7900}"
+VNC_PORT_EFF="\${VNC_PORT:-6777}"
+NOVNC_PORT_EFF="\${NOVNC_PORT:-6778}"
 VNC_FLAG="/data/browser/.vnc-enabled"
 for pidFile in /tmp/x11vnc.pid /tmp/novnc.pid; do
   if [ -f "\$pidFile" ]; then pid=\$(cat "\$pidFile" 2>/dev/null || echo ""); [ -n "\$pid" ] && kill "\$pid" 2>/dev/null || true; rm -f "\$pidFile"; fi

@@ -16,11 +16,11 @@ const app = express();
 const rootDir = __dirname;
 const mediaDir = path.join(rootDir, "media");
 const webDistDir = path.join(rootDir, "web", "dist");
-const port = Number(process.env.PORT) || 3000;
+const port = Number(process.env.PORT) || 6767;
 const apiJobTimeoutMs = parsePositiveInt(process.env.API_JOB_TIMEOUT_MS, 1800000);
 const VNC_FLAG_PATH = process.env.VNC_FLAG || "/data/browser/.vnc-enabled";
-const VNC_PORT_NUM = Number(process.env.VNC_PORT) || 5900;
-const NOVNC_PORT_NUM = Number(process.env.NOVNC_PORT) || 7900;
+const VNC_PORT_NUM = Number(process.env.VNC_PORT) || 6777;
+const NOVNC_PORT_NUM = Number(process.env.NOVNC_PORT) || 6778;
 
 let shuttingDown = false;
 let jobCounter = 0;
@@ -593,6 +593,110 @@ app.post("/vnc/disable", async (_req, res) => {
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
+app.get("/api/config", (_req, res) => {
+  const home = process.env.HOME || "/home/boniface";
+  const groups = [
+    {
+      name: "Core",
+      vars: [
+        { key: "PORT", value: process.env.PORT || "6767", def: "6767", desc: "API server port" },
+        { key: "HEADLESS", value: process.env.HEADLESS ?? (!process.env.DISPLAY ? "1 (inferred)" : "0 (inferred)"), def: "!DISPLAY", desc: "Browser headless mode" },
+        { key: "API_HEADLESS", value: process.env.API_HEADLESS || "(falls back to HEADLESS)", def: "HEADLESS", desc: "Headless for API" },
+        { key: "BROWSER_USER_DATA_DIR", value: process.env.BROWSER_USER_DATA_DIR || `${home}/.config/cloakbrowser-profile`, def: "~/.config/cloakbrowser-profile", desc: "Chrome profile dir" },
+        { key: "BROWSER_PROFILE_DIR", value: process.env.BROWSER_PROFILE_DIR || "Default", def: "Default", desc: "Profile subdir" },
+        { key: "BROWSER_PATH", value: process.env.BROWSER_PATH || "(auto)", def: "(auto)", desc: "Custom Chrome binary" },
+        { key: "CLOAKBROWSER_CACHE_DIR", value: process.env.CLOAKBROWSER_CACHE_DIR || "/data/cloakbrowser", def: "/data/cloakbrowser", desc: "CloakBrowser cache" },
+        { key: "INSTAGRAM_USER_AGENT", value: process.env.INSTAGRAM_USER_AGENT || "(iPhone Safari default)", def: "iPhone Safari", desc: "Custom UA for Instagram" },
+        { key: "AUTO_CONTINUE", value: process.env.AUTO_CONTINUE ?? (!process.stdin.isTTY ? "1 (inferred)" : "0 (inferred)"), def: "!isTTY", desc: "Auto-continue prompts" },
+        { key: "AUTO_CONTINUE_WAIT_MS", value: process.env.AUTO_CONTINUE_WAIT_MS || "0", def: "0", desc: "ms to wait before auto-continue" },
+      ],
+    },
+    {
+      name: "Capture Timing",
+      vars: [
+        { key: "AUTO_CAPTURE_TIMEOUT_MS", value: process.env.AUTO_CAPTURE_TIMEOUT_MS || "30000", def: "30000", desc: "Max wait for media signals" },
+        { key: "AUTO_CAPTURE_QUIET_MS", value: process.env.AUTO_CAPTURE_QUIET_MS || "1800", def: "1800", desc: "Quiet period before proceed" },
+        { key: "AUTO_CAPTURE_POLL_MS", value: process.env.AUTO_CAPTURE_POLL_MS || "250", def: "250", desc: "Poll interval" },
+      ],
+    },
+    {
+      name: "Timeouts",
+      vars: [
+        { key: "API_JOB_TIMEOUT_MS", value: process.env.API_JOB_TIMEOUT_MS || "1800000", def: "1800000 (30m)", desc: "Max API job duration" },
+        { key: "DOWNLOAD_FETCH_TIMEOUT_MS", value: process.env.DOWNLOAD_FETCH_TIMEOUT_MS || "300000", def: "300000 (5m)", desc: "HTTP fetch timeout" },
+        { key: "FFMPEG_TIMEOUT_MS", value: process.env.FFMPEG_TIMEOUT_MS || "900000", def: "900000 (15m)", desc: "ffmpeg timeout" },
+        { key: "FFPROBE_TIMEOUT_MS", value: process.env.FFPROBE_TIMEOUT_MS || "120000", def: "120000 (2m)", desc: "ffprobe timeout" },
+        { key: "MANUAL_BROWSER_TIMEOUT_MS", value: process.env.MANUAL_BROWSER_TIMEOUT_MS || "900000", def: "900000 (15m)", desc: "Manual browser auto-close" },
+      ],
+    },
+    {
+      name: "Instagram / Sync",
+      vars: [
+        { key: "INSTAGRAM_429_COOLDOWN_MS", value: process.env.INSTAGRAM_429_COOLDOWN_MS || "300000", def: "300000 (5m)", desc: "Cooldown after 429" },
+        { key: "SAVED_SYNC_STATE_FILE", value: process.env.SAVED_SYNC_STATE_FILE || ".saved-sync-state.json", def: ".saved-sync-state.json", desc: "Per-list scan state file" },
+        { key: "SAVED_SYNC_QUEUE_FILE", value: process.env.SAVED_SYNC_QUEUE_FILE || ".download-queue.json", def: ".download-queue.json", desc: "Sync daemon queue file" },
+        { key: "SAVED_SYNC_RETRY_DELAY_MS", value: process.env.SAVED_SYNC_RETRY_DELAY_MS || "3000", def: "3000", desc: "Retry delay" },
+        { key: "SAVED_SYNC_RETRY_COUNT", value: process.env.SAVED_SYNC_RETRY_COUNT || "20", def: "20", desc: "Retry count" },
+        { key: "API_BASE", value: process.env.API_BASE || "http://localhost:3001", def: "http://localhost:3001", desc: "Base URL for sync daemon" },
+        { key: "SNAPSHOT_DIR", value: process.env.SNAPSHOT_DIR || "media/.debug-snapshots", def: "media/.debug-snapshots", desc: "Snapshot dir on scrape miss" },
+      ],
+    },
+    {
+      name: "VNC / Docker",
+      vars: [
+        { key: "ENABLE_VNC", value: process.env.ENABLE_VNC || "0", def: "0", desc: "Start VNC at boot (flag file overrides)" },
+        { key: "VNC_FLAG", value: process.env.VNC_FLAG || "/data/browser/.vnc-enabled", def: "/data/browser/.vnc-enabled", desc: "Persisted VNC toggle" },
+        { key: "VNC_PORT", value: process.env.VNC_PORT || "6777", def: "6777", desc: "VNC port" },
+        { key: "NOVNC_PORT", value: process.env.NOVNC_PORT || "6778", def: "6778", desc: "noVNC port" },
+        { key: "DISPLAY", value: process.env.DISPLAY || ":99", def: ":99", desc: "X display" },
+      ],
+    },
+  ];
+  res.json({ ok: true, groups });
+});
+app.post("/api/config", async (req, res) => {
+  const key = String(req.body?.key || "").trim();
+  const value = req.body?.value == null ? "" : String(req.body.value);
+  const allowed = new Set([
+    "PORT","HEADLESS","API_HEADLESS","BROWSER_USER_DATA_DIR","BROWSER_PROFILE_DIR","BROWSER_PATH","CLOAKBROWSER_CACHE_DIR","INSTAGRAM_USER_AGENT","AUTO_CONTINUE","AUTO_CONTINUE_WAIT_MS",
+    "AUTO_CAPTURE_TIMEOUT_MS","AUTO_CAPTURE_QUIET_MS","AUTO_CAPTURE_POLL_MS",
+    "API_JOB_TIMEOUT_MS","DOWNLOAD_FETCH_TIMEOUT_MS","FFMPEG_TIMEOUT_MS","FFPROBE_TIMEOUT_MS","MANUAL_BROWSER_TIMEOUT_MS",
+    "INSTAGRAM_429_COOLDOWN_MS","SAVED_SYNC_STATE_FILE","SAVED_SYNC_QUEUE_FILE","SAVED_SYNC_RETRY_DELAY_MS","SAVED_SYNC_RETRY_COUNT","API_BASE","SNAPSHOT_DIR",
+    "ENABLE_VNC","VNC_FLAG","VNC_PORT","NOVNC_PORT","DISPLAY",
+  ]);
+  if (!key || !allowed.has(key)) return res.status(400).json({ ok: false, error: `Key not allowed: ${key}` });
+  if (/[\n\r]/.test(key) || /[\n\r]/.test(value)) return res.status(400).json({ ok: false, error: "Invalid characters" });
+  const envPath = path.join(rootDir, ".env");
+  try {
+    let content = "";
+    try { content = await fs.readFile(envPath, "utf8"); } catch (e) { if (e.code !== "ENOENT") throw e; }
+    const lines = content ? content.split("\n") : [];
+    let found = false;
+    const next = lines.map((line) => {
+      const t = line.trim();
+      if (!t || t.startsWith("#")) return line;
+      const eq = line.indexOf("=");
+      if (eq === -1) return line;
+      const k = line.slice(0, eq).trim();
+      if (k === key) { found = true; return `${key}=${value}`; }
+      return line;
+    });
+    if (!found) {
+      if (next.length && next[next.length - 1] !== "") next.push("");
+      next[next.length - 1] === "" ? next[next.length - 1] = `${key}=${value}` : next.push(`${key}=${value}`);
+      // ensure no double empty
+      const cleaned = next.filter((l, i, a) => !(l === "" && a[i + 1] === ""));
+      next.length = 0; next.push(...cleaned);
+    }
+    // trim trailing empty handling
+    let out = next.join("\n");
+    if (!out.endsWith("\n")) out += "\n";
+    await fs.writeFile(envPath, out, "utf8");
+    process.env[key] = value;
+    res.json({ ok: true, key, value });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
 app.get("/accounts", async (_req, res) => {
   try {
     const appConfig = await loadAppConfig();
@@ -944,7 +1048,7 @@ app.post("/open-browser", async (req, res) => {
       "\n[open-browser] Browser is open and visible in the VNC session. It starts on a blank tab."
     );
     logToClientAndConsole(
-      `[open-browser] Use http://${req.hostname.split(":")[0]}:7906 to control it.`
+      `[open-browser] Use http://${req.hostname.split(":")[0]}:6778 to control it.`
     );
     logToClientAndConsole(
       `[open-browser] It will auto-close in ${Math.round(timeoutMs / 60000)} min unless closed sooner.`

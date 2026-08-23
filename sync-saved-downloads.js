@@ -5,7 +5,7 @@ const fs = require("fs/promises");
 const path = require("path");
 const { normalizeAccountName } = require("./scan-videos/config");
 
-const API_BASE = process.env.API_BASE || "http://localhost:3001";
+const API_BASE = process.env.API_BASE || "http://localhost:6767";
 const STATE_FILE = process.env.SAVED_SYNC_STATE_FILE || path.resolve(__dirname, ".saved-sync-state.json");
 const QUEUE_FILE = process.env.SAVED_SYNC_QUEUE_FILE || path.resolve(__dirname, ".download-queue.json");
 const RETRY_DELAY_MS = Number(process.env.SAVED_SYNC_RETRY_DELAY_MS || 3000);
