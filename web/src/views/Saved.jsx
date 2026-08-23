@@ -199,7 +199,7 @@ export default function Saved() {
         <span className="badge text-bg-secondary">{pending.length} pending</span>
         <span style={{ flex: 1 }} />
         {!showAdd ? (
-          <button type="button" className="btn btn-primary" onClick={() => { if (editingIdx !== null) cancelEdit(); setShowAdd(true); }}><i className="bi bi-plus-lg" /> Add collection</button>
+          <button type="button" className="btn btn-sm btn-primary" onClick={() => { if (editingIdx !== null) cancelEdit(); setShowAdd(true); }}><i className="bi bi-plus-lg" /> Add collection</button>
         ) : (
           <button type="button" className="btn btn-sm btn-outline-secondary" onClick={() => setShowAdd(false)}><i className="bi bi-x-lg" /> Close</button>
         )}
