@@ -5,7 +5,6 @@ export default function Settings() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [filter, setFilter] = useState("");
-  const [copied, setCopied] = useState("");
   const [drafts, setDrafts] = useState({});
   const [saving, setSaving] = useState("");
   const [msg, setMsg] = useState("");
@@ -25,9 +24,6 @@ export default function Settings() {
   };
   useEffect(() => { load(); }, []);
 
-  const copy = async (text) => {
-    try { await navigator.clipboard.writeText(text); setCopied(text); setTimeout(() => setCopied(""), 1500); } catch {}
-  };
   const save = async (key) => {
     const value = drafts[key] ?? "";
     setSaving(key); setMsg("");
@@ -94,9 +90,8 @@ export default function Settings() {
                         </td>
                         <td style={{ padding: "8px 10px", fontFamily: "var(--mono)", color: "var(--muted)", whiteSpace: "nowrap" }}>{v.def}</td>
                         <td style={{ padding: "8px 10px", color: "var(--muted)" }}>{v.desc}</td>
-                        <td style={{ padding: "8px 10px", whiteSpace: "nowrap", display: "flex", gap: 4 }}>
+                        <td style={{ padding: "8px 10px", whiteSpace: "nowrap" }}>
                           <button className="btn btn-sm btn-primary" style={{ padding: "2px 8px", fontSize: 11 }} onClick={() => save(v.key)} disabled={saving === v.key}>{saving === v.key ? "…" : "Save"}</button>
-                          <button className="btn btn-sm btn-outline-secondary" style={{ padding: "2px 6px", fontSize: 11 }} onClick={() => copy(`${v.key}=${drafts[v.key] ?? v.value}`)}>{copied === `${v.key}=${drafts[v.key] ?? v.value}` ? "Copied" : "Copy"}</button>
                         </td>
                       </tr>
                     ))}

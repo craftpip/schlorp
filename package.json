@@ -16,7 +16,7 @@
     "docker:down": "docker compose down",
     "docker:logs": "docker compose logs -f app",
     "docker:restart": "docker compose restart app",
-    "docker:open-browser": "docker compose run --rm -it -p 7901:7900 -e ENABLE_VNC=1 -e HEADLESS=0 app node scan-videos.js open-browser"
+    "docker:open-browser": "docker compose run --rm -it -p 6779:6778 -e ENABLE_VNC=1 -e HEADLESS=0 app node scan-videos.js open-browser"
   },
   "keywords": [],
   "author": "",

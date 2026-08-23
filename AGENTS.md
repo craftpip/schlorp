@@ -22,7 +22,7 @@
   .saved-sync-state.json        # Per-list scan state (lastSeenUrl, lastRunAt, etc.)
   package.json
   Dockerfile
-  docker-compose.yml            # app (port 7866:3000, 7906:7900) + sync services
+  docker-compose.yml            # app (port 6767, 6777:6777, 6778:6778 via xdl-bridge)
   docker/entrypoint.sh          # Starts Xvfb + fluxbox + x11vnc + noVNC if ENABLE_VNC=1
   api-server.js                 # Express API (port 3000, single-job concurrency)
   scan-videos.js                # CLI entry: loads dotenv, calls ./scan-videos/index.run()
@@ -56,7 +56,7 @@
 ## Environment Variables (all optional, defaults in parens)
 
 ### Core
-- `PORT` (3000) — API server port
+- `PORT` (6767) — API server port
 - `HEADLESS` (`!process.env.DISPLAY`) — browser headless mode
 - `API_HEADLESS` (falls back to HEADLESS) — headless mode for API
 - `BROWSER_USER_DATA_DIR` (`~/.config/cloakbrowser-profile`) — Chrome profile dir
@@ -88,8 +88,8 @@
 
 ### Docker
 - `ENABLE_VNC` (0) — start VNC in container
-- `VNC_PORT` (5900)
-- `NOVNC_PORT` (7900)
+- `VNC_PORT` (6777)
+- `NOVNC_PORT` (6778)
 
 ## Module Exports Map
 

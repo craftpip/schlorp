@@ -113,5 +113,5 @@ CloakBrowser provides the stealth Chromium binary used by the CLI and API. It is
 npm run docker-open-browser
 ```
 
-While it runs, open `http://localhost:7901/vnc.html` to see and control the browser. The normal Compose service is available at `http://localhost:7906/vnc.html`, and its API is at `http://localhost:7866`.
+While it runs, open `http://localhost:6779/vnc.html` to see and control the browser. The normal Compose service is available at `http://localhost:6778/vnc.html`, and its API is at `http://localhost:6767`.
 You can log in to websites there, and session/profile data is kept in the named volume `browser-data`.

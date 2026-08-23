@@ -386,7 +386,7 @@ async function run(options = {}) {
     const accountMsg = parsed.account ? ` (account: ${parsed.account})` : "";
     const vncHint =
       process.env.ENABLE_VNC === "1"
-        ? " Open http://localhost:7901/vnc.html to control the browser."
+        ? " Open http://localhost:6779/vnc.html to control the browser."
         : "";
     await waitForEnter(`Browser is open on google.com${accountMsg}. Use it to log in anywhere you want.${vncHint}`, {
       forcePrompt: true,
