@@ -87,7 +87,7 @@ export default function Saved() {
   const startEdit = (idx) => {
     const l = lists[idx];
     const st = listsState[l.url] || {};
-    setUrl(l.url || ""); setFolder(l.folder || ""); setAccount(l.account || "default"); setSchedule(l.schedule || "30m"); setEditLastSeenUrl(st.lastSeenUrl || ""); setEditingIdx(idx); setShowAdd(true);
+    setUrl(l.url || ""); setFolder(l.folder || ""); setAccount(l.account || "default"); setSchedule(l.schedule || "30m"); setEditLastSeenUrl(st.lastSeenUrl || ""); setEditingIdx(idx); setShowAdd(false);
   };
   const cancelEdit = () => { setEditingIdx(null); setShowAdd(false); setUrl(""); setFolder(""); setAccount("default"); setSchedule("30m"); setEditLastSeenUrl(""); };
   const crawlInProgress = (skipIdx, opts = {}) =>
@@ -198,15 +198,15 @@ export default function Saved() {
         <span className="badge text-bg-secondary">{lists.length} lists</span>
         <span className="badge text-bg-secondary">{pending.length} pending</span>
         <span style={{ flex: 1 }} />
-        {!showAdd && editingIdx === null ? (
-          <button type="button" className="btn btn-primary" onClick={() => setShowAdd(true)}><i className="bi bi-plus-lg" /> Add collection</button>
+        {!showAdd ? (
+          <button type="button" className="btn btn-primary" onClick={() => { if (editingIdx !== null) cancelEdit(); setShowAdd(true); }}><i className="bi bi-plus-lg" /> Add collection</button>
         ) : (
-          <button type="button" className="btn btn-sm btn-outline-secondary" onClick={() => { if (editingIdx !== null) cancelEdit(); else setShowAdd(false); }}><i className="bi bi-x-lg" /> Close</button>
+          <button type="button" className="btn btn-sm btn-outline-secondary" onClick={() => setShowAdd(false)}><i className="bi bi-x-lg" /> Close</button>
         )}
       </div>
-      {(showAdd || editingIdx !== null) && (
+      {showAdd && (
         <div style={{ border: "1px solid var(--border)", borderRadius: 12, padding: 16, background: "var(--surface)", marginBottom: 16 }}>
-          <div style={{ fontWeight: 600, marginBottom: 12 }}>{editingIdx !== null ? "Edit collection" : "Add collection"}</div>
+          <div style={{ fontWeight: 600, marginBottom: 12 }}>Add collection</div>
           <form onSubmit={onAddList} style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
             <div style={{ flex: 1, minWidth: 220 }}>
               <label className="form-label">Collection URL</label>
@@ -241,28 +241,9 @@ export default function Saved() {
                 <option value="manual">Manual only</option>
               </select>
             </div>
-            <button type="submit" className="btn btn-primary" style={{ height: 38, alignSelf: "flex-end" }}><i className="bi bi-check-lg" /> {editingIdx !== null ? "Update" : "Add"}</button>
+            <button type="submit" className="btn btn-primary" style={{ height: 38, alignSelf: "flex-end" }}><i className="bi bi-check-lg" /> Add</button>
           </form>
-          {editingIdx !== null && (
-            <div style={{ marginTop: 12 }}>
-              <label className="form-label">Last seen URL <span style={{ color: "var(--faint)", fontWeight: 400 }}>(where next crawl stops — edit to re-scan from there)</span></label>
-              <input className="form-control" value={editLastSeenUrl} onChange={(e) => setEditLastSeenUrl(e.target.value)} placeholder="https://www.instagram.com/p/XXXX/ — leave empty to scan all" />
-              <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Current: {listsState[lists[editingIdx]?.url]?.lastSeenUrl || "— none —"} · {listsState[lists[editingIdx]?.url]?.lastScannedCount ?? 0} posts</div>
-            </div>
-          )}
           {msg && <div style={{ marginTop: 8, color: msg.includes("✓") ? "var(--success)" : "var(--danger)", fontSize: 13 }}>{msg}</div>}
-          {editingIdx !== null && (() => {
-            const editUrl = lists[editingIdx]?.url;
-            const st = listsState[editUrl] || {};
-            return (
-              <div style={{ marginTop: 12, padding: 10, background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 8 }}>
-                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Last crawled memory</div>
-                <div style={{ fontSize: 11, color: "var(--muted)", wordBreak: "break-all" }}>{st.lastSeenUrl || "— none —"}</div>
-                <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{st.lastRunAt ? new Date(st.lastRunAt).toLocaleString() : "never"}{st.lastScannedCount != null ? ` · ${st.lastScannedCount} posts` : ""}</div>
-                <button type="button" className="btn btn-sm btn-outline-danger" style={{ marginTop: 8 }} onClick={async () => { await fetch("/collections/clear-memory", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: editUrl }) }); setMsg("Memory cleared ✓ — next crawl scans all"); load(); }}><i className="bi bi-trash" /> Clear memory (scan all next time)</button>
-              </div>
-            );
-          })()}
         </div>
       )}
 
@@ -313,9 +294,61 @@ export default function Saved() {
                       <button className="btn btn-sm btn-outline-secondary" onClick={() => onCrawl(i)} disabled={busyIdx === `crawl-${i}`}><i className="bi bi-search" /> {busyIdx === `crawl-${i}` ? "Crawling…" : "Crawl"}</button>
                       {pendingForFolder > 0 && <button className="btn btn-sm btn-primary" onClick={() => onDownload(i)} disabled={busyIdx === `dl-${i}`}><i className="bi bi-download" /> {busyIdx === `dl-${i}` ? "…" : `Download (${pendingForFolder})`}</button>}
                       <button className="btn btn-sm btn-outline-secondary" onClick={() => onCrawlAndDownload(i)} disabled={!!busyIdx}><i className="bi bi-arrow-repeat" /> Crawl & Download</button>
-                      <button className="btn btn-sm btn-outline-secondary" onClick={() => startEdit(i)}><i className="bi bi-pencil" /> Edit</button>
+                      <button className="btn btn-sm btn-outline-secondary" onClick={() => editingIdx === i ? cancelEdit() : startEdit(i)}><i className={editingIdx === i ? "bi bi-x-lg" : "bi bi-pencil"} /> {editingIdx === i ? "Close edit" : "Edit"}</button>
                       <button className="btn btn-sm btn-outline-secondary" onClick={() => onRemoveList(i)}><i className="bi bi-x-lg" /> Remove</button>
                     </div>
+                    {editingIdx === i && (
+                      <div style={{ marginTop: 14, padding: 14, background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10 }}>
+                        <div style={{ fontWeight: 600, marginBottom: 10, fontSize: 13 }}>Edit collection</div>
+                        <form onSubmit={onAddList} style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
+                          <div style={{ flex: 1, minWidth: 200 }}>
+                            <label className="form-label">Collection URL</label>
+                            <input className="form-control" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://www.instagram.com/username/saved/list/123/" required />
+                          </div>
+                          <div>
+                            <label className="form-label">Folder</label>
+                            <input className="form-control" value={folder} onChange={(e) => setFolder(e.target.value)} placeholder="e.g. favorites" />
+                          </div>
+                          <div>
+                            <label className="form-label">Account</label>
+                            <select className="form-control" value={account} onChange={(e) => setAccount(e.target.value)}>
+                              <option value="default">default</option>
+                              {accounts.filter((a) => a.name !== "default").map((a) => <option key={a.name} value={a.name}>{a.name}</option>)}
+                            </select>
+                          </div>
+                          <div>
+                            <label className="form-label">Sync every</label>
+                            <select className="form-control" value={schedule} onChange={(e) => setSchedule(e.target.value)}>
+                              <option value="5m">5 min</option>
+                              <option value="15m">15 min</option>
+                              <option value="30m">30 min</option>
+                              <option value="1h">1 hour</option>
+                              <option value="6h">6 hours</option>
+                              <option value="12h">12 hours</option>
+                              <option value="24h">24 hours</option>
+                              <option value="2d">2 days</option>
+                              <option value="3d">3 days</option>
+                              <option value="7d">7 days</option>
+                              <option value="14d">14 days</option>
+                              <option value="30d">30 days</option>
+                              <option value="manual">Manual only</option>
+                            </select>
+                          </div>
+                          <button type="submit" className="btn btn-primary" style={{ height: 38, alignSelf: "flex-end" }}><i className="bi bi-check-lg" /> Update</button>
+                        </form>
+                        <div style={{ marginTop: 12 }}>
+                          <label className="form-label">Last seen URL <span style={{ color: "var(--faint)", fontWeight: 400 }}>(where next crawl stops)</span></label>
+                          <input className="form-control" value={editLastSeenUrl} onChange={(e) => setEditLastSeenUrl(e.target.value)} placeholder="https://www.instagram.com/p/XXXX/ — leave empty to scan all" />
+                          <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Current: {st.lastSeenUrl || "— none —"} · {st.lastScannedCount ?? 0} posts · {st.lastRunAt ? new Date(st.lastRunAt).toLocaleString() : "never"}</div>
+                        </div>
+                        <div style={{ marginTop: 10, padding: 10, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8 }}>
+                          <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Last crawled memory</div>
+                          <div style={{ fontSize: 11, color: "var(--muted)", wordBreak: "break-all" }}>{st.lastSeenUrl || "— none —"}</div>
+                          <button type="button" className="btn btn-sm btn-outline-danger" style={{ marginTop: 8 }} onClick={async () => { await fetch("/collections/clear-memory", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: l.url }) }); setMsg("Memory cleared ✓ — next crawl scans all"); load(); }}><i className="bi bi-trash" /> Clear memory (scan all next time)</button>
+                        </div>
+                        {msg && <div style={{ marginTop: 8, color: msg.includes("✓") ? "var(--success)" : "var(--danger)", fontSize: 13 }}>{msg}</div>}
+                      </div>
+                    )}
                   </div>
                 );
               })}
