@@ -40,6 +40,81 @@ const {
   downloadMedia,
 } = require("./download");
 
+const SNAPSHOT_DIR =
+  String(process.env.SNAPSHOT_DIR || "").trim() || path.join(process.cwd(), "media", ".debug-snapshots");
+
+const POPUP_CLOSE_SELECTORS = [
+  // generic cookie banners
+  'button[id*="accept"]', 'button[id*="cookie"]', '[id*="onetrust"] button', '[id*="cookie"] button',
+  'button:has-text("Accept")', 'button:has-text("I agree")', 'button:has-text("Got it")',
+  // xHamster / xVideos / Pornhub age gates
+  'button[data-role="agree"]', 'button.xh-age-confirm', '#age-verify button',
+  '[data-testid="age-verify"] button', '.age-verification button',
+  'button:has-text("I am 18")', 'button:has-text("I am over 18")', 'button:has-text("Enter")',
+  // Instagram login wall
+  'button:has-text("Not Now")', 'button:has-text("Not now")', '[aria-label="Close"]',
+  'div[role="dialog"] button', 'div[role="presentation"] button',
+  // generic modals
+  '.modal button.close', '.popup button.close', '[class*="popup"] [class*="close"]',
+  'button.close', '[aria-label="Dismiss"]',
+];
+
+async function dismissPopups(page, log = () => {}) {
+  for (const sel of POPUP_CLOSE_SELECTORS) {
+    try {
+      // page.evaluate to avoid puppeteer :has-text which is not native CSS — handle text via JS
+      const clicked = await page.evaluate((selector) => {
+        // handle :has-text pseudo by manual text search
+        const hasTextMatch = selector.match(/:has-text\("([^"]+)"\)/);
+        if (hasTextMatch) {
+          const text = hasTextMatch[1].toLowerCase();
+          const base = selector.replace(/:has-text\("([^"]+)"\)/, "");
+          const candidates = base ? Array.from(document.querySelectorAll(base)) : Array.from(document.querySelectorAll("button, a, [role=button]"));
+          for (const el of candidates) {
+            const t = (el.textContent || "").trim().toLowerCase();
+            if (t.includes(text) && el.offsetParent !== null) { el.click(); return true; }
+          }
+          return false;
+        }
+        const els = document.querySelectorAll(selector);
+        for (const el of els) {
+          if (el.offsetParent !== null) { el.click(); return true; }
+        }
+        return false;
+      }, sel);
+      if (clicked) {
+        log(`Dismissed popup via: ${sel}`);
+        await sleep(400);
+      }
+    } catch {}
+  }
+  // also try pressing Escape to close overlays
+  try { await page.keyboard.press("Escape"); } catch {}
+}
+
+async function captureFailureSnapshot(page, targetUrl, reason, log = () => {}) {
+  try {
+    await fs.mkdir(SNAPSHOT_DIR, { recursive: true });
+    const safeHost = (() => { try { return new URL(targetUrl).hostname.replace(/[^a-z0-9]/gi, "_"); } catch { return "unknown"; } })();
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const base = `${stamp}_${safeHost}_${sanitizeFileToken(reason || "no-video").slice(0, 30)}`;
+    const pngPath = path.join(SNAPSHOT_DIR, `${base}.png`);
+    const htmlPath = path.join(SNAPSHOT_DIR, `${base}.html`);
+    await page.screenshot({ path: pngPath, fullPage: true }).catch(() => {});
+    const html = await page.content().catch(() => "");
+    if (html) await fs.writeFile(htmlPath, html, "utf8").catch(() => {});
+    log(`Snapshot saved for ${targetUrl} (${reason}): ${pngPath}`);
+    // best-effort: also log overlay diagnostics
+    const diag = await page.evaluate(() => {
+      const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [role="presentation"], .modal, [class*="popup"], [class*="overlay"], [id*="cookie"], [id*="age"]'));
+      return dialogs.slice(0, 5).map((el) => ({ tag: el.tagName, cls: el.className?.slice(0, 80) || "", id: el.id || "", text: (el.innerText || "").slice(0, 120).replace(/\s+/g, " ") }));
+    }).catch(() => []);
+    if (diag.length) log(`Visible overlays: ${JSON.stringify(diag)}`);
+  } catch (e) {
+    log(`Snapshot failed: ${e.message}`);
+  }
+}
+
 async function countDomMediaSignals(page) {
   return page.evaluate(() => {
     const abs = (u) => {
@@ -91,6 +166,7 @@ async function waitForAutoCaptureWindow(page, getNetworkState, logLabel, log = c
   const pollMs = Number.isFinite(pollRaw) && pollRaw > 0 ? pollRaw : 250;
   const startedAt = Date.now();
 
+  let lastPopupCheckAt = 0;
   while (Date.now() - startedAt < timeoutMs) {
     const dom = await countDomMediaSignals(page).catch(() => ({
       urlCount: 0,
@@ -107,6 +183,12 @@ async function waitForAutoCaptureWindow(page, getNetworkState, logLabel, log = c
     if (hasSignals && quietForMs >= quietMs && domReady) {
       log(`${logLabel} (auto-proceed after media settled: signals=${signalCount}, quiet=${quietForMs}ms)`);
       return;
+    }
+
+    // periodically try to dismiss popups/overlays that block media loading
+    if (Date.now() - lastPopupCheckAt > 2000) {
+      lastPopupCheckAt = Date.now();
+      await dismissPopups(page, log).catch(() => {});
     }
 
     await new Promise((resolve) => setTimeout(resolve, pollMs));
@@ -444,6 +526,8 @@ async function run(options = {}) {
           log,
           instagram429CooldownMs
         );
+        // best-effort: clear any blocking popups before waiting for media
+        await dismissPopups(page, log).catch(() => {});
         const pageReadyMessage = `Target page ${index + 1}/${parsed.inputUrls.length} is open. If needed, log in and ensure media is visible.`;
         if (autoContinuePrompts) {
           await waitForAutoCaptureWindow(
@@ -455,6 +539,8 @@ async function run(options = {}) {
         } else {
           await waitForEnter(pageReadyMessage, { log });
         }
+        // one more pass after capture window
+        await dismissPopups(page, log).catch(() => {});
 
         if (!isInstagramTarget) {
           await page.evaluate(async () => {
@@ -601,6 +687,7 @@ async function run(options = {}) {
         log(`\n=== Video/Media URLs found for ${targetUrl} ===`);
         if (!allVideos.length) {
           log("No video media URLs detected.");
+          await captureFailureSnapshot(page, targetUrl, "no-video-urls", log);
           failedTargets.push({ url: targetUrl, reason: "No video media URLs detected." });
           continue;
         }
@@ -614,6 +701,7 @@ async function run(options = {}) {
         });
         if (!downloadableUrls.length) {
           log("\nNo downloadable direct or stream URL found.");
+          await captureFailureSnapshot(page, targetUrl, "no-downloadable-url", log);
           failedTargets.push({ url: targetUrl, reason: "No downloadable direct or stream URL found." });
           continue;
         }
@@ -625,6 +713,7 @@ async function run(options = {}) {
 
         if (!qualityCappedUrls.length) {
           log(`\nNo downloadable media URL found at or below ${maxQuality}p.`);
+          await captureFailureSnapshot(page, targetUrl, `no-url-below-${maxQuality}p`, log);
           failedTargets.push({
             url: targetUrl,
             reason: `No downloadable media URL at or below ${maxQuality}p.`,
@@ -788,6 +877,7 @@ async function run(options = {}) {
         }
 
         if (!result) {
+          await captureFailureSnapshot(page, targetUrl, "download-failed", log);
           throw new Error(
             `Failed to download from ${qualityCappedUrls.length} candidate URLs. Last error: ${
               lastError ? lastError.message : "unknown"

@@ -16,9 +16,11 @@ const app = express();
 const rootDir = __dirname;
 const mediaDir = path.join(rootDir, "media");
 const webDistDir = path.join(rootDir, "web", "dist");
-const legacyDir = path.join(rootDir, "legacy");
 const port = Number(process.env.PORT) || 3000;
 const apiJobTimeoutMs = parsePositiveInt(process.env.API_JOB_TIMEOUT_MS, 1800000);
+const VNC_FLAG_PATH = process.env.VNC_FLAG || "/data/browser/.vnc-enabled";
+const VNC_PORT_NUM = Number(process.env.VNC_PORT) || 5900;
+const NOVNC_PORT_NUM = Number(process.env.NOVNC_PORT) || 7900;
 
 let shuttingDown = false;
 let jobCounter = 0;
@@ -457,13 +459,7 @@ app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: false }));
 app.use("/media", express.static(mediaDir));
 
-// Legacy: old vanilla site lives at /legacy (preserved verbatim)
-app.use("/legacy", express.static(legacyDir));
-app.get("/legacy", (_req, res) => {
-  res.sendFile(path.join(legacyDir, "index.html"));
-});
-
-// New React app at / (web/dist). Fallback to legacy if dist not built yet.
+// New React app at / (web/dist).
 const fsSync = require("fs");
 app.use(express.static(webDistDir));
 app.get("/", (_req, res) => {
@@ -471,9 +467,7 @@ app.get("/", (_req, res) => {
   if (fsSync.existsSync(distIndex)) {
     return res.sendFile(distIndex);
   }
-  // fallback: no React build yet — serve legacy with header so we know
-  res.setHeader("X-Legacy-Fallback", "1");
-  return res.sendFile(path.join(legacyDir, "index.html"));
+  return res.status(503).send("web/dist not built — run npm run build in /web");
 });
 
 app.get("/scan-saved", (_req, res) => {
@@ -545,6 +539,58 @@ app.get("/health", (_req, res) => {
     ).length,
     manualBrowsers: Array.from(manualBrowsersByAccount.keys()),
   });
+});
+
+// ---- VNC on-demand ----
+const { exec: execCb } = require("child_process");
+const { promisify: _promisify } = require("util");
+const execAsync = _promisify(execCb);
+const fsSyncVnc = require("fs");
+function isVncFlagEnabled() {
+  try {
+    if (fsSyncVnc.existsSync(VNC_FLAG_PATH)) return fsSyncVnc.readFileSync(VNC_FLAG_PATH, "utf8").trim() === "1";
+  } catch {}
+  return String(process.env.ENABLE_VNC || "0") === "1";
+}
+async function isVncProcessRunning() {
+  // check pid file or try TCP connect to VNC port (avoids needing pgrep/ps)
+  try {
+    const net = require("net");
+    const ok = await new Promise((resolve) => {
+      const s = net.createConnection({ host: "127.0.0.1", port: VNC_PORT_NUM, timeout: 800 }, () => { s.end(); resolve(true); });
+      s.on("error", () => resolve(false));
+      s.on("timeout", () => { s.destroy(); resolve(false); });
+    });
+    if (ok) return true;
+  } catch {}
+  try {
+    if (fsSyncVnc.existsSync("/tmp/x11vnc.pid")) {
+      const pid = Number(fsSyncVnc.readFileSync("/tmp/x11vnc.pid", "utf8").trim());
+      if (pid) { process.kill(pid, 0); return true; }
+    }
+  } catch {}
+  return false;
+}
+app.get("/vnc/status", async (_req, res) => {
+  const enabled = isVncFlagEnabled();
+  const running = await isVncProcessRunning();
+  res.json({ ok: true, enabled, running, vncPort: VNC_PORT_NUM, novncPort: NOVNC_PORT_NUM });
+});
+app.post("/vnc/enable", async (_req, res) => {
+  try {
+    await execAsync("/usr/local/bin/vnc-start");
+    // wait briefly for processes
+    await new Promise((r) => setTimeout(r, 1200));
+    const running = await isVncProcessRunning();
+    res.json({ ok: true, enabled: true, running });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+app.post("/vnc/disable", async (_req, res) => {
+  try {
+    await execAsync("/usr/local/bin/vnc-stop");
+    await new Promise((r) => setTimeout(r, 600));
+    res.json({ ok: true, enabled: false, running: false });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
 app.get("/accounts", async (_req, res) => {
@@ -1294,7 +1340,7 @@ app.get("/{*splat}", (req, res, next) => {
     if (fsSync.existsSync(distIndex)) return res.sendFile(distIndex);
     return next();
   }
-  if (req.path.startsWith("/api/") || req.path.startsWith("/queue") || req.path.startsWith("/media/") || req.path.startsWith("/legacy") || req.path === "/health" || req.path === "/ws" || req.path.startsWith("/health")) return next();
+  if (req.path.startsWith("/api/") || req.path.startsWith("/queue") || req.path.startsWith("/media/") || req.path === "/health" || req.path === "/ws" || req.path.startsWith("/health")) return next();
   const distIndex = path.join(webDistDir, "index.html");
   if (fsSync.existsSync(distIndex)) return res.sendFile(distIndex);
   return next();

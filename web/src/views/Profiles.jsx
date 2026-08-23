@@ -8,6 +8,23 @@ export default function Profiles() {
   const [info, setInfo] = useState("");
   const [showCreate, setShowCreate] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [vnc, setVnc] = useState({ enabled: false, running: false });
+  const [vncBusy, setVncBusy] = useState(false);
+
+  const loadVnc = async () => {
+    try { const r = await fetch("/vnc/status"); const j = await r.json(); if (j.ok) setVnc({ enabled: j.enabled, running: j.running }); } catch {}
+  };
+
+  const toggleVnc = async () => {
+    setVncBusy(true);
+    try {
+      const r = await fetch(vnc.enabled ? "/vnc/disable" : "/vnc/enable", { method: "POST" });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || "failed");
+      setVnc({ enabled: j.enabled ?? !vnc.enabled, running: j.running ?? !vnc.enabled });
+    } catch (e) { setInfo(e.message); setTimeout(() => setInfo(""), 3000); }
+    finally { setVncBusy(false); loadVnc(); }
+  };
 
   const load = async () => {
     try {
@@ -16,7 +33,7 @@ export default function Profiles() {
       if (j.ok) setAccounts(j.accounts || []);
     } catch {}
   };
-  useEffect(() => { load(); const t = setInterval(load, 4000); return () => clearInterval(t); }, []);
+  useEffect(() => { load(); loadVnc(); const t = setInterval(load, 4000); const tv = setInterval(loadVnc, 5000); return () => { clearInterval(t); clearInterval(tv); }; }, []);
 
   const onCreate = async (e) => {
     e.preventDefault();
@@ -59,11 +76,15 @@ export default function Profiles() {
 
   return (
     <div>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
         <div style={{ fontWeight: 700, fontSize: 14 }}><i className="bi bi-people" style={{ marginRight: 8 }} />Profiles</div>
         <span className="badge text-bg-secondary">{accounts.length}</span>
-        <a href="http://10.69.1.164:7906" target="_blank" rel="noopener" className="btn btn-sm btn-outline-secondary" style={{ marginLeft: "auto" }}><i className="bi bi-box-arrow-up-right" /> VNC desktop</a>
+        <span className={`badge ${vnc.enabled ? "text-bg-success" : "text-bg-secondary"}`} title={vnc.enabled ? "VNC enabled — anyone with the link can view the desktop" : "VNC disabled — desktop not exposed"}>{vnc.enabled ? "VNC enabled" : "VNC disabled"}</span>
+        <span style={{ flex: 1 }} />
+        <button type="button" className={`btn btn-sm ${vnc.enabled ? "btn-outline-danger" : "btn-outline-secondary"}`} onClick={toggleVnc} disabled={vncBusy}><i className={vnc.enabled ? "bi bi-shield-lock" : "bi bi-broadcast"} /> {vncBusy ? "…" : vnc.enabled ? "Disable VNC" : "Enable VNC"}</button>
+        {vnc.enabled && <a href="http://10.69.1.164:7906" target="_blank" rel="noopener" className="btn btn-sm btn-primary"><i className="bi bi-box-arrow-up-right" /> Open VNC</a>}
       </div>
+      {!vnc.enabled && <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 10 }}>VNC is disabled — the desktop is not exposed. Enable it when you need to log in, then disable again.</div>}
       {info && <div style={{ background: "rgba(16,185,129,.15)", border: "1px solid #065f46", color: "#d1fae5", padding: "8px 12px", borderRadius: 8, fontSize: 13, marginBottom: 12 }}>{info}</div>}
       <div style={{ border: "1px solid var(--border)", borderRadius: 12, padding: 16, background: "var(--surface)", marginBottom: 16 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: showCreate ? 12 : 0 }}>

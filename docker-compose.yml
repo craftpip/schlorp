@@ -2,7 +2,7 @@ services:
   app:
     build: .
     image: xdl-app-image:local
-    container_name: xdl-app
+    container_name: xdl
     network_mode: "container:gluetun-nordvpn2"
     environment:
       PORT: 3000
@@ -16,6 +16,7 @@ services:
     volumes:
       - .:/app
       - /app/node_modules
+      - ./docker/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro
       - /mnt/media2t/downloads/studies/xdl:/app/media
       - browser-data:/data/browser
       - cloakbrowser-cache:/data/cloakbrowser

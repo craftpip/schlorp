@@ -50,7 +50,17 @@ export default function Media() {
   useEffect(() => { load(folder); }, [folder]);
 
   const crumbs = folder ? folder.split("/").filter(Boolean) : [];
-  const filtered = items.filter((it) => !filter || it.name.toLowerCase().includes(filter.toLowerCase()));
+  const filtered = (() => {
+    const raw = filter.trim();
+    if (!raw) return items;
+    const isNeg = raw.startsWith("!");
+    const term = (isNeg ? raw.slice(1).trim() : raw).toLowerCase();
+    if (!term) return items;
+    return items.filter((it) => {
+      const hit = it.name.toLowerCase().includes(term);
+      return isNeg ? !hit : hit;
+    });
+  })();
 
   const goFolder = (name) => setSearchParams({ folder: folder ? `${folder}/${name}` : name });
   const goUp = () => {
@@ -107,9 +117,9 @@ export default function Media() {
                   <div style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0 }}>
                     <i className={`bi ${it.dir ? "bi-folder-fill" : "bi-file-earmark-play"}`} style={{ color: it.dir ? "#f59e0b" : "var(--accent)" }} />
                     {it.dir ? (
-                      <button onClick={() => goFolder(it.name)} style={{ background: "none", border: 0, color: "var(--text)", fontWeight: 600, textAlign: "left", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.name}</button>
+                      <button onClick={() => goFolder(it.name)} title={it.name} style={{ background: "none", border: 0, color: "var(--text)", fontWeight: 600, textAlign: "left", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.name}</button>
                     ) : (
-                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 500 }}>{it.name}</span>
+                      <span title={it.name} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 500 }}>{it.name}</span>
                     )}
                   </div>
                   <span className="small" style={{ color: "var(--muted)", whiteSpace: "nowrap" }}>{fmtSize(it.size)}</span>

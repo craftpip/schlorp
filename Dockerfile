@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   x11vnc \
   novnc \
   websockify \
+  procps \
   fonts-liberation \
   ca-certificates \
   libnspr4 \
