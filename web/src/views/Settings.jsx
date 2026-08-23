@@ -31,6 +31,11 @@ export default function Settings() {
       const r = await fetch("/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key, value }) });
       const j = await r.json();
       if (!r.ok || !j.ok) throw new Error(j.error || "save failed");
+      if (key === "ADMIN_PASSWORD") {
+        // keep local auth in sync — new password becomes the stored token
+        if (value.trim()) localStorage.setItem("xdl_admin_pw", value.trim());
+        else localStorage.removeItem("xdl_admin_pw");
+      }
       setMsg(`${key} saved ✓ — restart container to apply`);
       setTimeout(() => setMsg(""), 3000);
       load();
@@ -79,12 +84,13 @@ export default function Settings() {
                         <td style={{ padding: "8px 10px", fontFamily: "var(--mono)", fontWeight: 600, whiteSpace: "nowrap" }}>{v.key}</td>
                         <td style={{ padding: "6px 8px" }}>
                           <input
+                            type={v.isPassword ? "password" : "text"}
                             className="form-control form-control-sm"
-                            style={{ fontFamily: "var(--mono)", fontSize: 12, height: 28, minWidth: 160, borderColor: String(drafts[v.key] ?? v.value) !== String(v.def) ? "var(--accent)" : undefined }}
+                            style={{ fontFamily: "var(--mono)", fontSize: 12, height: 28, minWidth: 160, borderColor: (v.hasValue ? true : String(drafts[v.key] ?? v.value) !== String(v.def)) ? "var(--accent)" : undefined }}
                             value={drafts[v.key] ?? ""}
                             onChange={(e) => setDrafts((d) => ({ ...d, [v.key]: e.target.value }))}
                             onKeyDown={(e) => { if (e.key === "Enter") save(v.key); }}
-                            placeholder={v.def}
+                            placeholder={v.placeholder || v.def}
                             disabled={saving === v.key}
                           />
                         </td>
