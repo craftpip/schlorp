@@ -615,7 +615,7 @@ app.use((req, res, next) => {
   if (!req.path.startsWith("/api/") && !req.path.startsWith("/queue") && !req.path.startsWith("/sync-queue") && !req.path.startsWith("/sync-config") && !req.path.startsWith("/accounts") && !req.path.startsWith("/collections") && !req.path.startsWith("/scan-saved") && !req.path.startsWith("/download") && !req.path.startsWith("/media")) return next();
   const provided = String(req.headers["x-panel-password"] || req.headers["x-admin-password"] || req.headers["x-admin-token"] || req.query?.password || "");
   if (provided === expected) return next();
-  return res.status(401).json({ ok: false, error: "Admin password required" });
+  return res.status(401).json({ ok: false, error: "Password is required" });
 });
 
 app.get("/api/config", (_req, res) => {

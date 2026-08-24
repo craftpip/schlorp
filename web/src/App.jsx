@@ -64,10 +64,10 @@ export default function App() {
   }
   if (auth.protected && !auth.authed) {
     return (
-      <div style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", justifyContent: "center", alignItems: "center", padding: "24px 16px" }}>
-        <div className="card" style={{ padding: 24, maxWidth: 360, width: "100%" }}>
-          <div style={{ fontWeight: 700, marginBottom: 8 }}><i className="bi bi-shield-lock" /> Admin password required</div>
-          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12 }}>This panel is protected. Enter the admin password to continue. Leave blank in Settings to disable.</div>
+      <div style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", justifyContent: "center", padding: "24px 16px" }}>
+        <div className="card" style={{ padding: 24, maxWidth: 360, width: "100%", margin: "40px auto", height: "fit-content" }}>
+          <div style={{ fontWeight: 700, marginBottom: 8 }}><i className="bi bi-shield-lock" /> Password is required</div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12 }}>This panel is protected. Enter the password to continue. Leave blank in Settings to disable.</div>
           <form onSubmit={doLogin} style={{ display: "flex", gap: 8 }}>
             <input type="password" className="form-control" value={pw} onChange={(e) => setPw(e.target.value)} placeholder="Password" autoFocus style={{ flex: 1 }} />
             <button type="submit" className="btn btn-primary">Unlock</button>
