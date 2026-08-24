@@ -1085,7 +1085,7 @@
       function parseDownloadedPaths(chunkText,partialLine){const text=`${partialLine||""}${String(chunkText||"")}`;const parts=text.split(/\r?\n/);const nextPartial=parts.pop()||"";const found=[];for(const line of parts){const m=line.match(/^Downloaded media to:\s+(.+)$/);if(m){const v=String(m[1]||"").trim();if(v)found.push(v)}}return{found,nextPartial}}
       function formatBytes(b){if(b==null)return"";const v=Number(b);if(!Number.isFinite(v)||v<0)return"";if(v<1024)return `${v} B`;const u=["KB","MB","GB","TB"];let n=v/1024,unit=u[0];for(let i=1;i<u.length&&n>=1024;i++){n/=1024;unit=u[i]}return `${n.toFixed(1)} ${unit}`}
       function formatDate(iso){if(!iso)return"";const d=new Date(iso);if(Number.isNaN(d.getTime()))return"";return d.toLocaleString()}
-      function novncUrl(){return `${location.protocol==="https:"?"https":"http"}://${location.hostname}:7906`}
+      function novncUrl(){return `${location.protocol==="https:"?"https":"http"}://${location.hostname}:6778/vnc.html`}
       const navLinks=Array.from(document.querySelectorAll('.sidebar .nav-link'));
       const views=Array.from(document.querySelectorAll('.view'));
       function navigate(name){

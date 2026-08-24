@@ -6,9 +6,9 @@ if (typeof window !== "undefined" && !window._xdlFetchPatched) {
   const _origFetch = window.fetch.bind(window);
   window.fetch = (url, opts = {}) => {
     try {
-      const t = localStorage.getItem("xdl_admin_pw") || "";
+      const t = localStorage.getItem("xdl_admin_pw") || localStorage.getItem("xdl_panel_pw") || "";
       if (t) {
-        opts = { ...opts, headers: { ...(opts.headers || {}), "x-admin-password": t } };
+        opts = { ...opts, headers: { ...(opts.headers || {}), "x-panel-password": t, "x-admin-password": t } };
       }
     } catch {}
     return _origFetch(url, opts);
@@ -24,7 +24,7 @@ export default function App() {
     fetch("/api/auth/status").then((r) => r.json()).then((j) => {
       if (!j.protected) setAuth({ checking: false, protected: false, authed: true });
       else {
-        const t2 = localStorage.getItem("xdl_admin_pw") || "";
+        const t2 = localStorage.getItem("xdl_panel_pw") || localStorage.getItem("xdl_admin_pw") || "";
         if (!t2) setAuth({ checking: false, protected: true, authed: false });
         else fetch("/api/auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: t2 }) }).then((r) => {
           if (r.ok) setAuth({ checking: false, protected: true, authed: true });
@@ -37,10 +37,10 @@ export default function App() {
     e.preventDefault(); setPwErr("");
     const r = await fetch("/api/auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: pw }) });
     const j = await r.json().catch(() => ({}));
-    if (r.ok && j.ok) { localStorage.setItem("xdl_admin_pw", pw); setAuth({ checking: false, protected: true, authed: true }); setPw(""); }
+    if (r.ok && j.ok) { localStorage.setItem("xdl_admin_pw", pw); localStorage.setItem("xdl_panel_pw", pw); setAuth({ checking: false, protected: true, authed: true }); setPw(""); }
     else setPwErr(j.error || "Invalid password");
   };
-  const doLogout = () => { localStorage.removeItem("xdl_admin_pw"); setAuth({ checking: false, protected: true, authed: false }); };
+  const doLogout = () => { localStorage.removeItem("xdl_admin_pw"); localStorage.removeItem("xdl_panel_pw"); setAuth({ checking: false, protected: true, authed: false }); };
 
   useEffect(() => {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -53,6 +53,30 @@ export default function App() {
     };
     return () => ws.close();
   }, []);
+  if (auth.checking) {
+    return (
+      <div style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", justifyContent: "center", padding: "24px 16px" }}>
+        <div style={{ width: "100%", maxWidth: 860 }}>
+          <div style={{ padding: 40, textAlign: "center", color: "var(--muted)" }}>Checking access…</div>
+        </div>
+      </div>
+    );
+  }
+  if (auth.protected && !auth.authed) {
+    return (
+      <div style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", justifyContent: "center", alignItems: "center", padding: "24px 16px" }}>
+        <div className="card" style={{ padding: 24, maxWidth: 360, width: "100%" }}>
+          <div style={{ fontWeight: 700, marginBottom: 8 }}><i className="bi bi-shield-lock" /> Admin password required</div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12 }}>This panel is protected. Enter the admin password to continue. Leave blank in Settings to disable.</div>
+          <form onSubmit={doLogin} style={{ display: "flex", gap: 8 }}>
+            <input type="password" className="form-control" value={pw} onChange={(e) => setPw(e.target.value)} placeholder="Password" autoFocus style={{ flex: 1 }} />
+            <button type="submit" className="btn btn-primary">Unlock</button>
+          </form>
+          {pwErr && <div style={{ color: "var(--danger)", fontSize: 12, marginTop: 8 }}>{pwErr}</div>}
+        </div>
+      </div>
+    );
+  }
   return (
     <div style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", justifyContent: "center", padding: "24px 16px" }}>
       <div style={{ width: "100%", maxWidth: 860 }}>
@@ -75,18 +99,7 @@ export default function App() {
           <NavLink to="/profiles" className={({ isActive }) => `btn btn-sm ${isActive ? "btn-primary" : "btn-outline-secondary"}`}><i className="bi bi-people" /> Profiles</NavLink>
           <NavLink to="/settings" className={({ isActive }) => `btn btn-sm ${isActive ? "btn-primary" : "btn-outline-secondary"}`}><i className="bi bi-gear" /> Settings</NavLink>
         </nav>
-        {auth.checking ? <div style={{ padding: 40, textAlign: "center", color: "var(--muted)" }}>Checking access…</div>
-        : auth.protected && !auth.authed ? (
-          <div className="card" style={{ padding: 24, maxWidth: 360, margin: "40px auto" }}>
-            <div style={{ fontWeight: 700, marginBottom: 8 }}><i className="bi bi-shield-lock" /> Admin password required</div>
-            <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12 }}>This panel is protected. Enter the admin password to continue. Leave blank in Settings to disable.</div>
-            <form onSubmit={doLogin} style={{ display: "flex", gap: 8 }}>
-              <input type="password" className="form-control" value={pw} onChange={(e) => setPw(e.target.value)} placeholder="Password" autoFocus style={{ flex: 1 }} />
-              <button type="submit" className="btn btn-primary">Unlock</button>
-            </form>
-            {pwErr && <div style={{ color: "var(--danger)", fontSize: 12, marginTop: 8 }}>{pwErr}</div>}
-          </div>
-        ) : <Outlet />}
+        <Outlet />
       </div>
     </div>
   );

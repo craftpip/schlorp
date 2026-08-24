@@ -31,10 +31,10 @@ export default function Settings() {
       const r = await fetch("/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key, value }) });
       const j = await r.json();
       if (!r.ok || !j.ok) throw new Error(j.error || "save failed");
-      if (key === "ADMIN_PASSWORD") {
+      if (key === "UI_PANEL_PASSWORD") {
         // keep local auth in sync — new password becomes the stored token
-        if (value.trim()) localStorage.setItem("xdl_admin_pw", value.trim());
-        else localStorage.removeItem("xdl_admin_pw");
+        if (value.trim()) { localStorage.setItem("xdl_admin_pw", value.trim()); localStorage.setItem("xdl_panel_pw", value.trim()); }
+        else { localStorage.removeItem("xdl_admin_pw"); localStorage.removeItem("xdl_panel_pw"); }
       }
       setMsg(`${key} saved ✓ — restart container to apply`);
       setTimeout(() => setMsg(""), 3000);

@@ -30,6 +30,24 @@ services:
       start_period: 20s
     restart: unless-stopped
 
+  xdl-bridge:
+    image: alpine/socat
+    container_name: xdl-bridge
+    entrypoint: sh
+    command: -c "socat TCP-LISTEN:6767,fork,reuseaddr TCP:gluetun-nordvpn2:6767 & socat TCP-LISTEN:6777,fork,reuseaddr TCP:gluetun-nordvpn2:6777 & socat TCP-LISTEN:6778,fork,reuseaddr TCP:gluetun-nordvpn2:6778 & wait"
+    ports:
+      - "6767:6767"
+      - "6777:6777"
+      - "6778:6778"
+    networks:
+      - gluetun
+    restart: unless-stopped
+
+networks:
+  gluetun:
+    external: true
+    name: gluetun-nordvpn2_default
+
 volumes:
   browser-data:
   cloakbrowser-cache:

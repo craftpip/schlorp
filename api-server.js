@@ -21,7 +21,7 @@ const apiJobTimeoutMs = parsePositiveInt(process.env.API_JOB_TIMEOUT_MS, 1800000
 const VNC_FLAG_PATH = process.env.VNC_FLAG || "/data/browser/.vnc-enabled";
 const VNC_PORT_NUM = Number(process.env.VNC_PORT) || 6777;
 const NOVNC_PORT_NUM = Number(process.env.NOVNC_PORT) || 6778;
-let ADMIN_PASSWORD = String(process.env.ADMIN_PASSWORD || "").trim();
+let UI_PANEL_PASSWORD = String(process.env.UI_PANEL_PASSWORD || process.env.ADMIN_PASSWORD || "").trim();
 
 let shuttingDown = false;
 let jobCounter = 0;
@@ -595,11 +595,11 @@ app.post("/vnc/disable", async (_req, res) => {
 });
 
 app.get("/api/auth/status", (_req, res) => {
-  const pw = String(process.env.ADMIN_PASSWORD || ADMIN_PASSWORD || "").trim();
+  const pw = String(process.env.UI_PANEL_PASSWORD || process.env.ADMIN_PASSWORD || UI_PANEL_PASSWORD || "").trim();
   res.json({ ok: true, protected: !!pw });
 });
 app.post("/api/auth", (req, res) => {
-  const expected = String(process.env.ADMIN_PASSWORD || ADMIN_PASSWORD || "").trim();
+  const expected = String(process.env.UI_PANEL_PASSWORD || process.env.ADMIN_PASSWORD || UI_PANEL_PASSWORD || "").trim();
   if (!expected) return res.json({ ok: true });
   const provided = String(req.body?.password || "").trim();
   if (provided === expected) return res.json({ ok: true });
@@ -607,11 +607,13 @@ app.post("/api/auth", (req, res) => {
 });
 // protect API when password set (except auth/health/vnc status)
 app.use((req, res, next) => {
-  const expected = String(process.env.ADMIN_PASSWORD || ADMIN_PASSWORD || "").trim();
+  const expected = String(process.env.UI_PANEL_PASSWORD || process.env.ADMIN_PASSWORD || UI_PANEL_PASSWORD || "").trim();
   if (!expected) return next();
   if (req.path === "/api/auth/status" || req.path === "/api/auth" || req.path === "/health" || req.path.startsWith("/health") || req.path === "/vnc/status") return next();
+  // SPA pages — must be reachable on hard reload without header; React will enforce auth via JS
+  if (req.method === "GET" && ["/", "/dashboard", "/collections", "/media", "/profiles", "/settings"].includes(req.path)) return next();
   if (!req.path.startsWith("/api/") && !req.path.startsWith("/queue") && !req.path.startsWith("/sync-queue") && !req.path.startsWith("/sync-config") && !req.path.startsWith("/accounts") && !req.path.startsWith("/collections") && !req.path.startsWith("/scan-saved") && !req.path.startsWith("/download") && !req.path.startsWith("/media")) return next();
-  const provided = String(req.headers["x-admin-password"] || req.headers["x-admin-token"] || req.query?.password || "");
+  const provided = String(req.headers["x-panel-password"] || req.headers["x-admin-password"] || req.headers["x-admin-token"] || req.query?.password || "");
   if (provided === expected) return next();
   return res.status(401).json({ ok: false, error: "Admin password required" });
 });
@@ -619,6 +621,12 @@ app.use((req, res, next) => {
 app.get("/api/config", (_req, res) => {
   const home = process.env.HOME || "/home/boniface";
   const groups = [
+    {
+      name: "Security",
+      vars: [
+        { key: "UI_PANEL_PASSWORD", value: "", def: "(blank = no password)", desc: "Admin panel password — blank disables auth", isPassword: true, hasValue: !!UI_PANEL_PASSWORD, placeholder: UI_PANEL_PASSWORD ? "•••• (set — type new to change)" : "blank = no password" },
+      ],
+    },
     {
       name: "Core",
       vars: [
@@ -665,12 +673,6 @@ app.get("/api/config", (_req, res) => {
       ],
     },
     {
-      name: "Security",
-      vars: [
-        { key: "ADMIN_PASSWORD", value: "", def: "(blank = no password)", desc: "Admin panel password — blank disables auth", isPassword: true, hasValue: !!ADMIN_PASSWORD, placeholder: ADMIN_PASSWORD ? "•••• (set — type new to change)" : "blank = no password" },
-      ],
-    },
-    {
       name: "VNC / Docker",
       vars: [
         { key: "ENABLE_VNC", value: process.env.ENABLE_VNC || "0", def: "0", desc: "Start VNC at boot (flag file overrides)" },
@@ -691,7 +693,7 @@ app.post("/api/config", async (req, res) => {
     "AUTO_CAPTURE_TIMEOUT_MS","AUTO_CAPTURE_QUIET_MS","AUTO_CAPTURE_POLL_MS",
     "API_JOB_TIMEOUT_MS","DOWNLOAD_FETCH_TIMEOUT_MS","FFMPEG_TIMEOUT_MS","FFPROBE_TIMEOUT_MS","MANUAL_BROWSER_TIMEOUT_MS",
     "INSTAGRAM_429_COOLDOWN_MS","SAVED_SYNC_STATE_FILE","SAVED_SYNC_QUEUE_FILE","SAVED_SYNC_RETRY_DELAY_MS","SAVED_SYNC_RETRY_COUNT","API_BASE","SNAPSHOT_DIR",
-    "ENABLE_VNC","VNC_FLAG","VNC_PORT","NOVNC_PORT","DISPLAY","ADMIN_PASSWORD",
+    "ENABLE_VNC","VNC_FLAG","VNC_PORT","NOVNC_PORT","DISPLAY","UI_PANEL_PASSWORD",
   ]);
   if (!key || !allowed.has(key)) return res.status(400).json({ ok: false, error: `Key not allowed: ${key}` });
   if (/[\n\r]/.test(key) || /[\n\r]/.test(value)) return res.status(400).json({ ok: false, error: "Invalid characters" });
@@ -722,7 +724,7 @@ app.post("/api/config", async (req, res) => {
     if (!out.endsWith("\n")) out += "\n";
     await fs.writeFile(envPath, out, "utf8");
     process.env[key] = value;
-    if (key === "ADMIN_PASSWORD") ADMIN_PASSWORD = String(value).trim();
+    if (key === "UI_PANEL_PASSWORD") UI_PANEL_PASSWORD = String(value).trim();
     res.json({ ok: true, key, value });
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
@@ -1078,7 +1080,7 @@ app.post("/open-browser", async (req, res) => {
       "\n[open-browser] Browser is open and visible in the VNC session. It starts on a blank tab."
     );
     logToClientAndConsole(
-      `[open-browser] Use http://${req.hostname.split(":")[0]}:6778 to control it.`
+      `[open-browser] Use http://${req.hostname.split(":")[0]}:6778/vnc.html to control it.`
     );
     logToClientAndConsole(
       `[open-browser] It will auto-close in ${Math.round(timeoutMs / 60000)} min unless closed sooner.`

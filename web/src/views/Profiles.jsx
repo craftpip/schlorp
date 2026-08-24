@@ -56,7 +56,7 @@ export default function Profiles() {
     const r = await fetch("/open-browser", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ account: n }) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) setInfo("");
-    else setInfo(`Browser for "${n}" opened ✓ — VNC at 10.69.1.164:6778`);
+    else setInfo(`Browser for "${n}" opened ✓ — VNC at ${typeof window !== "undefined" ? window.location.hostname : "localhost"}:6778/vnc.html`);
     setTimeout(() => setInfo(""), 4000);
     load();
   };
@@ -82,7 +82,7 @@ export default function Profiles() {
         <span className={`badge ${vnc.enabled ? "text-bg-success" : "text-bg-secondary"}`} title={vnc.enabled ? "VNC enabled — anyone with the link can view the desktop" : "VNC disabled — desktop not exposed"}>{vnc.enabled ? "VNC enabled" : "VNC disabled"}</span>
         <span style={{ flex: 1 }} />
         <button type="button" className={`btn btn-sm ${vnc.enabled ? "btn-outline-danger" : "btn-outline-secondary"}`} onClick={toggleVnc} disabled={vncBusy}><i className={vnc.enabled ? "bi bi-shield-lock" : "bi bi-broadcast"} /> {vncBusy ? "…" : vnc.enabled ? "Disable VNC" : "Enable VNC"}</button>
-        {vnc.enabled && <a href="http://10.69.1.164:6778" target="_blank" rel="noopener" className="btn btn-sm btn-primary"><i className="bi bi-box-arrow-up-right" /> Open VNC</a>}
+        {vnc.enabled && <a href={`http://${typeof window !== "undefined" ? window.location.hostname : "localhost"}:6778/vnc.html`} target="_blank" rel="noopener" className="btn btn-sm btn-primary"><i className="bi bi-box-arrow-up-right" /> Open VNC</a>}
       </div>
       {!vnc.enabled && <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 10 }}>VNC is disabled — the desktop is not exposed. Enable it when you need to log in, then disable again.</div>}
       {info && <div style={{ background: "rgba(16,185,129,.15)", border: "1px solid #065f46", color: "#d1fae5", padding: "8px 12px", borderRadius: 8, fontSize: 13, marginBottom: 12 }}>{info}</div>}
