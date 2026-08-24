@@ -851,6 +851,7 @@ app.get("/sync-config", async (_req, res) => {
       config: state.config || { accounts: [], savedLists: [] },
       lists: state.lists || {},
       queue: { pending: queue.pending, completed: queue.completed },
+      crawlAll: crawlAllState,
       updatedAt: state.updatedAt || null,
     });
   } catch (error) {
@@ -880,6 +881,106 @@ app.post("/sync-config", async (req, res) => {
     return res.status(400).json({ ok: false, error: error.message });
   }
 });
+// ---- Crawl-all batch: runs server-side so a page refresh cannot stop it ----
+let crawlAllState = null;
+
+async function selfPost(pathname, body) {
+  const headers = { "Content-Type": "application/json" };
+  const pw = String(process.env.UI_PANEL_PASSWORD || process.env.ADMIN_PASSWORD || "").trim();
+  if (pw) headers["x-panel-password"] = pw;
+  const r = await fetch(`http://127.0.0.1:${port}${pathname}`, { method: "POST", headers, body: JSON.stringify(body || {}) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.ok === false) throw new Error(j.error || `HTTP ${r.status}`);
+  return j;
+}
+
+function broadcastCrawlAll() {
+  wsBroadcast({ type: "crawl-all", crawlAll: crawlAllState ? { ...crawlAllState } : null });
+}
+
+async function runCrawlAllBatch() {
+  try {
+    const st = await readStateFile();
+    const lists = (Array.isArray(st.config?.savedLists) ? st.config.savedLists : []).filter((l) => l && String(l.url || "").trim());
+    crawlAllState.total = lists.length;
+    broadcastCrawlAll();
+    for (let i = 0; i < lists.length; i++) {
+      if (!crawlAllState.running || crawlAllState.cancelled) break;
+      const l = lists[i];
+      crawlAllState.idx = i;
+      crawlAllState.url = String(l.url).trim();
+      crawlAllState.folder = String(l.folder || "");
+      broadcastCrawlAll();
+      console.log(`[crawl-all] ${i + 1}/${lists.length} ${crawlAllState.folder || crawlAllState.url}`);
+      try {
+        await selfPost("/scan-saved", { url: crawlAllState.url, account: String(l.account || "default"), folder: crawlAllState.folder });
+      } catch (e) {
+        crawlAllState.error = `${crawlAllState.folder || crawlAllState.url}: ${e.message}`;
+        console.error(`[crawl-all] failed: ${crawlAllState.error}`);
+        broadcastCrawlAll();
+      }
+    }
+    if (crawlAllState.downloadAfter && crawlAllState.running && !crawlAllState.cancelled) {
+      crawlAllState.phase = "download";
+      crawlAllState.url = "";
+      crawlAllState.folder = "";
+      broadcastCrawlAll();
+      const queue = await readQueueFile();
+      const pend = Array.isArray(queue.pending) ? queue.pending : [];
+      const byFolder = {};
+      for (const p of pend) { const f = String(p.folder || ""); (byFolder[f] = byFolder[f] || []).push(p.url); }
+      for (const [f, us] of Object.entries(byFolder)) await selfPost("/queue/add", { urls: us, folder: f });
+      for (const p of pend) await selfPost("/sync-queue/pending/remove", { url: p.url });
+      console.log(`[crawl-all] queued ${pend.length} item(s) for download`);
+    }
+  } catch (e) {
+    crawlAllState.error = e.message;
+    console.error(`[crawl-all] batch error: ${e.message}`);
+  } finally {
+    crawlAllState.running = false;
+    crawlAllState.finishedAt = new Date().toISOString();
+    broadcastCrawlAll();
+    console.log(`[crawl-all] done${crawlAllState.cancelled ? " (cancelled)" : ""}`);
+  }
+}
+
+app.post("/collections/crawl-all", async (req, res) => {
+  if (shuttingDown) return res.status(503).json({ ok: false, error: "Server is shutting down." });
+  if (crawlAllState && crawlAllState.running) {
+    return res.status(409).json({ ok: false, error: "Crawl-all already running.", crawlAll: crawlAllState });
+  }
+  if (scanActiveJob) {
+    return res.status(429).json({ ok: false, error: `Another scan is currently running (job ${scanActiveJob.id}). Try again when it finishes.` });
+  }
+  const st = await readStateFile();
+  const total = (Array.isArray(st.config?.savedLists) ? st.config.savedLists : []).filter((l) => l && String(l.url || "").trim()).length;
+  if (!total) return res.json({ ok: true, started: false, total: 0, crawlAll: null });
+  crawlAllState = {
+    running: true,
+    phase: "crawl",
+    idx: -1,
+    total,
+    url: "",
+    folder: "",
+    error: null,
+    cancelled: false,
+    downloadAfter: Boolean(req.body?.downloadAfter),
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+  };
+  broadcastCrawlAll();
+  void runCrawlAllBatch();
+  return res.json({ ok: true, started: true, total, downloadAfter: crawlAllState.downloadAfter, crawlAll: { ...crawlAllState } });
+});
+
+app.post("/collections/crawl-all/cancel", (_req, res) => {
+  if (crawlAllState && crawlAllState.running) {
+    crawlAllState.cancelled = true;
+    broadcastCrawlAll();
+  }
+  return res.json({ ok: true, cancelled: Boolean(crawlAllState && crawlAllState.running) });
+});
+
 app.post("/collections/clear-memory", async (req, res) => {
   try {
     const url = String(req.body?.url || "").trim();
@@ -1551,6 +1652,10 @@ function parseScheduleToMs(schedule) {
 let syncRunning = false;
 async function backgroundSyncTick() {
   if (syncRunning) return;
+  if (crawlAllState && crawlAllState.running) {
+    console.log("[sync] skip tick — crawl-all batch running");
+    return;
+  }
   syncRunning = true;
   try {
     const state = await readStateFile();

@@ -25,18 +25,23 @@ export default function Saved() {
   };
 
   const [listsState, setListsState] = useState({});
-  const onCrawlAndDownloadAll = async () => {
-    setGlobalBusy("crawl");
-    for (let i = 0; i < lists.length; i++) { await onCrawl(i, { isBatch: true }); }
-    // re-read pending after crawls
-    const fresh = await fetch("/sync-config").then((r) => r.json()).then((j) => j.queue?.pending || []).catch(() => []);
-    if (!fresh.length) { setGlobalBusy(null); return; }
-    setGlobalBusy("download");
-    const byFolder = {};
-    for (const p of fresh) { const f = p.folder || ""; (byFolder[f] = byFolder[f] || []).push(p.url); }
-    for (const [f, us] of Object.entries(byFolder)) { await fetch("/queue/add", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ urls: us, folder: f }) }); }
-    for (const p of fresh) { await fetch("/sync-queue/pending/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: p.url }) }); }
-    showToast("Download has been queued"); load(); setGlobalBusy(null); setTimeout(() => navigate("/dashboard"), 900);
+  const [crawlAll, setCrawlAll] = useState(null);
+  const startCrawlAll = async (downloadAfter) => {
+    if (crawlAll?.running) { showToast("Crawl all is already running"); return; }
+    try {
+      const res = await fetch("/collections/crawl-all", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(downloadAfter ? { downloadAfter: true } : {}) });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || "failed to start crawl-all");
+      setCrawlAll(j.crawlAll || null);
+      showToast(downloadAfter ? "Crawl & download batch started" : "Crawl-all batch started");
+      load();
+    } catch (e) { showToast(e.message); }
+  };
+  const onCancelCrawlAll = async () => {
+    try {
+      await fetch("/collections/crawl-all/cancel", { method: "POST" });
+      showToast("Stopping crawl-all…");
+    } catch {}
   };
   const onCrawlAndDownload = async (idx) => {
     await onCrawl(idx);
@@ -51,6 +56,7 @@ export default function Saved() {
         setPending(j.queue?.pending || []);
         setCompleted(j.queue?.completed || []);
         setListsState(j.lists || {});
+        setCrawlAll(j.crawlAll || null);
       }
       const ar = await fetch("/accounts").then((x) => x.json());
       if (ar.ok) setAccounts(ar.accounts || []);
@@ -67,23 +73,29 @@ export default function Saved() {
           setCrawlProgress((prev) => ({ ...prev, [m.url]: { stage: m.stage, detail: m.detail, count: m.count } }));
           if (m.stage === "done") setTimeout(() => setCrawlProgress((prev) => { const n = { ...prev }; delete n[m.url]; return n; }), 4000);
         }
+        if (m.type === "crawl-all") {
+          const c = m.crawlAll || null;
+          setCrawlAll(c);
+          if (!c?.running) { setGlobalBusy(null); load(); }
+        }
       } catch {}
     };
     return () => ws.close();
   }, []);
 
-  const onCrawlAll = async () => {
-    setGlobalBusy("crawl");
-    let chain = Promise.resolve();
-    for (let i = 0; i < lists.length; i++) {
-      chain = chain.then(() => onCrawl(i, { isBatch: true }));
-    }
-    await chain;
-    setGlobalBusy(null);
-  };
   const onDownloadAll = async () => { if (!pending.length) return; setGlobalBusy("download"); const byFolder = {}; for (const p of pending) { const f = p.folder || ""; (byFolder[f] = byFolder[f] || []).push(p.url); } for (const [f, us] of Object.entries(byFolder)) { await fetch("/queue/add", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ urls: us, folder: f }) }); } for (const p of pending) { await fetch("/sync-queue/pending/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: p.url }) }); }
     showToast("Download has been queued"); load(); setGlobalBusy(null); setTimeout(() => navigate("/dashboard"), 900); };
   const [busyIdx, setBusyIdx] = useState(null);
+  const effBusy =
+    globalBusy ||
+    (crawlAll?.running ? (crawlAll.phase === "download" ? "download" : "crawl") : null);
+  const caLabel = crawlAll?.running
+    ? crawlAll.phase === "download"
+      ? `Batch download (${crawlAll.idx ?? 0}/${crawlAll.total ?? 0})…`
+      : `Crawling ${(crawlAll.idx ?? 0) + 1}/${crawlAll.total ?? 0}…`
+    : effBusy === "crawl"
+      ? "Crawling all…"
+      : "Crawl all";
   const startEdit = (idx) => {
     const l = lists[idx];
     const st = listsState[l.url] || {};
@@ -91,7 +103,7 @@ export default function Saved() {
   };
   const cancelEdit = () => { setEditingIdx(null); setShowAdd(false); setUrl(""); setFolder(""); setAccount("default"); setSchedule("30m"); setEditLastSeenUrl(""); };
   const crawlInProgress = (skipIdx, opts = {}) =>
-    (!opts.isBatch && globalBusy === "crawl") ||
+    (!opts.isBatch && effBusy === "crawl") ||
     (!!busyIdx && String(busyIdx).startsWith("crawl-") && busyIdx !== skipIdx) ||
     Object.values(crawlProgress).some((p) => p && p.stage !== "done");
 
@@ -252,9 +264,10 @@ export default function Saved() {
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
             <div style={{ fontWeight: 600 }}>Configured lists</div>
             <span style={{ flex: 1 }} />
-            <button type="button" className="btn btn-sm btn-outline-secondary" onClick={onCrawlAll} disabled={globalBusy === "crawl" || !lists.length}><i className="bi bi-search" /> {globalBusy === "crawl" ? "Crawling all…" : "Crawl all"}</button>
-            <button type="button" className="btn btn-sm btn-primary" onClick={onDownloadAll} disabled={globalBusy === "download" || !pending.length}><i className="bi bi-download" /> {globalBusy === "download" ? "…" : `Download all${pending.length ? ` (${pending.length})` : ""}`}</button>
-            <button type="button" className="btn btn-sm btn-outline-secondary" onClick={onCrawlAndDownloadAll} disabled={!!globalBusy || !lists.length}><i className="bi bi-arrow-repeat" /> Crawl & Download all</button>
+            <button type="button" className="btn btn-sm btn-outline-secondary" onClick={() => startCrawlAll(false)} disabled={!!effBusy || !lists.length}><i className="bi bi-search" /> {caLabel}</button>
+            {crawlAll?.running && <button type="button" className="btn btn-sm btn-outline-danger" onClick={onCancelCrawlAll}><i className="bi bi-x-lg" /> Stop</button>}
+            <button type="button" className="btn btn-sm btn-primary" onClick={onDownloadAll} disabled={effBusy === "download" || !pending.length}><i className="bi bi-download" /> {globalBusy === "download" ? "…" : `Download all${pending.length ? ` (${pending.length})` : ""}`}</button>
+            <button type="button" className="btn btn-sm btn-outline-secondary" onClick={() => startCrawlAll(true)} disabled={!!effBusy || !lists.length}><i className="bi bi-arrow-repeat" /> Crawl & Download all</button>
           </div>
           {lists.length === 0 ? <div className="empty"><i className="bi bi-inbox" /> No lists — add one above.</div> : (
             <div style={{ display: "grid", gap: 8 }}>
