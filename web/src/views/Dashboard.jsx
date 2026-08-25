@@ -74,11 +74,16 @@ function fmtGapMs(ms) {
 }
 
 export default function Dashboard() {
-  const { active, completed, logsById, gap, gapWait, setGap, add, remove, retry, clearCompleted } = useQueue();
+  const { active, completed, logsById, gap, gapWait, setGap, add, remove, retry, clearCompleted, clearActive } = useQueue();
   const [urls, setUrls] = useState("");
-  const [folder, setFolder] = useState("");
+  const [folder, setFolder] = useState(() => { try { return localStorage.getItem("xdl_dash_folder") || ""; } catch { return ""; } });
   const [folderOptions, setFolderOptions] = useState([]);
-  const [maxQuality, setMaxQuality] = useState("");
+  const [maxQuality, setMaxQuality] = useState(() => { try { return localStorage.getItem("xdl_dash_maxQuality") || ""; } catch { return ""; } });
+  const [account, setAccount] = useState(() => { try { return localStorage.getItem("xdl_dash_account") || ""; } catch { return ""; } });
+  const [accountOptions, setAccountOptions] = useState([]);
+  useEffect(() => { try { localStorage.setItem("xdl_dash_folder", folder); } catch {} }, [folder]);
+  useEffect(() => { try { localStorage.setItem("xdl_dash_maxQuality", maxQuality); } catch {} }, [maxQuality]);
+  useEffect(() => { try { localStorage.setItem("xdl_dash_account", account); } catch {} }, [account]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [gapMin, setGapMin] = useState("");
@@ -130,6 +135,9 @@ export default function Dashboard() {
         setFolderOptions(dirs);
       }
     }).catch(() => {});
+    fetch("/accounts").then((r) => r.json()).then((j) => {
+      if (j.ok && Array.isArray(j.accounts)) setAccountOptions(j.accounts.map((a) => a.name));
+    }).catch(() => {});
   }, []);
 
   const [searchParams, setSearchParams] = useSearchParams();
@@ -145,7 +153,7 @@ export default function Dashboard() {
     if (!list.length) { setErr("Add at least one URL"); return; }
     setErr(""); setBusy(true);
     try {
-      await add(list, folder, maxQuality || null);
+      await add(list, folder, maxQuality || null, account || null);
       setUrls("");
     } catch (ex) { setErr(ex.message); }
     finally { setBusy(false); }
@@ -163,14 +171,14 @@ export default function Dashboard() {
             <label className="form-label">Video URLs — one per line</label>
             <textarea className="form-control" rows={3} placeholder={"https://www.instagram.com/reel/XXXX\nhttps://www.xvideos.com/video1234/title"} value={urls} onChange={(e) => setUrls(e.target.value)} />
             <div className="row g-2" style={{ marginTop: 12, alignItems: "end" }}>
-              <div className="col-md-6">
-                <label className="form-label"><i className="bi bi-folder2" /> Folder <span style={{ color: "var(--faint)", fontWeight: 400 }}>inside /media</span></label>
-                <input className="form-control" type="text" list="folder-list" placeholder="e.g. instagram / favorites — type or pick" value={folder} onChange={(e) => setFolder(e.target.value)} />
+              <div className="col" style={{ flex: "1 1 0", minWidth: 110 }}>
+                <label className="form-label"><i className="bi bi-folder2" /> Folder</label>
+                <input className="form-control" type="text" list="folder-list" placeholder="e.g. instagram / favorites" value={folder} onChange={(e) => setFolder(e.target.value)} />
                 <datalist id="folder-list">
                   {folderOptions.map((n) => <option key={n} value={n} />)}
                 </datalist>
               </div>
-              <div className="col-md-4">
+              <div className="col" style={{ flex: "1 1 0", minWidth: 110 }}>
                 <label className="form-label"><i className="bi bi-badge-hd" /> Max quality</label>
                 <select className="form-control" value={maxQuality} onChange={(e) => setMaxQuality(e.target.value)}>
                   <option value="">Best (auto)</option>
@@ -181,7 +189,14 @@ export default function Dashboard() {
                   <option value="240">240p</option>
                 </select>
               </div>
-              <div className="col-md-2">
+              <div className="col" style={{ flex: "1 1 0", minWidth: 110 }}>
+                <label className="form-label"><i className="bi bi-person" /> Profile</label>
+                <select className="form-control" value={account} onChange={(e) => setAccount(e.target.value)}>
+                  <option value="">Default</option>
+                  {accountOptions.filter((n) => n !== "default").map((n) => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </div>
+              <div className="col" style={{ flex: "0 0 auto" }}>
                 <button type="submit" className="btn btn-primary btn-block btn-lg" disabled={busy}><i className="bi bi-plus-lg" /> Add to queue</button>
               </div>
             </div>
@@ -203,24 +218,22 @@ export default function Dashboard() {
   .view-title{ font-size: 18px !important; }
 }`}</style>
       <div className="dash-top" style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, borderBottom: "1px solid var(--border)", paddingBottom: 10, flexWrap: "wrap" }}>
-        <button className={`btn btn-sm ${tab === "active" ? "btn-primary" : "btn-outline-secondary"}`} onClick={() => setTab("active")}>
-          <i className="bi bi-collection-play" /> Active <span className="badge text-bg-secondary" style={{ marginLeft: 6 }}>{active.length}</span>
-          {active.filter((i) => i.status === "running").length > 0 && <span className="badge text-bg-primary" style={{ marginLeft: 4 }}>● {active.filter((i) => i.status === "running").length} running</span>}
+        <button className={`btn btn-sm ${tab === "active" ? "btn-primary" : "btn-outline-secondary"}`} style={{ height: 30 }} onClick={() => setTab("active")}>
+          <i className="bi bi-collection-play" /> Active{active.length ? <span style={{ fontSize: 11, opacity: 0.85 }}>({active.filter((i) => i.status === "running").length}/{active.filter((i) => i.status === "queued").length})</span> : null}
         </button>
-        <button className={`btn btn-sm ${tab === "completed" ? "btn-primary" : "btn-outline-secondary"}`} onClick={() => setTab("completed")}>
-          <i className="bi bi-check2-all" /> Completed <span className="badge text-bg-success" style={{ marginLeft: 6 }}>{completed.filter((i) => i.status === "done").length}</span>
-          <span className="badge text-bg-danger" style={{ marginLeft: 4 }}>{completed.filter((i) => i.status === "error").length}</span>
+        <button className={`btn btn-sm ${tab === "completed" ? "btn-primary" : "btn-outline-secondary"}`} style={{ height: 30 }} onClick={() => setTab("completed")}>
+          <i className="bi bi-check2-all" /> Completed{(() => { const d = completed.filter((i) => i.status === "done").length, e = completed.filter((i) => i.status === "error").length; if (!d && !e) return null; return <span style={{ fontSize: 11, opacity: 0.85 }}>({d}/{e})</span>; })()}
         </button>
         <span style={{ flex: 1, minWidth: 12 }} />
         <div style={{ display: "inline-flex", alignItems: "center", gap: 4, whiteSpace: "nowrap", flexWrap: "nowrap", flexShrink: 0 }}>
           <span className="small" style={{ color: "var(--muted)", display: "inline-flex", alignItems: "center", gap: 4, whiteSpace: "nowrap" }} title="Wait between downloads — same values = fixed, different = random range. Format: 90s or 5m"><i className="bi bi-hourglass-split" /> Gap</span>
-        <div style={{ position: "relative", display: "inline-flex", alignItems: "stretch", flexShrink: 0 }}>
-          <input type="text" className={`form-control form-control-sm ${gapErr ? "is-invalid" : ""}`} style={{ width: 56, borderTopRightRadius: 0, borderBottomRightRadius: 0 }} value={gapMin} placeholder="5m" onChange={(e) => { if (gapErr) setGapErr(""); setGapMin(e.target.value); }} onKeyDown={(e) => { if (e.key === "Enter") saveGap(); }} />
-          <span className="small" style={{ display: "inline-flex", alignItems: "center", padding: "0 6px", border: "1px solid var(--border)", background: "var(--surface-2)", color: "var(--muted)", marginLeft: -1, fontSize: 11 }}>–</span>
-          <input type="text" className={`form-control form-control-sm ${gapErr ? "is-invalid" : ""}`} style={{ width: 56, borderRadius: 0, marginLeft: -1 }} value={gapMax} placeholder="15m" onChange={(e) => { if (gapErr) setGapErr(""); setGapMax(e.target.value); }} onKeyDown={(e) => { if (e.key === "Enter") saveGap(); }} />
-          <button type="button" className="btn btn-sm btn-outline-secondary" style={{ ...(gap?.maxMs > 0 || gapMin || gapMax) ? { borderRadius: 0, marginLeft: -1 } : { borderTopLeftRadius: 0, borderBottomLeftRadius: 0, marginLeft: -1 }} } onClick={saveGap} title="Apply gap"><i className="bi bi-check-lg" /></button>
+        <div style={{ position: "relative", display: "inline-flex", alignItems: "center", flexShrink: 0 }}>
+          <input type="text" className={`form-control form-control-sm ${gapErr ? "is-invalid" : ""}`} style={{ width: 56, height: 30, borderTopRightRadius: 0, borderBottomRightRadius: 0, padding: "4px 8px", fontSize: 12 }} value={gapMin} placeholder="5m" onChange={(e) => { if (gapErr) setGapErr(""); setGapMin(e.target.value); }} onKeyDown={(e) => { if (e.key === "Enter") saveGap(); }} />
+          <span className="small" style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", height: 30, padding: "0 6px", border: "1px solid var(--border)", background: "var(--surface-2)", color: "var(--muted)", marginLeft: -1, fontSize: 11 }}>–</span>
+          <input type="text" className={`form-control form-control-sm ${gapErr ? "is-invalid" : ""}`} style={{ width: 56, height: 30, borderRadius: 0, marginLeft: -1, padding: "4px 8px", fontSize: 12 }} value={gapMax} placeholder="15m" onChange={(e) => { if (gapErr) setGapErr(""); setGapMax(e.target.value); }} onKeyDown={(e) => { if (e.key === "Enter") saveGap(); }} />
+          <button type="button" className="btn btn-sm btn-outline-secondary" style={{ height: 30, ...(gap?.maxMs > 0 || gapMin || gapMax) ? { borderRadius: 0, marginLeft: -1 } : { borderTopLeftRadius: 0, borderBottomLeftRadius: 0, marginLeft: -1 }} } onClick={saveGap} title="Apply gap"><i className="bi bi-check-lg" /></button>
           {(gap?.maxMs > 0 || gapMin || gapMax) && (
-            <button type="button" className="btn btn-sm btn-outline-secondary" style={{ borderTopLeftRadius: 0, borderBottomLeftRadius: 0, marginLeft: -1 }} onClick={clearGap} title="Disable gap"><i className="bi bi-x-lg" /></button>
+            <button type="button" className="btn btn-sm btn-outline-secondary" style={{ height: 30, borderTopLeftRadius: 0, borderBottomLeftRadius: 0, marginLeft: -1 }} onClick={clearGap} title="Disable gap"><i className="bi bi-x-lg" /></button>
           )}
           {gapErr && (
             <div style={{ position: "absolute", top: "100%", right: 0, marginTop: 6, background: "#2a1215", border: "1px solid #7f1d1d", color: "#fca5a5", padding: "6px 10px", borderRadius: 8, fontSize: 12, zIndex: 20, whiteSpace: "nowrap", boxShadow: "0 4px 16px rgba(0,0,0,.35)" }}>
@@ -228,8 +241,11 @@ export default function Dashboard() {
             </div>
           )}
         </div>
+          {tab === "active" && (
+            <button type="button" className="btn btn-sm btn-outline-secondary" onClick={clearActive} disabled={!active.filter((i) => i.status !== "running").length} title="Clear queued items — running downloads are kept" style={{ height: 30 }}><i className="bi bi-x-lg" /> Clear</button>
+          )}
           {tab === "completed" && (
-            <button type="button" className="btn btn-sm btn-outline-secondary" onClick={clearCompleted} disabled={!completed.length} title="Clear entries only — files stay in /media" style={{ display: "inline-flex", alignItems: "center", marginLeft: 4 }}><i className="bi bi-x-lg" /> Clear</button>
+            <button type="button" className="btn btn-sm btn-outline-secondary" onClick={clearCompleted} disabled={!completed.length} title="Clear entries only — files stay in /media" style={{ height: 30 }}><i className="bi bi-x-lg" /> Clear</button>
           )}
         </div>
       </div>

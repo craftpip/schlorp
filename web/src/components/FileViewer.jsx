@@ -215,7 +215,13 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   };
   useEffect(() => {
     const onKey = (e) => {
-      if (e.key === "Escape") {
+      if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable) return;
+      const k = e.key;
+      const isLeft = k === "ArrowLeft" || k === "a" || k === "A";
+      const isRight = k === "ArrowRight" || k === "d" || k === "D";
+      const isUp = k === "ArrowUp" || k === "w" || k === "W";
+      const isDown = k === "ArrowDown" || k === "s" || k === "S";
+      if (k === "Escape") {
         if (document.fullscreenElement) { document.exitFullscreen().catch(() => {}); e.preventDefault(); return; }
         e.preventDefault(); onClose();
       } else if (e.key.toLowerCase() === "f" && !e.ctrlKey && !e.altKey && !e.metaKey) {
@@ -226,18 +232,22 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
         if (!isImage && videoRef.current) { e.preventDefault(); if (videoRef.current.paused) videoRef.current.play(); else videoRef.current.pause(); }
        } else if (e.key.toLowerCase() === "m" && !e.ctrlKey && !e.altKey && !e.metaKey) {
         if (e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA" && !e.target.isContentEditable) { e.preventDefault(); setMuted((v) => !v); }
+      } else if (e.key.toLowerCase() === "c" && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        if (e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA" && !e.target.isContentEditable) { e.preventDefault(); stepRate(-0.1); }
+      } else if (e.key.toLowerCase() === "v" && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        if (e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA" && !e.target.isContentEditable) { e.preventDefault(); stepRate(0.1); }
       } else if ((e.key === "<" || (e.key === "," && e.shiftKey)) && !e.ctrlKey && !e.altKey) {
         e.preventDefault(); stepRate(-0.1);
       } else if ((e.key === ">" || (e.key === "." && e.shiftKey)) && !e.ctrlKey && !e.altKey) {
         e.preventDefault(); stepRate(0.1);
-      } else if (e.key === "ArrowLeft") {
+      } else if (isLeft) {
         if (isImage) { if (hasPrev) { e.preventDefault(); onPrev(); } else if (hasNext) { e.preventDefault(); onNext(); } }
         else if (videoRef.current) { e.preventDefault(); const v = videoRef.current; const d = seekFrames ? 1/30 : 1; v.currentTime = Math.max(0, v.currentTime - d); }
-      } else if (e.key === "ArrowRight") {
+      } else if (isRight) {
         if (isImage) { if (hasNext) { e.preventDefault(); onNext(); } else if (hasPrev) { e.preventDefault(); onPrev(); } }
         else if (videoRef.current) { e.preventDefault(); const v = videoRef.current; const d = seekFrames ? 1/30 : 1; v.currentTime = Math.min(duration || v.duration || Infinity, v.currentTime + d); }
-      } else if (e.key === "ArrowUp" && hasPrev) { e.preventDefault(); onPrev(); }
-      else if (e.key === "ArrowDown" && hasNext) { e.preventDefault(); onNext(); }
+      } else if (isUp && hasPrev) { e.preventDefault(); onPrev(); }
+      else if (isDown && hasNext) { e.preventDefault(); onNext(); }
     };
     document.addEventListener("keydown", onKey);
     const prev = document.body.style.overflow;

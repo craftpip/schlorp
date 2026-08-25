@@ -225,7 +225,7 @@ async function waitForAutoCaptureWindow(page, getNetworkState, logLabel, log = c
   const quietRaw = Number(process.env.AUTO_CAPTURE_QUIET_MS);
   const pollRaw = Number(process.env.AUTO_CAPTURE_POLL_MS);
 
-  const timeoutMs = Number.isFinite(timeoutRaw) && timeoutRaw > 0 ? timeoutRaw : 30000;
+  const timeoutMs = Number.isFinite(timeoutRaw) && timeoutRaw > 0 ? timeoutRaw : 7000;
   const quietMs = Number.isFinite(quietRaw) && quietRaw > 0 ? quietRaw : 1800;
   const pollMs = Number.isFinite(pollRaw) && pollRaw > 0 ? pollRaw : 250;
   const startedAt = Date.now();

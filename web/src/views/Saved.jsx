@@ -83,7 +83,7 @@ export default function Saved() {
     return () => ws.close();
   }, []);
 
-  const onDownloadAll = async () => { if (!pending.length) return; setGlobalBusy("download"); const byFolder = {}; for (const p of pending) { const f = p.folder || ""; (byFolder[f] = byFolder[f] || []).push(p.url); } for (const [f, us] of Object.entries(byFolder)) { await fetch("/queue/add", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ urls: us, folder: f }) }); } for (const p of pending) { await fetch("/sync-queue/pending/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: p.url }) }); }
+  const onDownloadAll = async () => { if (!pending.length) return; setGlobalBusy("download"); const byKey = {}; for (const p of pending) { const key = `${p.folder || ""}|||${p.account || "default"}`; (byKey[key] = byKey[key] || []).push(p.url); } for (const [key, us] of Object.entries(byKey)) { const [f, a] = key.split("|||"); await fetch("/queue/add", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ urls: us, folder: f, account: a }) }); } for (const p of pending) { await fetch("/sync-queue/pending/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: p.url }) }); }
     showToast("Download has been queued"); load(); setGlobalBusy(null); setTimeout(() => navigate("/dashboard"), 900); };
   const [busyIdx, setBusyIdx] = useState(null);
   const effBusy =
@@ -136,12 +136,13 @@ export default function Saved() {
   const onDownload = async (idx) => {
     const l = lists[idx];
     const folder = l.folder || "";
-    const pendingForFolder = pending.filter((p) => (p.folder || "") === folder);
+    const listAccount = l.account || "default";
+    const pendingForFolder = pending.filter((p) => (p.folder || "") === folder && (p.account || "default") === listAccount);
     if (!pendingForFolder.length) { setMsg(`No pending for ${folder || "—"}`); return; }
     setBusyIdx(`dl-${idx}`);
     try {
       const urls = pendingForFolder.map((p) => p.url);
-      await fetch("/queue/add", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ urls, folder }) });
+      await fetch("/queue/add", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ urls, folder, account: listAccount }) });
       // remove from sync pending after enqueue — only this folder's items
       for (const u of urls) {
         await fetch("/sync-queue/pending/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: u }) });

@@ -62,11 +62,11 @@ export function QueueProvider({ children }) {
     return res.json();
   }, []);
 
-  const add = useCallback(async (urls, folder, maxQuality) => {
+  const add = useCallback(async (urls, folder, maxQuality, account) => {
     const res = await fetch("/queue/add", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ urls, folder, maxQuality }),
+      body: JSON.stringify({ urls, folder, maxQuality, account: account || undefined }),
     });
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));
@@ -90,8 +90,13 @@ export function QueueProvider({ children }) {
     await fetch("/queue/clear", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ which: "completed" }) });
   }, []);
 
+  const clearActive = useCallback(async () => {
+    setActive([]);
+    await fetch("/queue/clear", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ which: "active" }) });
+  }, []);
+
   return (
-    <QueueContext.Provider value={{ active, completed, logsById, connected, gap, gapWait, setGap, add, remove, retry, clearCompleted, send }}>
+    <QueueContext.Provider value={{ active, completed, logsById, connected, gap, gapWait, setGap, add, remove, retry, clearCompleted, clearActive, send }}>
       {children}
     </QueueContext.Provider>
   );
