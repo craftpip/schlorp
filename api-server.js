@@ -1018,6 +1018,23 @@ app.post("/collections/set-last-seen", async (req, res) => {
     return res.status(500).json({ ok: false, error: error.message });
   }
 });
+app.post("/collections/resume", async (req, res) => {
+  try {
+    const url = String(req.body?.url || "").trim();
+    const account = String(req.body?.account || "").trim();
+    if (url) {
+      await clearFlagForCollections(url);
+      return res.json({ ok: true });
+    }
+    if (account) {
+      await clearFlagForCollections(account, { isAccount: true });
+      return res.json({ ok: true });
+    }
+    return res.status(400).json({ ok: false, error: "url or account required" });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
 
 app.post("/sync-queue/clear", async (_req, res) => {
   try {
@@ -1456,23 +1473,30 @@ app.post("/scan-saved", async (req, res) => {
           const resultUrls = Array.isArray(result.urls) ? result.urls.map((u) => String(u).trim()) : [];
           const firstPostUrl = resultUrls.find((u) => /instagram\.com\/(?:p|reel|tv)\//i.test(u)) || "";
           st.lists[key] = { ...(st.lists[key] || {}), ...(firstPostUrl ? { lastSeenUrl: firstPostUrl } : {}), lastRunAt: new Date().toISOString(), lastScannedCount: foundCount, folder: st.lists[key]?.folder || "" };
+          if (st.lists[key].paused) { delete st.lists[key].paused; delete st.lists[key].lastError; delete st.lists[key].lastErrorAt; }
           await writeStateFile(st);
         }
       } catch {}
     }
+    await clearFlagForCollections(account, { isAccount: true }).catch(() => {});
 
     return res.json({
       ok: true,
       ...result,
       ...(collectInfo ? { queued: collectInfo.added, skippedPending: collectInfo.skippedPending, pendingTotal: collectInfo.pendingTotal, newCount: collectInfo.newCount } : {}),
     });
-  } catch (error) {
-    const message = error && error.message ? error.message : String(error);
-    const statusCode = Number(error && error.status) === 429 || /429|too many requests/i.test(message) ? 429 : 500;
-    console.error(`[scan-saved:${jobId}] failed: ${message}`);
-    wsBroadcast({ type: "crawl:progress", url: targetUrl, stage: "error", detail: message.slice(0, 200) });
-    return res.status(statusCode).json({ ok: false, error: message });
-  } finally {
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error);
+      const isRedirect = /redirected from saved page|Make sure this browser profile is logged/i.test(message);
+      if (isRedirect) {
+        await flagCollectionsForAccount(account, `Login expired — redirected`).catch(() => {});
+        wsBroadcast({ type: "crawl:progress", url: targetUrl, stage: "error", detail: `Login expired — paused all for ${account}` });
+      }
+      const statusCode = Number(error && error.status) === 429 || /429|too many requests/i.test(message) ? 429 : 500;
+      console.error(`[scan-saved:${jobId}] failed: ${message}`);
+      wsBroadcast({ type: "crawl:progress", url: targetUrl, stage: "error", detail: message.slice(0, 200) });
+      return res.status(statusCode).json({ ok: false, error: message, flagged: isRedirect });
+    } finally {
     scanActiveJob = null;
     scanningUrls.delete(targetUrl);
   }
@@ -1674,14 +1698,19 @@ async function backgroundSyncTick() {
       const schedule = String(item.schedule || "30m");
       const intervalMs = parseScheduleToMs(schedule);
       if (!Number.isFinite(intervalMs)) continue; // manual
-      const listState = state.lists[String(item.url || "").trim()] || {};
+      const curUrl = String(item.url || "").trim();
+      const listState = state.lists[curUrl] || {};
+      if (listState.paused) {
+        console.log(`[sync] skip ${item.folder || curUrl} — paused: ${listState.lastError || "flagged"}`);
+        continue;
+      }
       const lastRun = listState.lastRunAt ? new Date(listState.lastRunAt).getTime() : 0;
       if (Date.now() - lastRun < intervalMs) {
-        console.log(`[sync] skip ${item.folder || item.url} — schedule ${schedule}, next in ${Math.round((intervalMs - (Date.now() - lastRun))/60000)}m`);
+        console.log(`[sync] skip ${item.folder || curUrl} — schedule ${schedule}, next in ${Math.round((intervalMs - (Date.now() - lastRun))/60000)}m`);
         continue;
       }
       if (shuttingDown) break;
-      const targetUrl = String(item.url || "").trim();
+      const targetUrl = curUrl;
       if (!targetUrl) continue;
       const account = normalizeAccountName(item.account);
       const folder = String(item.folder || "").trim();
@@ -1693,8 +1722,18 @@ async function backgroundSyncTick() {
         browser = account === "default" ? await getSharedBrowser((m) => console.log(`[sync:${account}] ${m}`)) : await getBrowserForAccount(account, `sync-${Date.now()}`);
         const result = await scanSavedPage({ browser, targetUrl, endUrls, log: (m) => console.log(`[sync] ${m}`) });
         const urls = Array.isArray(result.urls) ? result.urls.map((u) => String(u).trim()).filter(Boolean) : [];
+        // success — clear login-expired flags for all collections of this account
+        for (const u of (state.config?.savedLists || []).filter((x) => String(x.account || "default").trim() === account).map((x) => String(x.url).trim())) {
+          if (state.lists[u]?.paused || state.lists[u]?.lastError) {
+            delete state.lists[u].paused;
+            delete state.lists[u].lastError;
+            delete state.lists[u].lastErrorAt;
+          }
+        }
         if (!urls.length) {
           console.log(`[sync] ${folder} → 0 new`);
+          state.lists[targetUrl] = { ...(state.lists[targetUrl] || {}), lastRunAt: new Date().toISOString(), folder };
+          await writeStateFile(state);
           continue;
         }
         // filter to only new until lastSeen
@@ -1706,17 +1745,25 @@ async function backgroundSyncTick() {
         }
         if (!newUrls.length) {
           console.log(`[sync] ${folder} → 0 new (up to lastSeen)`);
-          state.lists[targetUrl] = { ...listState, lastRunAt: new Date().toISOString(), folder };
+          state.lists[targetUrl] = { ...(state.lists[targetUrl] || {}), lastRunAt: new Date().toISOString(), folder };
           await writeStateFile(state);
           continue;
         }
         const added = await queueAddUrls(newUrls, folder, null);
         console.log(`[sync] ${folder} → ${newUrls.length} new, ${added} enqueued to web queue`);
-        state.lists[targetUrl] = { ...listState, ...(firstPostUrl ? { lastSeenUrl: firstPostUrl } : {}), lastRunAt: new Date().toISOString(), folder };
+        state.lists[targetUrl] = { ...(state.lists[targetUrl] || {}), ...(firstPostUrl ? { lastSeenUrl: firstPostUrl } : {}), lastRunAt: new Date().toISOString(), folder };
         await writeStateFile(state);
         wsBroadcast({ type: "sync:tick", folder, added, total: newUrls.length });
       } catch (e) {
-        console.error(`[sync] ${folder} failed: ${e.message}`);
+        const msg = e && e.message ? String(e.message) : String(e);
+        const isRedirect = /redirected from saved page|Make sure this browser profile is logged/i.test(msg);
+        if (isRedirect) {
+          console.error(`[sync] ${folder} redirect/login expired: ${msg}`);
+          await flagCollectionsForAccount(account, `Login expired — redirected to ${msg.slice(0, 120)}`);
+          try { const fresh = await readStateFile(); Object.assign(state, fresh); } catch {}
+        } else {
+          console.error(`[sync] ${folder} failed: ${msg}`);
+        }
       }
     }
   } catch (e) {
@@ -2125,4 +2172,64 @@ function normalizeEndUrls(rawValue) {
         .filter(Boolean)
     )
   );
+}
+
+async function flagCollectionsForAccount(account, errorMsg) {
+  const st = await readStateFile();
+  const acc = String(account || "default").trim() || "default";
+  const err = String(errorMsg || "Instagram login expired — redirected").trim();
+  const now = new Date().toISOString();
+  let changed = false;
+  for (const item of st.config?.savedLists || []) {
+    if (String(item.account || "default").trim() !== acc) continue;
+    const url = String(item.url || "").trim();
+    if (!url) continue;
+    st.lists[url] = st.lists[url] || {};
+    st.lists[url].lastError = err;
+    st.lists[url].lastErrorAt = now;
+    st.lists[url].paused = true;
+    changed = true;
+  }
+  if (changed) {
+    st.updatedAt = now;
+    await writeStateFile(st);
+    console.log(`[flag] paused all collections for account "${acc}" due to: ${err}`);
+  }
+  return changed;
+}
+
+async function clearFlagForCollections(targetUrlOrAccount, opts = {}) {
+  const isAccount = opts.isAccount;
+  const st = await readStateFile();
+  let changed = false;
+  if (isAccount) {
+    const acc = String(targetUrlOrAccount || "default").trim() || "default";
+    for (const item of st.config?.savedLists || []) {
+      if (String(item.account || "default").trim() !== acc) continue;
+      const url = String(item.url || "").trim();
+      if (st.lists[url]) {
+        if (st.lists[url].paused || st.lists[url].lastError) {
+          delete st.lists[url].paused;
+          delete st.lists[url].lastError;
+          delete st.lists[url].lastErrorAt;
+          changed = true;
+        }
+      }
+    }
+  } else {
+    const url = String(targetUrlOrAccount || "").trim();
+    if (url && st.lists[url]) {
+      if (st.lists[url].paused || st.lists[url].lastError) {
+        delete st.lists[url].paused;
+        delete st.lists[url].lastError;
+        delete st.lists[url].lastErrorAt;
+        changed = true;
+      }
+    }
+  }
+  if (changed) {
+    st.updatedAt = new Date().toISOString();
+    await writeStateFile(st);
+  }
+  return changed;
 }

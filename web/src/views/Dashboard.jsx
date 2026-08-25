@@ -215,12 +215,12 @@ export default function Dashboard() {
         <div style={{ display: "inline-flex", alignItems: "center", gap: 4, whiteSpace: "nowrap", flexWrap: "nowrap", flexShrink: 0 }}>
           <span className="small" style={{ color: "var(--muted)", display: "inline-flex", alignItems: "center", gap: 4, whiteSpace: "nowrap" }} title="Wait between downloads — same values = fixed, different = random range. Format: 90s or 5m"><i className="bi bi-hourglass-split" /> Gap</span>
         <div style={{ position: "relative", display: "inline-flex", alignItems: "stretch", flexShrink: 0 }}>
-          <input type="text" className={`form-control form-control-sm ${gapErr ? "is-invalid" : ""}`} style={{ width: 56, height: 31, borderTopRightRadius: 0, borderBottomRightRadius: 0, padding: "5px 6px", fontSize: 12 }} value={gapMin} placeholder="5m" onChange={(e) => { if (gapErr) setGapErr(""); setGapMin(e.target.value); }} onKeyDown={(e) => { if (e.key === "Enter") saveGap(); }} />
-          <span className="small" style={{ display: "inline-flex", alignItems: "center", padding: "0 6px", border: "1px solid var(--border)", background: "var(--surface-2)", color: "var(--muted)", marginLeft: -1, fontSize: 11, height: 31 }}>–</span>
-          <input type="text" className={`form-control form-control-sm ${gapErr ? "is-invalid" : ""}`} style={{ width: 56, height: 31, borderRadius: 0, marginLeft: -1, padding: "5px 6px", fontSize: 12 }} value={gapMax} placeholder="15m" onChange={(e) => { if (gapErr) setGapErr(""); setGapMax(e.target.value); }} onKeyDown={(e) => { if (e.key === "Enter") saveGap(); }} />
-          <button type="button" className="btn btn-sm btn-outline-secondary" style={{ height: 31, padding: "5px 8px", fontSize: 12, ...(gap?.maxMs > 0 || gapMin || gapMax) ? { borderRadius: 0, marginLeft: -1 } : { borderTopLeftRadius: 0, borderBottomLeftRadius: 0, marginLeft: -1 }} } onClick={saveGap} title="Apply gap"><i className="bi bi-check-lg" /></button>
+          <input type="text" className={`form-control form-control-sm ${gapErr ? "is-invalid" : ""}`} style={{ width: 56, borderTopRightRadius: 0, borderBottomRightRadius: 0 }} value={gapMin} placeholder="5m" onChange={(e) => { if (gapErr) setGapErr(""); setGapMin(e.target.value); }} onKeyDown={(e) => { if (e.key === "Enter") saveGap(); }} />
+          <span className="small" style={{ display: "inline-flex", alignItems: "center", padding: "0 6px", border: "1px solid var(--border)", background: "var(--surface-2)", color: "var(--muted)", marginLeft: -1, fontSize: 11 }}>–</span>
+          <input type="text" className={`form-control form-control-sm ${gapErr ? "is-invalid" : ""}`} style={{ width: 56, borderRadius: 0, marginLeft: -1 }} value={gapMax} placeholder="15m" onChange={(e) => { if (gapErr) setGapErr(""); setGapMax(e.target.value); }} onKeyDown={(e) => { if (e.key === "Enter") saveGap(); }} />
+          <button type="button" className="btn btn-sm btn-outline-secondary" style={{ ...(gap?.maxMs > 0 || gapMin || gapMax) ? { borderRadius: 0, marginLeft: -1 } : { borderTopLeftRadius: 0, borderBottomLeftRadius: 0, marginLeft: -1 }} } onClick={saveGap} title="Apply gap"><i className="bi bi-check-lg" /></button>
           {(gap?.maxMs > 0 || gapMin || gapMax) && (
-            <button type="button" className="btn btn-sm btn-outline-secondary" style={{ height: 31, padding: "5px 8px", fontSize: 12, borderTopLeftRadius: 0, borderBottomLeftRadius: 0, marginLeft: -1 }} onClick={clearGap} title="Disable gap"><i className="bi bi-x-lg" /></button>
+            <button type="button" className="btn btn-sm btn-outline-secondary" style={{ borderTopLeftRadius: 0, borderBottomLeftRadius: 0, marginLeft: -1 }} onClick={clearGap} title="Disable gap"><i className="bi bi-x-lg" /></button>
           )}
           {gapErr && (
             <div style={{ position: "absolute", top: "100%", right: 0, marginTop: 6, background: "#2a1215", border: "1px solid #7f1d1d", color: "#fca5a5", padding: "6px 10px", borderRadius: 8, fontSize: 12, zIndex: 20, whiteSpace: "nowrap", boxShadow: "0 4px 16px rgba(0,0,0,.35)" }}>
@@ -229,7 +229,7 @@ export default function Dashboard() {
           )}
         </div>
           {tab === "completed" && (
-            <button type="button" className="btn btn-sm btn-outline-secondary" onClick={clearCompleted} disabled={!completed.length} title="Clear entries only — files stay in /media" style={{ height: 31, padding: "5px 10px", fontSize: 12, display: "inline-flex", alignItems: "center", marginLeft: 4 }}><i className="bi bi-x-lg" /> Clear</button>
+            <button type="button" className="btn btn-sm btn-outline-secondary" onClick={clearCompleted} disabled={!completed.length} title="Clear entries only — files stay in /media" style={{ display: "inline-flex", alignItems: "center", marginLeft: 4 }}><i className="bi bi-x-lg" /> Clear</button>
           )}
         </div>
       </div>

@@ -20,6 +20,7 @@ export default function App() {
   const [auth, setAuth] = useState({ checking: true, protected: false, authed: false });
   const [pw, setPw] = useState("");
   const [pwErr, setPwErr] = useState("");
+  const [hasFlagged, setHasFlagged] = useState(false);
   useEffect(() => {
     fetch("/api/auth/status").then((r) => r.json()).then((j) => {
       if (!j.protected) setAuth({ checking: false, protected: false, authed: true });
@@ -57,6 +58,21 @@ export default function App() {
     };
     return () => ws.close();
   }, []);
+  useEffect(() => {
+    if (auth.protected && !auth.authed) return;
+    const check = async () => {
+      try {
+        const r = await fetch("/sync-config");
+        const j = await r.json();
+        const lists = j.lists || {};
+        const flagged = Object.values(lists).some((v) => v && v.paused);
+        setHasFlagged(!!flagged);
+      } catch { setHasFlagged(false); }
+    };
+    check();
+    const t = setInterval(check, 5000);
+    return () => clearInterval(t);
+  }, [auth.protected, auth.authed]);
   if (auth.checking) {
     return (
       <div style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", justifyContent: "center", padding: "24px 16px" }}>
@@ -99,7 +115,7 @@ export default function App() {
         <nav style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
           <NavLink to="/dashboard" className={({ isActive }) => `btn btn-sm ${isActive ? "btn-primary" : "btn-outline-secondary"}`}><i className="bi bi-download" /> Dashboard</NavLink>
           <NavLink to="/media" className={({ isActive }) => `btn btn-sm ${isActive ? "btn-primary" : "btn-outline-secondary"}`}><i className="bi bi-collection-play" /> Media</NavLink>
-          <NavLink to="/collections" className={({ isActive }) => `btn btn-sm ${isActive ? "btn-primary" : "btn-outline-secondary"}`}><i className="bi bi-bookmark-star" /> Collections</NavLink>
+          <NavLink to="/collections" className={({ isActive }) => `btn btn-sm ${isActive ? "btn-primary" : "btn-outline-secondary"}`}><i className="bi bi-bookmark-star" /> Collections {hasFlagged && <i className="bi bi-exclamation-triangle-fill" style={{ color: "#f59e0b", marginLeft: 2, fontSize: 11 }} title="Login expired — some collections paused" />}</NavLink>
           <NavLink to="/profiles" className={({ isActive }) => `btn btn-sm ${isActive ? "btn-primary" : "btn-outline-secondary"}`}><i className="bi bi-people" /> Profiles</NavLink>
           <NavLink to="/settings" className={({ isActive }) => `btn btn-sm ${isActive ? "btn-primary" : "btn-outline-secondary"}`}><i className="bi bi-gear" /> Settings</NavLink>
         </nav>

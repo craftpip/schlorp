@@ -229,7 +229,7 @@ export default function Saved() {
               <input className="form-control" value={folder} onChange={(e) => setFolder(e.target.value)} placeholder="e.g. favorites" />
             </div>
             <div>
-              <label className="form-label">Account</label>
+              <label className="form-label">Profile</label>
               <select className="form-control" value={account} onChange={(e) => setAccount(e.target.value)}>
                 <option value="default">default</option>
                 {accounts.filter((a) => a.name !== "default").map((a) => <option key={a.name} value={a.name}>{a.name}</option>)}
@@ -290,7 +290,14 @@ export default function Saved() {
                     <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontWeight: 600, fontSize: 13, wordBreak: "break-all" }}>{l.url}</div>
-                        <div style={{ fontSize: 13, color: "var(--muted)" }}>folder: {l.folder || "—"} · account: {l.account || "default"} · every: {l.schedule || "30m"}</div>
+                        <div style={{ fontSize: 13, color: "var(--muted)" }}>folder: {l.folder || "—"} · profile: {l.account || "default"} · every: {l.schedule || "30m"}</div>
+                        {st.paused && (
+                          <div style={{ marginTop: 8, background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.28)", color: "#fde68a", padding: "10px 12px", borderRadius: 8, fontSize: 12, display: "flex", gap: 10, alignItems: "center" }}>
+                            <i className="bi bi-exclamation-triangle-fill" style={{ flexShrink: 0, fontSize: 14, color: "#f59e0b" }} />
+                            <span style={{ flex: 1, minWidth: 0, lineHeight: 1.4 }}><b>Login expired</b> — auto-sync paused for <b>{l.account || "default"}</b></span>
+                            <button className="btn btn-sm btn-outline-secondary" style={{ flexShrink: 0, color: "#fde68a", borderColor: "rgba(245,158,11,0.35)", whiteSpace: "nowrap" }} onClick={async () => { await fetch("/collections/resume", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ account: l.account || "default" }) }); load(); }}>Resume</button>
+                          </div>
+                        )}
                       </div>
                       <div style={{ textAlign: "right", minWidth: 110, flexShrink: 0 }}>
                         <div><span className="badge text-bg-secondary">{pendingForFolder} pending</span></div>
@@ -323,7 +330,7 @@ export default function Saved() {
                             <input className="form-control" value={folder} onChange={(e) => setFolder(e.target.value)} placeholder="e.g. favorites" />
                           </div>
                           <div>
-                            <label className="form-label">Account</label>
+                            <label className="form-label">Profile</label>
                             <select className="form-control" value={account} onChange={(e) => setAccount(e.target.value)}>
                               <option value="default">default</option>
                               {accounts.filter((a) => a.name !== "default").map((a) => <option key={a.name} value={a.name}>{a.name}</option>)}
