@@ -34,6 +34,13 @@ export default function Profiles() {
     } catch {}
   };
   useEffect(() => { load(); loadVnc(); const t = setInterval(load, 4000); const tv = setInterval(loadVnc, 5000); return () => { clearInterval(t); clearInterval(tv); }; }, []);
+  useEffect(() => {
+    if (!accounts.length || vncBusy) return;
+    const anyOpen = accounts.some((a) => a.manualOpen);
+    if (!anyOpen && vnc.enabled) {
+      fetch("/vnc/disable", { method: "POST" }).then(() => loadVnc()).catch(() => {});
+    }
+  }, [accounts, vnc.enabled, vncBusy]);
 
   const onCreate = async (e) => {
     e.preventDefault();
@@ -53,12 +60,28 @@ export default function Profiles() {
   };
   const onOpen = async (n) => {
     setInfo("Opening browser…");
-    const r = await fetch("/open-browser", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ account: n }) });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) setInfo("");
-    else setInfo(`Browser for "${n}" opened ✓ — VNC at ${typeof window !== "undefined" ? window.location.hostname : "localhost"}:6778/vnc.html`);
-    setTimeout(() => setInfo(""), 4000);
+    try {
+      if (!vnc.enabled) {
+        setInfo("Enabling remote desktop…");
+        const er = await fetch("/vnc/enable", { method: "POST" });
+        const ej = await er.json().catch(() => ({}));
+        if (!er.ok) throw new Error(ej.error || "failed to enable remote desktop");
+        await loadVnc();
+      }
+      const r = await fetch("/open-browser", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ account: n }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || "failed to open browser");
+      const host = typeof window !== "undefined" ? window.location.hostname : "localhost";
+      const vncUrl = `http://${host}:6778/vnc.html`;
+      setInfo(`Browser for "${n}" opened ✓ — remote desktop at ${vncUrl}`);
+      setTimeout(() => setInfo(""), 5000);
+      window.open(vncUrl, "_blank");
+    } catch (e) {
+      setInfo(e.message || "failed");
+      setTimeout(() => setInfo(""), 4000);
+    }
     load();
+    loadVnc();
   };
   const onClose = async (n) => {
     await fetch("/close-browser", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ account: n }) });
@@ -79,12 +102,11 @@ export default function Profiles() {
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
         <div style={{ fontWeight: 700, fontSize: 14 }}><i className="bi bi-people" style={{ marginRight: 8 }} />Profiles</div>
         <span className="badge text-bg-secondary">{accounts.length}</span>
-        <span className={`badge ${vnc.enabled ? "text-bg-success" : "text-bg-secondary"}`} title={vnc.enabled ? "VNC enabled — anyone with the link can view the desktop" : "VNC disabled — desktop not exposed"}>{vnc.enabled ? "VNC enabled" : "VNC disabled"}</span>
+        <span className={`badge ${vnc.enabled ? "text-bg-success" : "text-bg-secondary"}`} title={vnc.enabled ? "Remote desktop enabled — anyone with the link can view the desktop" : "Remote desktop disabled — desktop not exposed"}>{vnc.enabled ? "Remote desktop enabled" : "Remote desktop disabled"}</span>
         <span style={{ flex: 1 }} />
-        <button type="button" className={`btn btn-sm ${vnc.enabled ? "btn-outline-danger" : "btn-outline-secondary"}`} onClick={toggleVnc} disabled={vncBusy}><i className={vnc.enabled ? "bi bi-shield-lock" : "bi bi-broadcast"} /> {vncBusy ? "…" : vnc.enabled ? "Disable VNC" : "Enable VNC"}</button>
-        {vnc.enabled && <a href={`http://${typeof window !== "undefined" ? window.location.hostname : "localhost"}:6778/vnc.html`} target="_blank" rel="noopener" className="btn btn-sm btn-primary"><i className="bi bi-box-arrow-up-right" /> Open VNC</a>}
+        <button type="button" className={`btn btn-sm ${vnc.enabled ? "btn-outline-danger" : "btn-outline-secondary"}`} onClick={toggleVnc} disabled={vncBusy}><i className={vnc.enabled ? "bi bi-shield-lock" : "bi bi-broadcast"} /> {vncBusy ? "…" : vnc.enabled ? "Disable remote desktop" : "Enable remote desktop"}</button>
       </div>
-      {!vnc.enabled && <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 10 }}>VNC is disabled — the desktop is not exposed. Enable it when you need to log in, then disable again.</div>}
+      {!vnc.enabled && <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 10 }}>Remote desktop is disabled — the desktop is not exposed. It will be enabled automatically when you click Open, or enable it manually.</div>}
       {info && <div style={{ background: "rgba(16,185,129,.15)", border: "1px solid #065f46", color: "#d1fae5", padding: "8px 12px", borderRadius: 8, fontSize: 13, marginBottom: 12 }}>{info}</div>}
       <div style={{ border: "1px solid var(--border)", borderRadius: 12, padding: 16, background: "var(--surface)", marginBottom: 16 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: showCreate ? 12 : 0 }}>
@@ -115,13 +137,13 @@ export default function Profiles() {
           {accounts.map((a) => (
             <div key={a.name} style={{ border: "1px solid var(--border)", borderRadius: 12, padding: 12, background: "var(--surface)", display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
                   <div style={{ flex: 1, minWidth: 160 }}>
-                    <div style={{ fontWeight: 700 }}>{a.name} {a.name === "default" && <span className="badge text-bg-secondary">default</span>}</div>
-                    <div style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--mono)" }}>{a.userDataDir}/{a.profileDir}</div>
-                    <div style={{ fontSize: 11, color: a.manualOpen ? "#10b981" : "var(--muted)" }}>{a.manualOpen ? "● Browser open (VNC)" : "○ Closed"}</div>
+                    <div style={{ fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 6 }}>{a.name} {a.name === "default" && <span className="badge text-bg-secondary">default</span>}<span className={`badge ${a.manualOpen ? "text-bg-success" : "text-bg-secondary"}`} style={{ fontSize: 10, fontWeight: 600 }}>{a.manualOpen ? "open" : "closed"}</span></div>
+                    <div style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--mono)", marginTop: 2 }}>{a.userDataDir}/{a.profileDir}</div>
+                    <div style={{ fontSize: 11, color: a.manualOpen ? "#10b981" : "var(--muted)", marginTop: 2 }}>{a.manualOpen ? "● Browser open — remote desktop" : "○ Closed"}</div>
                   </div>
-                  <div style={{ display: "flex", gap: 6 }}>
-                    {a.manualOpen ? <button className="btn btn-sm btn-outline-secondary" onClick={() => onClose(a.name)}><i className="bi bi-x-lg" /> Close</button> : <button className="btn btn-sm btn-primary" onClick={() => onOpen(a.name)}><i className="bi bi-box-arrow-up-right" /> Open</button>}
-                    {a.name === "default" ? <button className="btn btn-sm btn-outline-secondary" onClick={onResetDefault} style={{ color: "var(--muted)", borderColor: "var(--border)" }}><i className="bi bi-arrow-counterclockwise" /> Reset</button> : <button className="btn btn-sm btn-outline-secondary" onClick={() => onDelete(a.name)}><i className="bi bi-trash" /> Delete</button>}
+                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    {a.manualOpen ? <button className="btn btn-sm btn-outline-secondary" onClick={() => onClose(a.name)} style={{ minWidth: 92, justifyContent: "center", display: "inline-flex", alignItems: "center" }}><i className="bi bi-x-lg" /> Close</button> : <button className="btn btn-sm btn-primary" onClick={() => onOpen(a.name)} style={{ minWidth: 92, justifyContent: "center", display: "inline-flex", alignItems: "center" }}><i className="bi bi-box-arrow-up-right" /> Open</button>}
+                    {a.name === "default" ? <button className="btn btn-sm btn-outline-secondary" onClick={onResetDefault} style={{ minWidth: 92, justifyContent: "center", display: "inline-flex", alignItems: "center", color: "var(--muted)", borderColor: "var(--border)" }}><i className="bi bi-arrow-counterclockwise" /> Reset</button> : <button className="btn btn-sm btn-outline-secondary" onClick={() => onDelete(a.name)} style={{ minWidth: 92, justifyContent: "center", display: "inline-flex", alignItems: "center" }}><i className="bi bi-trash" /> Delete</button>}
                   </div>
                 </div>
               ))}

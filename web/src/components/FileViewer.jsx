@@ -79,7 +79,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   useEffect(() => { try { localStorage.setItem("xdl_viewer_muted", muted ? "1" : "0"); } catch {} }, [muted]);
   useEffect(() => { try { localStorage.setItem("xdl_viewer_rate", String(rate)); } catch {} }, [rate]);
   useEffect(() => { try { localStorage.setItem("xdl_viewer_seekFrames", seekFrames ? "1" : "0"); } catch {} }, [seekFrames]);
-  useEffect(() => { setZoom(1); setOrigin("50% 50%"); setPan({x:0,y:0}); setCurrent(0); setDuration(0); }, [mediaUrl]);
+  useEffect(() => { setZoom(1); setOrigin("50% 50%"); setPan({x:0,y:0}); setCurrent(0); setDuration(0); setTimeout(() => videoRef.current?.focus(), 50); }, [mediaUrl]);
   useEffect(() => {
     const onFs = () => setIsFs(document.fullscreenElement === viewerRef.current);
     document.addEventListener("fullscreenchange", onFs);
@@ -258,7 +258,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   useEffect(() => {
     const onShiftDown = (e) => {
       if (e.key !== "Shift" || e.repeat) return;
-      if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable)) return;
+      if (e.target && ((e.target.tagName === "INPUT" && e.target.type !== "range") || e.target.tagName === "TEXTAREA" || e.target.isContentEditable)) return;
       if (isImage || !videoRef.current || videoRef.current.paused) return;
       if (shiftWasPlayingRef.current) return;
       shiftWasPlayingRef.current = true;
@@ -266,6 +266,10 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     };
     const onShiftUp = (e) => {
       if (e.key !== "Shift") return;
+      if (e.target && ((e.target.tagName === "INPUT" && e.target.type !== "range") || e.target.tagName === "TEXTAREA" || e.target.isContentEditable)) {
+        shiftWasPlayingRef.current = false;
+        return;
+      }
       if (!shiftWasPlayingRef.current || !videoRef.current || isImage) { shiftWasPlayingRef.current = false; return; }
       shiftWasPlayingRef.current = false;
       if (wasPlayingRef.current) return;
@@ -314,14 +318,14 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       >
         <div className="fv-header" style={{ position: "absolute", top: 0, left: 0, right: 0, zIndex: 5, display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", background: "transparent", border: "none", pointerEvents: "none" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6, pointerEvents: "auto" }}>
-            <button type="button" className="btn btn-sm" onClick={(e) => { e.stopPropagation(); onPrev(); }} onTouchStart={(e) => e.stopPropagation()} disabled={!hasPrev} title="Previous (↑)" style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}><i className="bi bi-chevron-up" /></button>
+            <button type="button" tabIndex={-1} className="btn btn-sm" onClick={(e) => { e.stopPropagation(); onPrev(); }} onTouchStart={(e) => e.stopPropagation()} disabled={!hasPrev} title="Previous (↑)" style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}><i className="bi bi-chevron-up" /></button>
             <span className="badge" style={{ fontFamily: "var(--mono)", fontSize: 11, minWidth: 54, justifyContent: "center", background: "rgba(0,0,0,.55)", border: "1px solid rgba(255,255,255,.18)", color: "#fff", backdropFilter: "blur(6px)" }}>{idx + 1} / {total}</span>
-            <button type="button" className="btn btn-sm" onClick={(e) => { e.stopPropagation(); onNext(); }} onTouchStart={(e) => e.stopPropagation()} disabled={!hasNext} title="Next (↓)" style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}><i className="bi bi-chevron-down" /></button>
+            <button type="button" tabIndex={-1} className="btn btn-sm" onClick={(e) => { e.stopPropagation(); onNext(); }} onTouchStart={(e) => e.stopPropagation()} disabled={!hasNext} title="Next (↓)" style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}><i className="bi bi-chevron-down" /></button>
           </div>
           <span style={{ flex: 1 }} />
           <div style={{ display: "flex", alignItems: "center", gap: 8, pointerEvents: "auto" }}>
-            <button type="button" onClick={handleDelete} disabled={deleting} className="btn btn-sm" aria-label="Delete file" title="Delete file" style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#ff8080", backdropFilter: "blur(6px)" }}><i className="bi bi-trash" /></button>
-            <button type="button" onClick={onClose} className="btn btn-sm" aria-label="Close" style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}><i className="bi bi-x-lg" /></button>
+            <button type="button" tabIndex={-1} onClick={handleDelete} disabled={deleting} className="btn btn-sm" aria-label="Delete file" title="Delete file" style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#ff8080", backdropFilter: "blur(6px)" }}><i className="bi bi-trash" /></button>
+            <button type="button" tabIndex={-1} onClick={onClose} className="btn btn-sm" aria-label="Close" style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}><i className="bi bi-x-lg" /></button>
           </div>
         </div>
 
@@ -359,8 +363,10 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
               autoPlay
               playsInline
               preload="metadata"
+              tabIndex={0}
+              autoFocus
               onClick={(e)=> e.stopPropagation()}
-              style={{ width: "100%", height: "100%", background: "#000", display: "block", objectFit: "contain", transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: origin, transition: zoom===1 ? "transform 0.15s" : "none", WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none" }}
+              style={{ width: "100%", height: "100%", background: "#000", display: "block", objectFit: "contain", transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: origin, transition: zoom===1 ? "transform 0.15s" : "none", WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none", outline: "none" }}
               onTimeUpdate={(e)=> setCurrent(e.currentTarget.currentTime)}
               onLoadedMetadata={(e)=> setDuration(e.currentTarget.duration)}
               onPlay={() => setIsPlaying(true)}
@@ -373,29 +379,29 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
           {!isImage && (
             <div className="fv-timeline" style={{ display: "flex", alignItems: "center", gap: 6 }}>
               <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--muted)", minWidth: 32 }}>{fmtTime(current)}</span>
-              <input type="range" min={0} max={duration || 0} step={0.1} value={current} onChange={(e)=> { const v=parseFloat(e.target.value); if(videoRef.current){ videoRef.current.currentTime=v; setCurrent(v);} }} style={{ flex: 1, accentColor: "#6366f1", height: 4 }} />
+              <input type="range" tabIndex={-1} min={0} max={duration || 0} step={0.1} value={current} onChange={(e)=> { const v=parseFloat(e.target.value); if(videoRef.current){ videoRef.current.currentTime=v; setCurrent(v);} }} style={{ flex: 1, accentColor: "#6366f1", height: 4 }} />
               <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--muted)", minWidth: 32 }}>{fmtTime(duration)}</span>
-              <button type="button" className="btn btn-sm btn-outline-secondary" onClick={toggleFullscreen} title="Fullscreen (f)" style={{ padding: "4px 8px", fontSize: 11 }}><i className="bi bi-arrows-fullscreen" /></button>
+              <button type="button" tabIndex={-1} className="btn btn-sm btn-outline-secondary" onClick={toggleFullscreen} title="Fullscreen (f)" style={{ padding: "4px 8px", fontSize: 11 }}><i className="bi bi-arrows-fullscreen" /></button>
             </div>
           )}
           <div className="fv-speed" style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
             <span className="badge text-bg-primary" style={{ fontFamily: "var(--mono)", fontSize: 10, padding: "2px 6px" }}>{rate.toFixed(1)}×</span>
             <div style={{ display: "flex", alignItems: "center", gap: 4, marginLeft: 4 }}>
-              <input type="range" min="0.1" max="1" step="0.1" value={rate} onChange={(e) => setRate(parseFloat(e.target.value))} style={{ width: 90, accentColor: "#6366f1", height: 4 }} />
+              <input type="range" tabIndex={-1} min="0.1" max="1" step="0.1" value={rate} onChange={(e) => setRate(parseFloat(e.target.value))} style={{ width: 90, accentColor: "#6366f1", height: 4 }} />
             </div>
             <div style={{ display: "flex", gap: 3, alignItems: "center", border: "1px solid var(--border)", borderRadius: 6, padding: 2, background: "var(--surface-2)" }}>
-              <button type="button" onClick={() => setSeekFrames(false)} className={`btn btn-sm ${!seekFrames ? "btn-primary" : "btn-outline-secondary"}`} style={{ padding: "2px 6px", fontSize: 11, minWidth: 32 }} title="Seek by 1 second (←/→)">1s</button>
-              <button type="button" onClick={() => setSeekFrames(true)} className={`btn btn-sm ${seekFrames ? "btn-primary" : "btn-outline-secondary"}`} style={{ padding: "2px 6px", fontSize: 11, minWidth: 32 }} title="Seek by 1 frame (~33ms)">1f</button>
+              <button type="button" tabIndex={-1} onClick={() => setSeekFrames(false)} className={`btn btn-sm ${!seekFrames ? "btn-primary" : "btn-outline-secondary"}`} style={{ padding: "2px 6px", fontSize: 11, minWidth: 32 }} title="Seek by 1 second (←/→)">1s</button>
+              <button type="button" tabIndex={-1} onClick={() => setSeekFrames(true)} className={`btn btn-sm ${seekFrames ? "btn-primary" : "btn-outline-secondary"}`} style={{ padding: "2px 6px", fontSize: 11, minWidth: 32 }} title="Seek by 1 frame (~33ms)">1f</button>
             </div>
             <span style={{ flex: 1 }} />
             {!isImage && (
               <div style={{ display: "flex", gap: 4 }}>
-                <button type="button" className="btn btn-sm btn-outline-secondary" onClick={() => setMuted((m) => !m)} title={muted ? "Unmute (m)" : "Mute (m)"} style={{ color: muted ? "#f87171" : undefined, minWidth: 36, padding: "4px 6px", fontSize: 11 }}><i className={`bi ${muted ? "bi-volume-mute-fill" : "bi-volume-up-fill"}`} /></button>
-                <button type="button" className="fv-10s btn btn-sm btn-outline-secondary" onClick={() => { if (videoRef.current) videoRef.current.currentTime = Math.max(0, videoRef.current.currentTime - 10); }} title="Back 10s" style={{ padding: "4px 6px", fontSize: 11 }}><i className="bi bi-skip-backward" /> 10s</button>
-                <button type="button" className="btn btn-sm btn-primary" onClick={() => { if (!videoRef.current) return; if (videoRef.current.paused) videoRef.current.play(); else videoRef.current.pause(); }} style={{ padding: "4px 8px", fontSize: 11 }}>
+                <button type="button" tabIndex={-1} className="btn btn-sm btn-outline-secondary" onClick={() => setMuted((m) => !m)} title={muted ? "Unmute (m)" : "Mute (m)"} style={{ color: muted ? "#f87171" : undefined, minWidth: 36, padding: "4px 6px", fontSize: 11 }}><i className={`bi ${muted ? "bi-volume-mute-fill" : "bi-volume-up-fill"}`} /></button>
+                <button type="button" tabIndex={-1} className="fv-10s btn btn-sm btn-outline-secondary" onClick={() => { if (videoRef.current) videoRef.current.currentTime = Math.max(0, videoRef.current.currentTime - 10); videoRef.current?.focus(); }} title="Back 10s" style={{ padding: "4px 6px", fontSize: 11 }}><i className="bi bi-skip-backward" /> 10s</button>
+                <button type="button" tabIndex={-1} className="btn btn-sm btn-primary" onClick={() => { if (!videoRef.current) return; if (videoRef.current.paused) videoRef.current.play(); else videoRef.current.pause(); videoRef.current?.focus(); }} style={{ padding: "4px 8px", fontSize: 11 }}>
                   <i className={`bi ${isPlaying ? "bi-pause-fill" : "bi-play-fill"}`} /> {isPlaying ? "Pause" : "Play"}
                 </button>
-                <button type="button" className="fv-10s btn btn-sm btn-outline-secondary" onClick={() => { if (videoRef.current) videoRef.current.currentTime += 10; }} title="Forward 10s" style={{ padding: "4px 6px", fontSize: 11 }}>10s <i className="bi bi-skip-forward" /></button>
+                <button type="button" tabIndex={-1} className="fv-10s btn btn-sm btn-outline-secondary" onClick={() => { if (videoRef.current) videoRef.current.currentTime += 10; videoRef.current?.focus(); }} title="Forward 10s" style={{ padding: "4px 6px", fontSize: 11 }}>10s <i className="bi bi-skip-forward" /></button>
               </div>
             )}
           </div>

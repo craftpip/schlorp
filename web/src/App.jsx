@@ -33,6 +33,10 @@ export default function App() {
       }
     }).catch(() => setAuth({ checking: false, protected: false, authed: true }));
   }, []);
+  useEffect(() => {
+    if (auth.protected && !auth.authed) document.title = "Password is required";
+    else document.title = "xdl — Video downloader";
+  }, [auth.protected, auth.authed]);
   const doLogin = async (e) => {
     e.preventDefault(); setPwErr("");
     const r = await fetch("/api/auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: pw }) });
@@ -64,15 +68,15 @@ export default function App() {
   }
   if (auth.protected && !auth.authed) {
     return (
-      <div style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", justifyContent: "center", padding: "24px 16px" }}>
-        <div className="card" style={{ padding: 24, maxWidth: 360, width: "100%", margin: "40px auto", height: "fit-content" }}>
-          <div style={{ fontWeight: 700, marginBottom: 8 }}><i className="bi bi-shield-lock" /> Password is required</div>
-          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12 }}>This panel is protected. Enter the password to continue. Leave blank in Settings to disable.</div>
-          <form onSubmit={doLogin} style={{ display: "flex", gap: 8 }}>
-            <input type="password" className="form-control" value={pw} onChange={(e) => setPw(e.target.value)} placeholder="Password" autoFocus style={{ flex: 1 }} />
-            <button type="submit" className="btn btn-primary">Unlock</button>
+      <div style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", justifyContent: "center", alignItems: "center", padding: "40px 16px" }}>
+        <div className="card" style={{ padding: 28, maxWidth: 380, width: "100%", margin: 0, height: "fit-content", boxShadow: "0 8px 32px rgba(0,0,0,.12)" }}>
+          <div style={{ fontWeight: 700, marginBottom: 10, fontSize: 16 }}><i className="bi bi-shield-lock" style={{ marginRight: 6 }} /> Password is required</div>
+          <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 }}>This panel is protected. Enter the password to continue. Leave blank in Settings to disable.</div>
+          <form onSubmit={doLogin} style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <input type="password" className="form-control" value={pw} onChange={(e) => setPw(e.target.value)} placeholder="Password" autoFocus style={{ flex: 1, padding: "10px 12px" }} />
+            <button type="submit" className="btn btn-primary" style={{ padding: "10px 18px", whiteSpace: "nowrap" }}>Unlock</button>
           </form>
-          {pwErr && <div style={{ color: "var(--danger)", fontSize: 12, marginTop: 8 }}>{pwErr}</div>}
+          {pwErr && <div style={{ color: "var(--danger)", fontSize: 12, marginTop: 10, padding: "8px 10px", background: "rgba(239,68,68,.08)", borderRadius: 8 }}>{pwErr}</div>}
         </div>
       </div>
     );

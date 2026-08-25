@@ -1148,6 +1148,7 @@ app.post("/open-browser", async (req, res) => {
 
   let browser = null;
   try {
+    try { await execAsync("/usr/local/bin/vnc-start"); } catch {}
     logToClientAndConsole(`[open-browser] Opening visible browser for account "${accountName}" (auto-close after ${Math.round(timeoutMs / 60000)} min)...`);
 
     if (accountName === "default" && sharedBrowser) {
@@ -1174,6 +1175,9 @@ app.post("/open-browser", async (req, res) => {
       if (entry && entry.browser === browser) {
         if (entry.timer) clearTimeout(entry.timer);
         manualBrowsersByAccount.delete(accountName);
+        if (manualBrowsersByAccount.size === 0) {
+          execAsync("/usr/local/bin/vnc-stop").catch(() => {}).then(() => console.log("[vnc] auto-disabled — no windows open (disconnected)"));
+        }
       }
     });
 
@@ -1824,6 +1828,9 @@ async function closeManualBrowser(accountName, expectedBrowser) {
     await entry.browser.close();
   } catch {
     // ignore
+  }
+  if (manualBrowsersByAccount.size === 0) {
+    try { await execAsync("/usr/local/bin/vnc-stop"); console.log("[vnc] auto-disabled — no windows open"); } catch {}
   }
 }
 
