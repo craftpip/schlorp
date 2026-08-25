@@ -610,8 +610,11 @@ app.use((req, res, next) => {
   const expected = String(process.env.UI_PANEL_PASSWORD || process.env.ADMIN_PASSWORD || UI_PANEL_PASSWORD || "").trim();
   if (!expected) return next();
   if (req.path === "/api/auth/status" || req.path === "/api/auth" || req.path === "/health" || req.path.startsWith("/health") || req.path === "/vnc/status") return next();
-  // SPA pages — must be reachable on hard reload without header; React will enforce auth via JS
-  if (req.method === "GET" && ["/", "/dashboard", "/collections", "/media", "/profiles", "/settings"].includes(req.path)) return next();
+  // SPA pages — must be reachable on hard reload without header; React will enforce auth via JS (trailing-slash tolerant)
+  {
+    const p = req.path.replace(/\/+$/, "") || "/";
+    if (req.method === "GET" && ["/", "/dashboard", "/collections", "/media", "/profiles", "/settings"].includes(p)) return next();
+  }
   if (!req.path.startsWith("/api/") && !req.path.startsWith("/queue") && !req.path.startsWith("/sync-queue") && !req.path.startsWith("/sync-config") && !req.path.startsWith("/accounts") && !req.path.startsWith("/collections") && !req.path.startsWith("/scan-saved") && !req.path.startsWith("/download") && !req.path.startsWith("/media")) return next();
   const provided = String(req.headers["x-panel-password"] || req.headers["x-admin-password"] || req.headers["x-admin-token"] || req.query?.password || "");
   if (provided === expected) return next();

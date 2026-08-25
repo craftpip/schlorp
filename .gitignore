@@ -4,3 +4,4 @@ node_modules/
 .download-queue.json
 .web-queue.json
 .saved-sync-state.json.bak.*
+.env

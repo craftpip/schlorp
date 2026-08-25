@@ -1,6 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQueue } from "../store/QueueContext";
+import FileViewer from "../components/FileViewer";
 
 function toMediaUrl(fp) {
   if (!fp) return "";
@@ -26,6 +27,13 @@ function deriveTitle(url, filePath) {
     if (decoded.length > 3) return decoded.length > 60 ? decoded.slice(0, 60) + "…" : decoded;
     return u.hostname.replace(/^www\./, "") + u.pathname.slice(0, 40);
   } catch { return url; }
+}
+function fileCategoryFromPath(fp) {
+  const ext = String(fp || "").split(".").pop()?.toLowerCase() || "";
+  if (/^(mp4|webm|mkv|mov|m4v|avi|mpg|mpeg|3gp|flv|ts|m3u8)$/i.test(ext)) return "video";
+  if (/^(jpg|jpeg|png|gif|webp|bmp|avif)$/i.test(ext)) return "image";
+  if (/^(mp3|m4a|aac|ogg|wav|flac|opus)$/i.test(ext)) return "audio";
+  return "other";
 }
 function stageLabel(stage, pct) {
   const map = { queued: "Queued", browser: "Starting browser", navigating: "Opening page", capturing: "Capturing media", extracting: "Extracting", downloading: "Downloading", muxing: "Muxing", done: "Done", error: "Failed" };
@@ -76,6 +84,18 @@ export default function Dashboard() {
   const [gapMin, setGapMin] = useState("");
   const [gapMax, setGapMax] = useState("");
   const [gapErr, setGapErr] = useState("");
+  const [viewerFile, setViewerFile] = useState(null);
+  const lastViewedRef = useRef(null);
+  const lastHighlightedDashRef = useRef(null);
+  const persistHighlightDash = (id) => {
+    if (lastHighlightedDashRef.current && lastHighlightedDashRef.current !== id) {
+      const prev = document.getElementById(`dash-file-${lastHighlightedDashRef.current}`);
+      if (prev) { prev.style.background = ""; prev.removeAttribute("data-highlighted"); }
+    }
+    const el = document.getElementById(`dash-file-${id}`);
+    if (el) { el.style.background = "rgba(99,102,241,0.14)"; el.setAttribute("data-highlighted", "true"); }
+    lastHighlightedDashRef.current = id;
+  };
   useEffect(() => {
     if (gap?.maxMs > 0) {
       setGapMin(fmtGapMs(gap.minMs));
@@ -170,7 +190,19 @@ export default function Dashboard() {
         </div>
       </div>
 
-      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, borderBottom: "1px solid var(--border)", paddingBottom: 10 }}>
+      <style>{`@media (max-width: 640px){
+  .dash-top{ flex-wrap: wrap !important; gap: 4px !important; padding-bottom: 6px !important; }
+  .dash-top .btn{ padding: 3px 6px !important; font-size: 10px !important; }
+  .dash-top .form-control-sm{ width: 44px !important; font-size: 10px !important; padding: 3px 4px !important; }
+  .dash-top .badge{ font-size: 9px !important; padding: 1px 4px !important; }
+  .content{ padding: 10px 8px !important; }
+  .hero-inner{ padding: 12px !important; }
+  .hero-download{ margin-bottom: 10px !important; }
+  .card-body{ padding: 10px !important; }
+  .queue-card{ padding: 8px 10px !important; }
+  .view-title{ font-size: 18px !important; }
+}`}</style>
+      <div className="dash-top" style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, borderBottom: "1px solid var(--border)", paddingBottom: 10, flexWrap: "wrap" }}>
         <button className={`btn btn-sm ${tab === "active" ? "btn-primary" : "btn-outline-secondary"}`} onClick={() => setTab("active")}>
           <i className="bi bi-collection-play" /> Active <span className="badge text-bg-secondary" style={{ marginLeft: 6 }}>{active.length}</span>
           {active.filter((i) => i.status === "running").length > 0 && <span className="badge text-bg-primary" style={{ marginLeft: 4 }}>● {active.filter((i) => i.status === "running").length} running</span>}
@@ -179,11 +211,12 @@ export default function Dashboard() {
           <i className="bi bi-check2-all" /> Completed <span className="badge text-bg-success" style={{ marginLeft: 6 }}>{completed.filter((i) => i.status === "done").length}</span>
           <span className="badge text-bg-danger" style={{ marginLeft: 4 }}>{completed.filter((i) => i.status === "error").length}</span>
         </button>
-        <span style={{ flex: 1 }} />
-        <span className="small" style={{ color: "var(--muted)", display: "inline-flex", alignItems: "center", gap: 4 }} title="Wait between downloads — same values = fixed, different = random range. Format: 90s or 5m"><i className="bi bi-hourglass-split" /> Gap</span>
-        <div style={{ position: "relative", display: "inline-flex", alignItems: "stretch" }}>
+        <span style={{ flex: 1, minWidth: 12 }} />
+        <div style={{ display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "nowrap", flexWrap: "nowrap", flexShrink: 0, border: "1px solid var(--border)", borderRadius: 8, padding: "2px 4px", background: "var(--surface)" }}>
+          <span className="small" style={{ color: "var(--muted)", display: "inline-flex", alignItems: "center", gap: 4, whiteSpace: "nowrap" }} title="Wait between downloads — same values = fixed, different = random range. Format: 90s or 5m"><i className="bi bi-hourglass-split" /> Gap</span>
+        <div style={{ position: "relative", display: "inline-flex", alignItems: "stretch", flexShrink: 0 }}>
           <input type="text" className={`form-control form-control-sm ${gapErr ? "is-invalid" : ""}`} style={{ width: 72, borderTopRightRadius: 0, borderBottomRightRadius: 0 }} value={gapMin} placeholder="5m" onChange={(e) => { if (gapErr) setGapErr(""); setGapMin(e.target.value); }} onKeyDown={(e) => { if (e.key === "Enter") saveGap(); }} />
-          <span className="small" style={{ display: "inline-flex", alignItems: "center", padding: "0 7px", border: "1px solid var(--border)", background: "var(--surface-2)", color: "var(--muted)", marginLeft: -1 }}>–</span>
+          <span className="small" style={{ display: "inline-flex", alignItems: "center", padding: "0 7px", border: "1px solid var(--border)", background: "var(--surface-2)", color: "var(--muted)", marginLeft: -1, fontSize: 11 }}>–</span>
           <input type="text" className={`form-control form-control-sm ${gapErr ? "is-invalid" : ""}`} style={{ width: 72, borderRadius: 0, marginLeft: -1 }} value={gapMax} placeholder="15m" onChange={(e) => { if (gapErr) setGapErr(""); setGapMax(e.target.value); }} onKeyDown={(e) => { if (e.key === "Enter") saveGap(); }} />
           <button type="button" className="btn btn-sm btn-outline-secondary" style={(gap?.maxMs > 0 || gapMin || gapMax) ? { borderRadius: 0, marginLeft: -1 } : { borderTopLeftRadius: 0, borderBottomLeftRadius: 0, marginLeft: -1 }} onClick={saveGap} title="Apply gap"><i className="bi bi-check-lg" /></button>
           {(gap?.maxMs > 0 || gapMin || gapMax) && (
@@ -198,6 +231,7 @@ export default function Dashboard() {
         {tab === "completed" && (
           <button type="button" className="btn btn-sm btn-outline-secondary" onClick={clearCompleted} disabled={!completed.length} title="Clear entries only — files stay in /media" style={{ alignSelf: "stretch", display: "inline-flex", alignItems: "center" }}><i className="bi bi-x-lg" /> Clear</button>
         )}
+        </div>
       </div>
 
           {tab === "active" ? (
@@ -234,23 +268,33 @@ export default function Dashboard() {
           ) : (
             <>
               {completed.length === 0 ? <div className="empty"><i className="bi bi-check-circle" /> Nothing completed yet.</div> : (
-                <div style={{ display: "grid", gap: 10 }}>
+                <div style={{ display: "grid", gap: 10, minWidth: 0 }}>
                   {completed.map((it) => (
-                    <div key={it.id} className={`queue-card ${it.status}`}>
+                    <div key={it.id} id={`dash-file-${it.id}`} data-filepath={it.filePath} className={`queue-card ${it.status}`} style={{ overflow: "hidden", minWidth: 0, cursor: it.status === "done" && it.filePath ? "pointer" : "default" }} onClick={() => { if (it.status === "done" && it.filePath) { persistHighlightDash(it.id); setViewerFile(it); } }}>
                       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                         <span className={`badge ${it.status === "done" ? "text-bg-success" : "text-bg-danger"} badge-dot`}>{it.status}</span>
                         <span className="small" style={{ color: "var(--muted)" }}>{it.stage}</span>
                         <span style={{ flex: 1 }} />
-                        {it.status === "error" && <button className="btn btn-sm btn-outline-secondary" onClick={() => retry(it.id)}><i className="bi bi-arrow-counterclockwise" /> Retry</button>}
-                        <button className="btn btn-sm btn-outline-secondary" onClick={() => remove(it.id)} title="Remove entry only — keeps file in /media"><i className="bi bi-x-lg" /> Remove</button>
+                        {it.status === "error" && <button className="btn btn-sm btn-outline-secondary" onClick={(e) => { e.stopPropagation(); retry(it.id); }}><i className="bi bi-arrow-counterclockwise" /> Retry</button>}
+                        <button className="btn btn-sm btn-outline-secondary" onClick={(e) => { e.stopPropagation(); remove(it.id); }} title="Remove entry only — keeps file in /media"><i className="bi bi-x-lg" /> Remove</button>
                       </div>
                   <div style={{ fontWeight: 600, fontSize: 13, marginTop: 6, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={deriveTitle(it.url, it.filePath)}>{deriveTitle(it.url, it.filePath)}</div>
-                  <div className="queue-url" style={{ marginTop: 2, fontSize: 11, color: "var(--faint)" }}>{it.url}</div>
+                  <div className="queue-url" style={{ marginTop: 2, fontSize: 11, color: "var(--faint)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: "100%", display: "block" }} title={it.url}>{it.url}</div>
                   {it.status === "done" && it.filePath && (
-                    <div className="small" style={{ marginTop: 6, padding: "8px 10px", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 8 }}>
-                      <a href={toMediaUrl(it.filePath)} target="_blank" rel="noopener" style={{ fontWeight: 600 }}>{toMediaUrl(it.filePath)}</a>
-                      <div style={{ color: "var(--muted)", fontSize: 11, marginTop: 2 }}>Saved to: {it.filePath}</div>
+                    <div className="small" style={{ marginTop: 6, padding: "8px 10px", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden", minWidth: 0 }}>
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); persistHighlightDash(it.id); setViewerFile(it); }}
+                        style={{ width: "100%", textAlign: "left", background: "none", border: 0, padding: 0, cursor: "pointer", color: "var(--accent)", fontWeight: 600, fontSize: 12, display: "inline-flex", alignItems: "center", gap: 6, overflow: "hidden", minWidth: 0 }}
+                        title="Open viewer"
+                      >
+                        <i className="bi bi-play-circle" style={{ flexShrink: 0 }} />
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0, flex: 1 }}>{toMediaUrl(it.filePath)}</span>
+                      </button>
                     </div>
+                  )}
+                  {it.status === "done" && it.filePath && (
+                    <div style={{ color: "var(--muted)", fontSize: 11, marginTop: 4, fontFamily: "var(--mono)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: "100%", display: "block" }} title={it.filePath}>Saved to: {it.filePath}</div>
                   )}
                   {it.status === "error" && <div className="small" style={{ color: "var(--danger)", marginTop: 4 }}>{it.error || "Failed"}</div>}
                     </div>
@@ -259,6 +303,44 @@ export default function Dashboard() {
               )}
             </>
           )}
+      {(() => {
+        if (!viewerFile) return null;
+        const viewable = completed.filter((c) => c.status === "done" && c.filePath);
+        const curCat = fileCategoryFromPath(viewerFile.filePath);
+        const sameViewable = viewable.filter((v) => fileCategoryFromPath(v.filePath) === curCat);
+        const idx = sameViewable.findIndex((v) => v.id === viewerFile.id);
+        const scrollAndHighlight = (el) => {
+          if (!el) return;
+          el.scrollIntoView({ behavior: "smooth", block: "center" });
+          const id = el.id?.startsWith("dash-file-") ? el.id.replace("dash-file-", "") : null;
+          if (id) persistHighlightDash(id);
+          else { el.style.background = "rgba(99,102,241,0.14)"; el.setAttribute("data-highlighted", "true"); }
+        };
+        if (idx === -1) return <FileViewer file={viewerFile} viewable={sameViewable} idx={-1} onClose={() => { lastViewedRef.current = viewerFile; setViewerFile(null); setTimeout(() => { const el = document.getElementById(`dash-file-${viewerFile.id}`); scrollAndHighlight(el); }, 80); }} onPrev={() => {}} onNext={() => {}} />;
+        const handleClose = () => {
+          const cur = viewerFile;
+          lastViewedRef.current = cur;
+          setViewerFile(null);
+          setTimeout(() => {
+            const el = cur?.id ? document.getElementById(`dash-file-${cur.id}`) : null;
+            if (el) scrollAndHighlight(el);
+            else if (cur?.filePath) { const esc = window.CSS?.escape ? window.CSS.escape(cur.filePath) : cur.filePath.replace(/"/g, '\\"'); const q = document.querySelector(`[data-filepath="${esc}"]`); scrollAndHighlight(q); }
+          }, 80);
+        };
+        const handleDeleted = () => {
+        };
+        return (
+          <FileViewer
+            file={viewerFile}
+            viewable={sameViewable}
+            idx={idx}
+            onClose={handleClose}
+            onPrev={() => { if (idx > 0) { const p = sameViewable[idx - 1]; persistHighlightDash(p.id); setViewerFile(p); } }}
+            onNext={() => { if (idx < sameViewable.length - 1) { const n = sameViewable[idx + 1]; persistHighlightDash(n.id); setViewerFile(n); } }}
+            onDeleted={handleDeleted}
+          />
+        );
+      })()}
     </div>
   );
 }
