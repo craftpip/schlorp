@@ -547,6 +547,16 @@ const { exec: execCb } = require("child_process");
 const { promisify: _promisify } = require("util");
 const execAsync = _promisify(execCb);
 const fsSyncVnc = require("fs");
+
+let vncOpChain = Promise.resolve();
+function withVncLock(fn) {
+  let result, error;
+  const task = async () => {
+    try { result = await fn(); } catch (e) { error = e; }
+  };
+  vncOpChain = vncOpChain.then(task, task);
+  return vncOpChain.then(() => { if (error) throw error; return result; });
+}
 function isVncFlagEnabled() {
   try {
     if (fsSyncVnc.existsSync(VNC_FLAG_PATH)) return fsSyncVnc.readFileSync(VNC_FLAG_PATH, "utf8").trim() === "1";
@@ -554,23 +564,22 @@ function isVncFlagEnabled() {
   return String(process.env.ENABLE_VNC || "0") === "1";
 }
 async function isVncProcessRunning() {
-  // check pid file or try TCP connect to VNC port (avoids needing pgrep/ps)
-  try {
-    const net = require("net");
-    const ok = await new Promise((resolve) => {
-      const s = net.createConnection({ host: "127.0.0.1", port: VNC_PORT_NUM, timeout: 800 }, () => { s.end(); resolve(true); });
-      s.on("error", () => resolve(false));
-      s.on("timeout", () => { s.destroy(); resolve(false); });
-    });
-    if (ok) return true;
-  } catch {}
-  try {
-    if (fsSyncVnc.existsSync("/tmp/x11vnc.pid")) {
-      const pid = Number(fsSyncVnc.readFileSync("/tmp/x11vnc.pid", "utf8").trim());
-      if (pid) { process.kill(pid, 0); return true; }
-    }
-  } catch {}
-  return false;
+  // check both x11vnc (6777) and novnc (6778) via TCP; avoids pid file defunct false-positives
+  async function canConnect(port) {
+    try {
+      const net = require("net");
+      const ok = await new Promise((resolve) => {
+        const s = net.createConnection({ host: "127.0.0.1", port, timeout: 800 }, () => { s.end(); resolve(true); });
+        s.on("error", () => resolve(false));
+        s.on("timeout", () => { s.destroy(); resolve(false); });
+      });
+      return ok;
+    } catch { return false; }
+  }
+  const vncUp = await canConnect(VNC_PORT_NUM);
+  if (!vncUp) return false;
+  const novncUp = await canConnect(NOVNC_PORT_NUM);
+  return novncUp;
 }
 app.get("/vnc/status", async (_req, res) => {
   const enabled = isVncFlagEnabled();
@@ -579,17 +588,23 @@ app.get("/vnc/status", async (_req, res) => {
 });
 app.post("/vnc/enable", async (_req, res) => {
   try {
-    await execAsync("/usr/local/bin/vnc-start");
-    // wait briefly for processes
-    await new Promise((r) => setTimeout(r, 1200));
+    await withVncLock(async () => {
+      await execAsync("/usr/local/bin/vnc-start");
+      for (let i = 0; i < 10; i++) {
+        if (await isVncProcessRunning()) break;
+        await new Promise((r) => setTimeout(r, 300));
+      }
+    });
     const running = await isVncProcessRunning();
     res.json({ ok: true, enabled: true, running });
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 app.post("/vnc/disable", async (_req, res) => {
   try {
-    await execAsync("/usr/local/bin/vnc-stop");
-    await new Promise((r) => setTimeout(r, 600));
+    await withVncLock(async () => {
+      await execAsync("/usr/local/bin/vnc-stop");
+      await new Promise((r) => setTimeout(r, 600));
+    });
     res.json({ ok: true, enabled: false, running: false });
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
@@ -1120,11 +1135,18 @@ app.post("/open-browser", async (req, res) => {
   const accountName = normalizeAccountName(req.body?.account || req.query?.account);
 
   const existing = manualBrowsersByAccount.get(accountName);
-  if (existing && existing.browser && existing.browser.isConnected && existing.browser.isConnected()) {
-    return res.status(409).json({
-      ok: false,
-      error: `A manual browser is already open for account "${accountName}". Close it first.`,
-    });
+  if (existing && existing.browser) {
+    try {
+      const connected = existing.browser.isConnected ? existing.browser.isConnected() : true;
+      const pages = connected ? await existing.browser.pages().catch(() => []) : [];
+      if (connected && pages.length > 0) {
+        return res.status(409).json({
+          ok: false,
+          error: `A manual browser is already open for account "${accountName}". Close it first.`,
+        });
+      }
+      await closeManualBrowser(accountName, existing.browser);
+    } catch {}
   }
 
   const minutes = parsePositiveInt(req.body?.minutes ?? req.query?.minutes, 0);
@@ -1165,7 +1187,13 @@ app.post("/open-browser", async (req, res) => {
 
   let browser = null;
   try {
-    try { await execAsync("/usr/local/bin/vnc-start"); } catch {}
+    await withVncLock(async () => {
+      try { await execAsync("/usr/local/bin/vnc-start"); } catch {}
+      for (let i = 0; i < 10; i++) {
+        if (await isVncProcessRunning()) break;
+        await new Promise((r) => setTimeout(r, 300));
+      }
+    });
     logToClientAndConsole(`[open-browser] Opening visible browser for account "${accountName}" (auto-close after ${Math.round(timeoutMs / 60000)} min)...`);
 
     if (accountName === "default" && sharedBrowser) {
@@ -1192,14 +1220,31 @@ app.post("/open-browser", async (req, res) => {
       if (entry && entry.browser === browser) {
         if (entry.timer) clearTimeout(entry.timer);
         manualBrowsersByAccount.delete(accountName);
-        if (manualBrowsersByAccount.size === 0) {
-          execAsync("/usr/local/bin/vnc-stop").catch(() => {}).then(() => console.log("[vnc] auto-disabled — no windows open (disconnected)"));
-        }
+        // Do NOT call vnc-stop here — frontend handles VNC lifecycle
       }
     });
 
     const page = await browser.newPage();
     page.setDefaultTimeout(60000);
+    const handlePageClose = async () => {
+      try {
+        const pages = await browser.pages().catch(() => []);
+        if (!pages.length) {
+          console.log(`[open-browser:${jobId}] last page closed for "${accountName}" — closing browser`);
+          await closeManualBrowser(accountName, browser);
+        }
+      } catch {}
+    };
+    page.on("close", handlePageClose);
+    browser.on("targetdestroyed", async () => {
+      try {
+        const pages = await browser.pages().catch(() => []);
+        if (!pages.length) {
+          console.log(`[open-browser:${jobId}] target destroyed, no pages left for "${accountName}" — closing`);
+          await closeManualBrowser(accountName, browser);
+        }
+      } catch {}
+    });
 
     logToClientAndConsole(
       "\n[open-browser] Browser is open and visible in the VNC session. It starts on a blank tab."
@@ -1876,9 +1921,8 @@ async function closeManualBrowser(accountName, expectedBrowser) {
   } catch {
     // ignore
   }
-  if (manualBrowsersByAccount.size === 0) {
-    try { await execAsync("/usr/local/bin/vnc-stop"); console.log("[vnc] auto-disabled — no windows open"); } catch {}
-  }
+  // VNC is stopped by the frontend (Profiles useEffect) when it sees no manualOpen accounts.
+  // Do NOT call vnc-stop here — it races with vnc-start from concurrent open-browser calls.
 }
 
 async function closeAllManualBrowsers() {

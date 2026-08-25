@@ -32,7 +32,7 @@ VNC_PORT_EFF="\${VNC_PORT:-6777}"
 NOVNC_PORT_EFF="\${NOVNC_PORT:-6778}"
 DISPLAY_EFF="\${DISPLAY:-:99}"
 VNC_FLAG="/data/browser/.vnc-enabled"
-is_running_pid() { local pid="\$1"; [ -n "\$pid" ] && kill -0 "\$pid" 2>/dev/null; }
+is_running_pid() { local pid="\$1"; [ -n "\$pid" ] || return 1; kill -0 "\$pid" 2>/dev/null || return 1; if [ -f "/proc/\$pid/status" ] && grep -q "^State:.*Z" "/proc/\$pid/status" 2>/dev/null; then return 1; fi; }
 X_PID=\$(cat /tmp/x11vnc.pid 2>/dev/null || echo "")
 if is_running_pid "\$X_PID"; then echo "x11vnc already running (\$X_PID)"; else
   # also kill stale by /proc scan if pid file missing but process lives
