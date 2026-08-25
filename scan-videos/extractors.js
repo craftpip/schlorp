@@ -597,10 +597,207 @@ async function getInstagramUsernameFromOembed(page, targetUrl) {
   }
 }
 
+async function extractRedditMediaData(page) {
+  const entries = await page.evaluate(() => {
+    const out = new Set();
+    const toAbs = (value) => {
+      if (!value) return "";
+      const normalized = String(value)
+        .replace(/\\u002F/gi, "/")
+        .replace(/\\u0026/gi, "&")
+        .replace(/\\\//g, "/")
+        .trim();
+      if (!normalized) return "";
+      try {
+        return new URL(normalized, location.href).href;
+      } catch {
+        return "";
+      }
+    };
+    const pushIfVideo = (value) => {
+      const url = toAbs(value);
+      if (!url) return;
+      // video/GIF only: mp4/webm/m3u8/mpd/gif + redgifs/v.redd/preview mp4
+      if (
+        /\.(mp4|webm|mov|mkv|avi|flv|m3u8|mpd|gif)(\?|$)/i.test(url) ||
+        /v\.redd\.it\//i.test(url) ||
+        /redgifs\.com\/(?:watch|ifr)\//i.test(url) ||
+        /preview\.redd\.it.*format=mp4/i.test(url)
+      ) {
+        out.add(url);
+      }
+    };
+
+    // shreddit-post content-href
+    document.querySelectorAll("shreddit-post[content-href]").forEach((el) => {
+      const href = el.getAttribute("content-href");
+      if (href) pushIfVideo(href);
+      // also permalink not needed
+    });
+
+    // videos and sources
+    document.querySelectorAll("video, video source, source[src]").forEach((el) => {
+      pushIfVideo(el.src || el.currentSrc || el.getAttribute("src"));
+    });
+    document.querySelectorAll('a[href*="redgifs"], a[href*="redd.it"], a[href*="v.redd"] ').forEach((el) => {
+      const href = el.getAttribute("href") || el.href;
+      pushIfVideo(href);
+    });
+    document.querySelectorAll('img[src*="preview.redd.it"]').forEach((el) => {
+      const src = el.getAttribute("src") || el.src;
+      if (src && /format=mp4/i.test(src)) pushIfVideo(src);
+    });
+
+    // scripts regex
+    const scripts = Array.from(document.querySelectorAll("script"));
+    const patterns = [
+      /https?:\/\/[^\s"'<>]+\.(?:mp4|m3u8|mpd|gif)(?:[^\s"'<>]*)/gi,
+      /https?:\/\/v\.redd\.it\/[^\s"'<>]+/gi,
+      /https?:\/\/(?:www\.)?redgifs\.com\/(?:watch|ifr)\/[^\s"'<>]+/gi,
+      /https?:\/\/preview\.redd\.it\/[^\s"'<>]*format=mp4[^\s"'<>]*/gi,
+    ];
+    for (const script of scripts) {
+      const text = (script.textContent || "").replace(/\\\//g, "/");
+      if (!text) continue;
+      for (const pattern of patterns) {
+        pattern.lastIndex = 0;
+        let match;
+        while ((match = pattern.exec(text))) {
+          pushIfVideo(match[0]);
+        }
+      }
+    }
+
+    // deep scan window objects if any reddit state leaked
+    try {
+      const seen = new WeakSet();
+      const scan = (node, depth = 0) => {
+        if (depth > 6 || node == null) return;
+        if (typeof node === "string") {
+          pushIfVideo(node);
+          return;
+        }
+        if (typeof node !== "object") return;
+        if (seen.has(node)) return;
+        seen.add(node);
+        if (Array.isArray(node)) {
+          for (const item of node) scan(item, depth + 1);
+          return;
+        }
+        for (const v of Object.values(node)) scan(v, depth + 1);
+      };
+      if (window.___r) scan(window.___r);
+      if (window.__PRELOADED_STATE__) scan(window.__PRELOADED_STATE__);
+    } catch {}
+
+    return Array.from(out);
+  });
+
+  const urls = [];
+  const seen = new Set();
+  for (const raw of Array.isArray(entries) ? entries : []) {
+    const cleaned = stripByteRangeParams(String(raw || "").trim());
+    if (!cleaned) continue;
+    if (seen.has(cleaned)) continue;
+    seen.add(cleaned);
+    urls.push(cleaned);
+  }
+  // extract redgifs ids
+  const redgifsIds = [];
+  const seenIds = new Set();
+  for (const url of urls) {
+    const m = String(url).match(/redgifs\.com\/(?:watch|ifr)\/([^/?#&]+)/i);
+    if (m && m[1] && !seenIds.has(m[1])) {
+      seenIds.add(m[1]);
+      redgifsIds.push(m[1]);
+    }
+  }
+  // also scan all urls again for watch ids in page content via separate evaluate already covered, but keep
+  return { urls, redgifsIds };
+}
+
+async function fetchRedgifsMediaUrls(page, redgifsId) {
+  if (!redgifsId) return [];
+  try {
+    const result = await page.evaluate(async (id) => {
+      const urls = new Set();
+      const add = (u) => {
+        if (!u) return;
+        try {
+          const abs = new URL(u, location.href).href;
+          if (
+            /\.(mp4|m3u8|mpd|webm)(\?|$)/i.test(abs) ||
+            /redgifs\.com/i.test(abs) ||
+            /media\.redgifs\.com/i.test(abs)
+          ) {
+            urls.add(abs);
+          }
+        } catch {}
+      };
+      // try api.redgifs.com/v2/gifs/<id>
+      try {
+        const apiUrl = `https://api.redgifs.com/v2/gifs/${encodeURIComponent(id)}`;
+        const resp = await fetch(apiUrl, { method: "GET" });
+        if (resp.ok) {
+          const json = await resp.json().catch(() => null);
+          const gif = json && (json.gif || (json.gifs && json.gifs[0]) || json);
+          const deepScan = (node, depth = 0) => {
+            if (depth > 6 || node == null) return;
+            if (typeof node === "string") {
+              add(node);
+              return;
+            }
+            if (typeof node !== "object") return;
+            if (Array.isArray(node)) {
+              node.forEach((x) => deepScan(x, depth + 1));
+              return;
+            }
+            for (const v of Object.values(node)) deepScan(v, depth + 1);
+          };
+          if (gif) deepScan(gif);
+          // also try direct fields
+          if (gif && gif.urls) {
+            if (gif.urls.hd) add(gif.urls.hd);
+            if (gif.urls.sd) add(gif.urls.sd);
+            if (gif.urls.vthumbnail) add(gif.urls.vthumbnail);
+          }
+          if (gif && gif.files) {
+            for (const f of Object.values(gif.files)) deepScan(f);
+          }
+        }
+      } catch {}
+      // fallback: fetch watch page html
+      try {
+        const watchUrl = `https://www.redgifs.com/watch/${encodeURIComponent(id)}`;
+        const resp2 = await fetch(watchUrl, { method: "GET" });
+        if (resp2.ok) {
+          const html = await resp2.text();
+          const patterns = [
+            /https?:\/\/[^\s"'<>]+\.mp4[^\s"'<>]*/gi,
+            /https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/gi,
+            /https?:\/\/media\.redgifs\.com\/[^\s"'<>]+/gi,
+          ];
+          for (const pat of patterns) {
+            pat.lastIndex = 0;
+            let m;
+            while ((m = pat.exec(html))) add(m[0]);
+          }
+        }
+      } catch {}
+      return Array.from(urls);
+    }, redgifsId);
+    return Array.isArray(result) ? result : [];
+  } catch {
+    return [];
+  }
+}
+
 module.exports = {
   extractXhamsterMediaData,
   extractXvideosMediaUrls,
   extractPornhubMediaData,
   getInstagramUsername,
   getInstagramUsernameFromOembed,
+  extractRedditMediaData,
+  fetchRedgifsMediaUrls,
 };

@@ -2,6 +2,37 @@ function isLikelyVideoUrl(url) {
   return /\.(mp4|webm|m3u8|mpd|mov|mkv|avi|flv)(\?.*)?$/i.test(url);
 }
 
+function isRedgifsUrl(url) {
+  const v = String(url || "");
+  if (v.includes("/static/")) return false;
+  if (v.includes(".css") || v.includes(".js")) return false;
+  return /redgifs\.com\/(?:watch|ifr)\/[a-zA-Z0-9]+/i.test(v);
+}
+
+function extractRedgifsId(url) {
+  try {
+    const m = String(url || "").match(/redgifs\.com\/(?:watch|ifr)\/([^/?#&]+)/i);
+    return m ? String(m[1] || "").trim() : "";
+  } catch {
+    return "";
+  }
+}
+
+function isRedditMediaUrl(url) {
+  const value = String(url || "");
+  return (
+    /\/v\.redd\.it\//i.test(value) ||
+    /i\.redd\.it\//i.test(value) ||
+    /preview\.redd\.it\//i.test(value) ||
+    isRedgifsUrl(value) ||
+    /external-preview\.redd\.it\//i.test(value)
+  );
+}
+
+function isGifUrl(url) {
+  return /\.gif(\?|$)/i.test(String(url || ""));
+}
+
 function stripByteRangeParams(rawUrl) {
   try {
     const u = new URL(rawUrl);
@@ -239,8 +270,29 @@ function sanitizeFileToken(value) {
     .slice(0, 64);
 }
 
+function prioritizeRedditCandidates(urls, qualityByUrl = new Map()) {
+  // Prefer: v.redd.it fallback mp4 > i.redd.it gif mp4 > preview mp4 > redgifs mp4 > redgifs m3u8
+  const scored = (url) => {
+    let bonus = 0;
+    const lower = String(url || "").toLowerCase();
+    if (/v\.redd\.it.*\.mp4/i.test(lower)) bonus += 500_000;
+    if (/preview\.redd\.it.*format=mp4/i.test(lower)) bonus += 400_000;
+    if (/i\.redd\.it.*\.gif/i.test(lower) && /mp4/i.test(lower)) bonus += 300_000;
+    if (/i\.redd\.it.*\.gif/i.test(lower)) bonus += 200_000;
+    if (/redgifs\.com.*\.mp4/i.test(lower)) bonus += 450_000;
+    if (/redgifs\.com.*\.m3u8/i.test(lower)) bonus += 350_000;
+    if (/redgifs\.com/i.test(lower)) bonus += 300_000;
+    return scoreDownloadCandidate(url, qualityByUrl.get(url)) + bonus;
+  };
+  return [...urls].sort((a, b) => scored(b) - scored(a));
+}
+
 module.exports = {
   isLikelyVideoUrl,
+  isRedgifsUrl,
+  extractRedgifsId,
+  isRedditMediaUrl,
+  isGifUrl,
   stripByteRangeParams,
   isStreamingManifestUrl,
   isDirectFileUrl,
@@ -250,6 +302,7 @@ module.exports = {
   getInstagramAssetId,
   scoreDownloadCandidate,
   prioritizeInstagramCandidates,
+  prioritizeRedditCandidates,
   extractDownloadableVideoUrls,
   prioritizeXhamsterCandidates,
   sanitizeFileToken,

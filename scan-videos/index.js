@@ -17,6 +17,9 @@ const {
   extractDownloadableVideoUrls,
   prioritizeInstagramCandidates,
   prioritizeXhamsterCandidates,
+  prioritizeRedditCandidates,
+  isRedgifsUrl,
+  isGifUrl,
   extractQualityHint,
   sanitizeFileToken,
 } = require("./media-utils");
@@ -27,11 +30,18 @@ const {
   filterInstagramCandidatesForTarget,
 } = require("./instagram-utils");
 const {
+  isRedditUrl,
+  extractRedditPostId,
+  extractRedditMediaHintsFromJsonText,
+} = require("./reddit-utils");
+const {
   extractXhamsterMediaData,
   extractXvideosMediaUrls,
   extractPornhubMediaData,
   getInstagramUsername,
   getInstagramUsernameFromOembed,
+  extractRedditMediaData,
+  fetchRedgifsMediaUrls,
 } = require("./extractors");
 const {
   hasFfmpeg,
@@ -42,6 +52,60 @@ const {
 
 const SNAPSHOT_DIR =
   String(process.env.SNAPSHOT_DIR || "").trim() || path.join(process.cwd(), "media", ".debug-snapshots");
+
+// Reddit redgifs API helper (server-side, handles auth token)
+async function fetchRedgifsDirectUrlsViaApi(redgifsId, log = () => {}) {
+  if (!redgifsId) return [];
+  try {
+    const tokenRes = await fetch("https://api.redgifs.com/v2/auth/temporary");
+    if (!tokenRes.ok) {
+      log(`redgifs token fetch failed: ${tokenRes.status}`);
+      return [];
+    }
+    const tokenJson = await tokenRes.json().catch(() => null);
+    const token = tokenJson && tokenJson.token;
+    if (!token) {
+      log("redgifs token missing");
+      return [];
+    }
+    const apiUrl = `https://api.redgifs.com/v2/gifs/${encodeURIComponent(redgifsId)}`;
+    const res = await fetch(apiUrl, { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      log(`redgifs api ${redgifsId} status ${res.status} ${txt.slice(0, 200)}`);
+      return [];
+    }
+    const data = await res.json().catch(() => null);
+    if (!data) return [];
+    const gif = data.gif || (data.gifs && data.gifs[0]) || data;
+    const urls = [];
+    const scan = (node, depth = 0) => {
+      if (depth > 6 || node == null) return;
+      if (typeof node === "string") {
+        if (/\.(mp4|m3u8|mpd)(\?|$)/i.test(node) || /media\.redgifs\.com/i.test(node)) urls.push(node);
+        return;
+      }
+      if (typeof node !== "object") return;
+      if (Array.isArray(node)) {
+        node.forEach((x) => scan(x, depth + 1));
+        return;
+      }
+      for (const v of Object.values(node)) scan(v, depth + 1);
+    };
+    scan(gif);
+    if (gif && gif.urls) {
+      if (gif.urls.hd) urls.push(gif.urls.hd);
+      if (gif.urls.sd) urls.push(gif.urls.sd);
+    }
+    // dedupe and clean
+    const cleaned = Array.from(new Set(urls.map((u) => stripByteRangeParams(u)).filter(Boolean)));
+    if (cleaned.length) log(`redgifs api ${redgifsId} → ${cleaned.length} URL(s)`);
+    return cleaned;
+  } catch (e) {
+    log(`redgifs api error ${redgifsId}: ${e.message}`);
+    return [];
+  }
+}
 
 const POPUP_CLOSE_SELECTORS = [
   // generic cookie banners
@@ -443,10 +507,19 @@ async function run(options = {}) {
           return false;
         }
       })();
+      const isRedditTarget = (() => {
+        try {
+          const u = new URL(targetUrl);
+          return /(^|\.)reddit\.com$/i.test(u.hostname);
+        } catch {
+          return false;
+        }
+      })();
 
       const instagramShortcode = isInstagramTarget
         ? extractInstagramShortcode(targetUrl)
         : "";
+      const redditPostId = isRedditTarget ? extractRedditPostId(targetUrl) : "";
 
       const page = await browser.newPage();
 
@@ -474,6 +547,9 @@ async function run(options = {}) {
         let instagramUsernameFromApi = "";
         const instagramTargetHintUrls = new Set();
         const instagramTargetHintAssetIds = new Set();
+        const redditHintUrls = new Set();
+        const redditRedgifsIds = new Set();
+        let redditIsVideoPost = null; // null=unknown, true=video, false=photo-only
 
         page.on("response", async (response) => {
           try {
@@ -481,7 +557,13 @@ async function run(options = {}) {
             const headers = response.headers();
             const contentType = (headers["content-type"] || "").toLowerCase();
 
-            if (contentType.startsWith("video/") || isLikelyVideoUrl(url)) {
+            if (
+              contentType.startsWith("video/") ||
+              isLikelyVideoUrl(url) ||
+              /\.gif(\?|$)/i.test(url) ||
+              /redgifs\.com\/(?:watch|ifr)\//i.test(url) ||
+              /v\.redd\.it\//i.test(url)
+            ) {
               if (!networkVideos.has(url)) lastMediaSignalAt = Date.now();
               networkVideos.add(url);
             }
@@ -511,6 +593,50 @@ async function run(options = {}) {
                 for (const hintAssetId of mediaHints.assetIds) {
                   const cleaned = String(hintAssetId || "").trim();
                   if (cleaned) instagramTargetHintAssetIds.add(cleaned);
+                }
+              }
+            }
+
+            if (
+              isRedditTarget &&
+              redditPostId &&
+              (contentType.includes("application/json") || /\.json(\?|$)/i.test(url) || /api\.redgifs\.com/i.test(url))
+            ) {
+              const bodyText = await response.text().catch(() => "");
+              if (bodyText && bodyText.length <= 5_000_000) {
+                // reddit post json
+                if (/reddit\.com.*\.json/i.test(url) || url.includes("/comments/")) {
+                  const hints = extractRedditMediaHintsFromJsonText(bodyText, redditPostId);
+                  if (hints.isVideo === false) {
+                    redditIsVideoPost = false;
+                  } else if (hints.urls.length || hints.redgifsIds.length) {
+                    redditIsVideoPost = true;
+                  }
+                  for (const hintUrl of hints.urls) {
+                    redditHintUrls.add(stripByteRangeParams(hintUrl));
+                  }
+                  for (const rid of hints.redgifsIds) {
+                    const cleaned = String(rid || "").trim();
+                    if (cleaned) redditRedgifsIds.add(cleaned);
+                  }
+                }
+                // redgifs api json
+                if (/api\.redgifs\.com/i.test(url)) {
+                  try {
+                    const parsed = JSON.parse(bodyText);
+                    const urls = [];
+                    const scan = (node, depth = 0) => {
+                      if (depth > 6 || node == null) return;
+                      if (typeof node === "string") {
+                        if (/\.(mp4|m3u8|mpd)(\?|$)/i.test(node) || /media\.redgifs\.com/i.test(node)) urls.push(node);
+                        return;
+                      }
+                      if (typeof node !== "object") return;
+                      for (const v of Object.values(node)) scan(v, depth + 1);
+                    };
+                    scan(parsed);
+                    for (const u of urls) redditHintUrls.add(stripByteRangeParams(u));
+                  } catch {}
                 }
               }
             }
@@ -550,6 +676,32 @@ async function run(options = {}) {
             await new Promise((r) => setTimeout(r, 800));
             window.scrollTo(0, 0);
           });
+        }
+
+        // For reddit, actively fetch .json to determine video vs photo and collect hints
+        if (isRedditTarget && redditPostId) {
+          try {
+            const jsonText = await page.evaluate(async (postUrl) => {
+              const jurl = postUrl.replace(/\/+$/, "") + ".json";
+              try {
+                const resp = await fetch(jurl, { credentials: "include" });
+                if (!resp.ok) return "";
+                const txt = await resp.text();
+                return txt.slice(0, 5_000_000);
+              } catch {
+                return "";
+              }
+            }, targetUrl);
+            if (jsonText) {
+              const hints = extractRedditMediaHintsFromJsonText(jsonText, redditPostId);
+              if (hints.isVideo === false) redditIsVideoPost = false;
+              else if (hints.urls.length || hints.redgifsIds.length) redditIsVideoPost = true;
+              for (const u of hints.urls) redditHintUrls.add(stripByteRangeParams(u));
+              for (const id of hints.redgifsIds) redditRedgifsIds.add(id);
+              if (hints.isVideo === false) log(`Reddit .json indicates photo-only for ${redditPostId}`);
+              else log(`Reddit .json hints: ${hints.urls.length} url(s), ${hints.redgifsIds.length} redgifs`);
+            }
+          } catch {}
         }
 
         const domVideos = await page.evaluate(() => {
@@ -675,6 +827,41 @@ async function run(options = {}) {
           extractedXvideosUrls = [];
         }
 
+        // Reddit specific extraction (video/GIF only)
+        let redditData = { urls: [], redgifsIds: [] };
+        let redgifsResolvedUrls = [];
+        if (isRedditTarget) {
+          try {
+            redditData = await extractRedditMediaData(page);
+            for (const id of redditData.redgifsIds) {
+              if (redditRedgifsIds.has(id)) continue;
+              redditRedgifsIds.add(id);
+            }
+          } catch {}
+          // merge intercepted hints
+          for (const u of redditHintUrls) redditData.urls.push(u);
+          for (const id of redditRedgifsIds) if (!redditData.redgifsIds.includes(id)) redditData.redgifsIds.push(id);
+          // resolve redgifs ids to direct mp4/m3u8 via API (server-side with token)
+          for (const rid of redditData.redgifsIds.slice(0, 5)) {
+            try {
+              const resolved = await fetchRedgifsDirectUrlsViaApi(rid, log);
+              for (const rurl of resolved) {
+                const cleaned = stripByteRangeParams(rurl);
+                if (cleaned && !redgifsResolvedUrls.includes(cleaned)) redgifsResolvedUrls.push(cleaned);
+              }
+              // fallback: also try page-evaluate method if API failed
+              if (!resolved.length) {
+                const fallback = await fetchRedgifsMediaUrls(page, rid).catch(() => []);
+                for (const rurl of fallback) {
+                  const cleaned = stripByteRangeParams(rurl);
+                  if (cleaned && !redgifsResolvedUrls.includes(cleaned)) redgifsResolvedUrls.push(cleaned);
+                }
+              }
+            } catch {}
+          }
+          log(`Reddit hints: ${redditData.urls.length} URL(s), ${redditData.redgifsIds.length} redgifs id(s), ${redgifsResolvedUrls.length} resolved`);
+        }
+
         const allVideos = Array.from(
           new Set([
             ...domVideos,
@@ -682,8 +869,16 @@ async function run(options = {}) {
             ...extractedXvideosUrls,
             ...xhamsterData.urls,
             ...pornhubData.urls,
+            ...(isRedditTarget ? redditData.urls : []),
+            ...(isRedditTarget ? redgifsResolvedUrls : []),
           ])
         );
+        // Reddit: early photo-only skip if JSON indicated not video
+        if (isRedditTarget && redditIsVideoPost === false) {
+          log("No video/GIF found — photo-only, skipped.");
+          failedTargets.push({ url: targetUrl, reason: "No video/GIF found — photo-only, skipped." });
+          continue;
+        }
         log(`\n=== Video/Media URLs found for ${targetUrl} ===`);
         if (!allVideos.length) {
           log("No video media URLs detected.");
@@ -693,23 +888,53 @@ async function run(options = {}) {
         }
         allVideos.forEach((u, i) => log(`${i + 1}. ${u}`));
 
+        // For reddit, allow .gif via forceInclude (video/GIF only, photos skipped)
+        let forceIncludeForReddit = null;
+        if (isRedditTarget) {
+          const gifSet = new Set();
+          for (const u of allVideos) {
+            if (isGifUrl(u) || /preview\.redd\.it.*format=mp4/i.test(u)) {
+              gifSet.add(stripByteRangeParams(u));
+            }
+          }
+          forceIncludeForReddit = gifSet;
+        }
+
         const downloadableUrls = extractDownloadableVideoUrls(allVideos, {
           qualityByUrl: new Map([
             ...xhamsterData.qualityByUrl,
             ...pornhubData.qualityByUrl,
           ]),
+          ...(forceIncludeForReddit ? { forceIncludeUrls: forceIncludeForReddit } : {}),
         });
-        if (!downloadableUrls.length) {
+        // For reddit, filter to video/gif only (skip leftover image-only urls)
+        let filteredDownloadable = downloadableUrls;
+        if (isRedditTarget) {
+          filteredDownloadable = downloadableUrls.filter(
+            (u) => isLikelyVideoUrl(u) || isGifUrl(u) || /preview\.redd\.it.*format=mp4/i.test(u)
+          );
+          if (!filteredDownloadable.length && downloadableUrls.length) {
+            log("No video/GIF candidate after filter — photo-only, skipped.");
+            failedTargets.push({ url: targetUrl, reason: "No video/GIF found — photo-only, skipped." });
+            continue;
+          }
+          if (filteredDownloadable.length !== downloadableUrls.length) {
+            log(`Reddit video/GIF filter: ${filteredDownloadable.length}/${downloadableUrls.length} kept`);
+          }
+        }
+        if (!filteredDownloadable.length) {
           log("\nNo downloadable direct or stream URL found.");
           await captureFailureSnapshot(page, targetUrl, "no-downloadable-url", log);
           failedTargets.push({ url: targetUrl, reason: "No downloadable direct or stream URL found." });
           continue;
         }
+        // replace downloadableUrls with filtered for reddit
+        const downloadableUrlsForFlow = isRedditTarget ? filteredDownloadable : downloadableUrls;
 
         const maxQuality = Number(parsed.maxQuality || 0);
         const qualityCappedUrls = !isInstagramTarget
-          ? applyMaxQualityLimit(downloadableUrls, maxQuality)
-          : downloadableUrls;
+          ? applyMaxQualityLimit(downloadableUrlsForFlow, maxQuality)
+          : downloadableUrlsForFlow;
 
         if (!qualityCappedUrls.length) {
           log(`\nNo downloadable media URL found at or below ${maxQuality}p.`);
@@ -721,9 +946,9 @@ async function run(options = {}) {
           continue;
         }
 
-        if (!isInstagramTarget && maxQuality > 0 && qualityCappedUrls.length !== downloadableUrls.length) {
+        if (!isInstagramTarget && maxQuality > 0 && qualityCappedUrls.length !== downloadableUrlsForFlow.length) {
           log(
-            `Applying non-Instagram max quality cap: ${maxQuality}p (${qualityCappedUrls.length}/${downloadableUrls.length} candidate URLs kept)`
+            `Applying non-Instagram max quality cap: ${maxQuality}p (${qualityCappedUrls.length}/${downloadableUrlsForFlow.length} candidate URLs kept)`
           );
         }
 
@@ -757,11 +982,17 @@ async function run(options = {}) {
             cookieByName.set(cookie.name, cookie.value);
           }
 
+          // For redgifs, reddit referer causes 403 — use redgifs origin
+          const isRedgifsCandidate = /redgifs\.com/i.test(String(candidateUrl || ""));
           const headers = {
             "user-agent": userAgent,
-            referer: targetUrl,
+            referer: isRedgifsCandidate ? "https://www.redgifs.com/" : targetUrl,
           };
-          if (requestOrigin) headers.origin = requestOrigin;
+          if (isRedgifsCandidate) {
+            headers.origin = "https://www.redgifs.com";
+          } else if (requestOrigin) {
+            headers.origin = requestOrigin;
+          }
 
           const cookieHeader = Array.from(cookieByName.entries())
             .map(([name, value]) => `${name}=${value}`)
@@ -772,7 +1003,7 @@ async function run(options = {}) {
         };
 
         let filePrefix = "media";
-        if (!isInstagramTarget) {
+        if (!isInstagramTarget && !isRedditTarget) {
           const title = await page.evaluate(() => document.title || "");
           const normalized = sanitizeFileToken(title) || "media";
           filePrefix = normalized;
@@ -784,6 +1015,20 @@ async function run(options = {}) {
             (await getInstagramUsername(page));
           const postId = instagramShortcode || "post";
           filePrefix = username ? `${username}-${postId}` : `instagram-${postId}`;
+        }
+        if (isRedditTarget) {
+          const title = await page.evaluate(() => document.title || "");
+          let subreddit = "";
+          try {
+            const u = new URL(targetUrl);
+            const m = u.pathname.match(/\/r\/([^/]+)\//i);
+            if (m) subreddit = sanitizeFileToken(m[1]);
+          } catch {}
+          const postIdPart = redditPostId || "post";
+          const titleToken = sanitizeFileToken(title).slice(0, 30);
+          if (subreddit) filePrefix = `${subreddit}-${postIdPart}`;
+          else if (titleToken) filePrefix = `${titleToken}-${postIdPart}`;
+          else filePrefix = `reddit-${postIdPart}`;
         }
 
         let result = null;
@@ -802,7 +1047,9 @@ async function run(options = {}) {
             )
           : isXhamsterTarget
             ? prioritizeXhamsterCandidates(qualityCappedUrls, xhamsterData.qualityByUrl)
-            : qualityCappedUrls;
+            : isRedditTarget
+              ? prioritizeRedditCandidates(qualityCappedUrls)
+              : qualityCappedUrls;
 
         let candidatesToTry = primaryCandidates.length ? primaryCandidates : qualityCappedUrls;
 
@@ -855,7 +1102,7 @@ async function run(options = {}) {
                 headers,
                 filePrefix,
                 {
-                  includeTimestamp: !isInstagramTarget,
+                  includeTimestamp: !isInstagramTarget && !isRedditTarget,
                   onProgress: (p) => onProgress({ ...p, stage: p.stage || "downloading", candidate }),
                 }
               );

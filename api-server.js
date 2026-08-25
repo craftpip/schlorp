@@ -139,11 +139,12 @@ function wsBroadcastProgress(id, stage, pct, detail, filePath) {
 function wsBroadcastLog(id, chunk) {
   wsBroadcast({ type: "job:log", id, chunk });
 }
-async function queueAddUrls(urls, folder, maxQuality) {
+async function queueAddUrls(urls, folder, maxQuality, account) {
   if (!queueLoaded) await loadWebQueue();
   const now = Date.now();
   const added = [];
   const seen = new Set();
+  const acct = normalizeAccountName(account || "default");
   // only skip what is literally in-flight right now; everything else queues visibly
   for (const it of webQueue.active) {
     const u1 = it.url ? normalizeSyncUrl(it.url) : "";
@@ -167,6 +168,7 @@ async function queueAddUrls(urls, folder, maxQuality) {
       link: url,
       folder: String(folder || "").trim(),
       maxQuality: maxQuality ?? null,
+      account: acct,
       status: "queued",
       stage: "queued",
       pct: 0,
@@ -332,6 +334,9 @@ async function queueWorkerLoop() {
     };
     let browser = null;
     let hlsTimer = null;
+    const queueAccount = normalizeAccountName(nextItem.account || "default");
+    const queueIsDefault = queueAccount === "default";
+    const queueRecycle = queueIsDefault ? closeSharedBrowser : () => closeBrowserForAccount(queueAccount);
     const startHlsTick = () => {
       if (hlsTimer) return;
       hlsTimer = setInterval(() => {
@@ -345,7 +350,12 @@ async function queueWorkerLoop() {
     const stopHlsTick = () => { if (hlsTimer) clearInterval(hlsTimer); hlsTimer = null; };
     try {
       logToWs("[queue] preparing browser...");
-      browser = await getSharedBrowser(logToWs);
+      if (queueAccount !== "default") {
+        browser = await getBrowserForAccount(queueAccount, `queue-${nextItem.id}`);
+        logToWs(`[queue] using account "${queueAccount}" browser`);
+      } else {
+        browser = await getSharedBrowser(logToWs);
+      }
       logToWs("[queue] browser ready, starting scan...");
       nextItem.stage = "navigating";
       nextItem.pct = 20;
@@ -357,6 +367,7 @@ async function queueWorkerLoop() {
           outputDir,
           maxQuality,
           browser,
+          account: queueAccount,
           autoContinuePrompts: true,
           waitForCompletionPrompt: false,
           log: logToWs,
@@ -405,7 +416,7 @@ async function queueWorkerLoop() {
           jobId,
           jobType: "queue",
           log: logToWs,
-          recycleBrowser: closeSharedBrowser,
+          recycleBrowser: queueRecycle,
         }
       );
       const failed = Array.isArray(result?.failedTargets) ? result.failedTargets : [];
@@ -429,9 +440,15 @@ async function queueWorkerLoop() {
       nextItem.error = msg;
       nextItem.finishedAt = new Date().toISOString();
       logToWs(`[queue] failed: ${msg}`);
-      if (sharedBrowser && sharedBrowser.isConnected && !sharedBrowser.isConnected()) {
-        await closeSharedBrowser();
-      }
+      // recycle per-account or shared browser if disconnected
+      try {
+        if (queueAccount !== "default") {
+          const b = browsersByAccount.get(queueAccount);
+          if (b && b.isConnected && !b.isConnected()) await closeBrowserForAccount(queueAccount, b);
+        } else if (sharedBrowser && sharedBrowser.isConnected && !sharedBrowser.isConnected()) {
+          await closeSharedBrowser();
+        }
+      } catch {}
     } finally {
       stopHlsTick();
       queueActiveJob = null;
@@ -1324,12 +1341,22 @@ app.post("/download", async (req, res) => {
 
   let outputDir = mediaDir;
   let maxQuality = null;
+  let folder = "";
   try {
-    const folder = String(req.body?.folder || req.query?.folder || "").trim();
+    folder = String(req.body?.folder || req.query?.folder || "").trim();
     outputDir = resolveMediaOutputDir(folder);
     maxQuality = resolveMaxQuality(req.body?.maxQuality ?? req.query?.maxQuality);
   } catch (error) {
     return res.status(400).json({ ok: false, error: error.message });
+  }
+  const account = normalizeAccountName(req.body?.account || req.query?.account || folder === "reddit" ? "elk" : "default");
+  // check manual browser for that account
+  const manualForAccount = manualBrowsersByAccount.get(account);
+  if (manualForAccount && manualForAccount.browser && manualForAccount.browser.isConnected && manualForAccount.browser.isConnected()) {
+    return res.status(409).json({
+      ok: false,
+      error: `A manual browser is open on account "${account}". Close it before downloading.`,
+    });
   }
 
   const jobId = ++jobCounter;
@@ -1367,9 +1394,13 @@ app.post("/download", async (req, res) => {
 
   try {
     logToClientAndConsole("[api] preparing browser...");
-    const browser = await getSharedBrowser(logToClientAndConsole);
-    logToClientAndConsole("[api] browser ready, starting scan...\n");
+    const isDefaultAccount = account === "default";
+    const browser = isDefaultAccount
+      ? await getSharedBrowser(logToClientAndConsole)
+      : await getBrowserForAccount(account, `download-${jobId}`);
+    logToClientAndConsole(`[api] browser ready (${account}), starting scan...\n`);
 
+    const recycle = isDefaultAccount ? closeSharedBrowser : () => closeBrowserForAccount(account);
     const result = await runWithJobTimeout(
       run({
         urls: [link],
@@ -1377,6 +1408,7 @@ app.post("/download", async (req, res) => {
         outputDir,
         maxQuality,
         browser,
+        account,
         autoContinuePrompts: true,
         waitForCompletionPrompt: false,
         log: logToClientAndConsole,
@@ -1386,7 +1418,7 @@ app.post("/download", async (req, res) => {
         jobId,
         jobType: "download",
         log: logToClientAndConsole,
-        recycleBrowser: closeSharedBrowser,
+        recycleBrowser: recycle,
       }
     );
 
@@ -1402,9 +1434,14 @@ app.post("/download", async (req, res) => {
     console.error(`[scan:${jobId}] failed: ${message}`);
     logToClientAndConsole(`\n[api] process failed: ${message}`);
 
-    if (sharedBrowser && sharedBrowser.isConnected && !sharedBrowser.isConnected()) {
-      await closeSharedBrowser();
-    }
+    try {
+      if (account !== "default") {
+        const b = browsersByAccount.get(account);
+        if (b && b.isConnected && !b.isConnected()) await closeBrowserForAccount(account, b);
+      } else if (sharedBrowser && sharedBrowser.isConnected && !sharedBrowser.isConnected()) {
+        await closeSharedBrowser();
+      }
+    } catch {}
   } finally {
     activeJob = null;
     if (!res.writableEnded) {
@@ -1505,7 +1542,7 @@ app.post("/scan-saved", async (req, res) => {
     const foundCount = Array.isArray(result.urls) ? result.urls.length : 0;
     let collectInfo = null;
     if (folderParam) {
-      collectInfo = await crawlCollectAndQueue(targetUrl, folderParam, result.urls, foundCount);
+      collectInfo = await crawlCollectAndQueue(targetUrl, folderParam, result.urls, foundCount, account);
       wsBroadcast({ type: "crawl:progress", url: targetUrl, stage: "done", detail: `Found ${foundCount} · queued ${collectInfo.added}`, count: foundCount });
       console.log(`[scan-saved:${jobId}] ${folderParam}: found=${foundCount} new=${collectInfo.newCount} queued=${collectInfo.added} alreadyPending=${collectInfo.skippedPending}`);
     } else {
@@ -1516,7 +1553,7 @@ app.post("/scan-saved", async (req, res) => {
         const key = String(targetUrl).trim();
         if (st.lists[key] || (Array.isArray(st.config?.savedLists) && st.config.savedLists.some((l) => String(l.url).trim() === key))) {
           const resultUrls = Array.isArray(result.urls) ? result.urls.map((u) => String(u).trim()) : [];
-          const firstPostUrl = resultUrls.find((u) => /instagram\.com\/(?:p|reel|tv)\//i.test(u)) || "";
+          const firstPostUrl = resultUrls.find((u) => /instagram\.com\/(?:p|reel|tv)\//i.test(u) || /reddit\.com\/r\/[^/]+\/comments\//i.test(u)) || resultUrls[0] || "";
           st.lists[key] = { ...(st.lists[key] || {}), ...(firstPostUrl ? { lastSeenUrl: firstPostUrl } : {}), lastRunAt: new Date().toISOString(), lastScannedCount: foundCount, folder: st.lists[key]?.folder || "" };
           if (st.lists[key].paused) { delete st.lists[key].paused; delete st.lists[key].lastError; delete st.lists[key].lastErrorAt; }
           await writeStateFile(st);
@@ -1561,12 +1598,13 @@ app.post("/queue/add", async (req, res) => {
         ? req.body.links
         : [];
   const folder = String(req.body?.folder || "").trim();
+  const account = String(req.body?.account || "").trim() || "default";
   const maxQuality = req.body?.maxQuality ?? null;
   const link = String(req.body?.link || "").trim();
   const allUrls = link ? [link, ...urls] : urls;
   const normalized = allUrls.map((u) => String(u || "").trim()).filter(Boolean);
   if (!normalized.length) return res.status(400).json({ ok: false, error: "No URLs provided" });
-  const added = await queueAddUrls(normalized, folder, maxQuality);
+  const added = await queueAddUrls(normalized, folder, maxQuality, account);
   res.json({ ok: true, added: added.length, active: webQueue.active, completed: webQueue.completed });
 });
 app.post("/queue/remove", async (req, res) => {
@@ -1782,7 +1820,7 @@ async function backgroundSyncTick() {
           continue;
         }
         // filter to only new until lastSeen
-        const firstPostUrl = urls.find((u) => /instagram\.com\/(?:p|reel|tv)\//i.test(u)) || "";
+        const firstPostUrl = urls.find((u) => /instagram\.com\/(?:p|reel|tv)\//i.test(u) || /reddit\.com\/r\/[^/]+\/comments\//i.test(u)) || urls[0] || "";
         let newUrls = urls;
         if (lastSeen) {
           const idx = urls.findIndex((u) => normalizeSyncUrl(u) === normalizeSyncUrl(lastSeen));
@@ -1794,11 +1832,11 @@ async function backgroundSyncTick() {
           await writeStateFile(state);
           continue;
         }
-        const added = await queueAddUrls(newUrls, folder, null);
-        console.log(`[sync] ${folder} → ${newUrls.length} new, ${added} enqueued to web queue`);
+        const addedItems = await queueAddUrls(newUrls, folder, null, account);
+        console.log(`[sync] ${folder} → ${newUrls.length} new, ${addedItems.length} enqueued to web queue (account:${account})`);
         state.lists[targetUrl] = { ...(state.lists[targetUrl] || {}), ...(firstPostUrl ? { lastSeenUrl: firstPostUrl } : {}), lastRunAt: new Date().toISOString(), folder };
         await writeStateFile(state);
-        wsBroadcast({ type: "sync:tick", folder, added, total: newUrls.length });
+        wsBroadcast({ type: "sync:tick", folder, added: addedItems.length, total: newUrls.length });
       } catch (e) {
         const msg = e && e.message ? String(e.message) : String(e);
         const isRedirect = /redirected from saved page|Make sure this browser profile is logged/i.test(msg);
@@ -2094,7 +2132,7 @@ async function writeQueueFile(queue) {
 // One authority for the UI crawl flow: slice new items above the stored
 // lastSeenUrl, queue them into sync pending (skipping only URLs already in
 // that visible list), then advance lastSeenUrl to the newest post found.
-async function crawlCollectAndQueue(targetUrl, folder, scannedUrls, foundCount) {
+async function crawlCollectAndQueue(targetUrl, folder, scannedUrls, foundCount, account) {
   const urls = (Array.isArray(scannedUrls) ? scannedUrls : []).map((u) => String(u || "").trim()).filter(Boolean);
   const st = await readStateFile();
   const listState = st.lists[targetUrl] || {};
@@ -2112,18 +2150,19 @@ async function crawlCollectAndQueue(targetUrl, folder, scannedUrls, foundCount) 
     }
     let added = 0;
     let skippedPending = 0;
+    const acct = normalizeAccountName(account || "default");
     for (const url of newUrls) {
       const norm = normalizeSyncUrl(url);
       if (!norm) continue;
       if (pendingSet.has(norm)) { skippedPending += 1; continue; }
       pendingSet.add(norm);
-      queue.pending.push({ url, folder: String(folder || "").trim(), addedAt: new Date().toISOString() });
+      queue.pending.push({ url, folder: String(folder || "").trim(), account: acct, addedAt: new Date().toISOString() });
       added += 1;
     }
     await writeQueueFile(queue);
     return { added, skippedPending, pendingTotal: queue.pending.length };
   });
-  const firstPostUrl = urls.find((u) => /instagram\.com\/(?:p|reel|tv)\//i.test(u)) || "";
+  const firstPostUrl = urls.find((u) => /instagram\.com\/(?:p|reel|tv)\//i.test(u) || /reddit\.com\/r\/[^/]+\/comments\//i.test(u)) || urls[0] || "";
   try {
     const st2 = await readStateFile();
     st2.lists[targetUrl] = {
