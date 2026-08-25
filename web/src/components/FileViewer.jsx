@@ -56,6 +56,16 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const [muted, setMuted] = useState(() => { try { return localStorage.getItem("xdl_viewer_muted") === "1"; } catch { return false; } });
   const fmtTime = (s) => { if (!s || Number.isNaN(s)) return "0:00"; const m = Math.floor(s/60); const sec = String(Math.floor(s%60)).padStart(2,"0"); return `${m}:${sec}`; };
   const mediaUrl = effSrc;
+  const navRef = useRef(mediaUrl);
+  const [loadedUrl, setLoadedUrl] = useState(mediaUrl);
+  const loadTimerRef = useRef(null);
+  useEffect(() => {
+    navRef.current = mediaUrl;
+    if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
+    loadTimerRef.current = setTimeout(() => { if (navRef.current === mediaUrl) setLoadedUrl(mediaUrl); }, 350);
+    return () => { if (loadTimerRef.current) clearTimeout(loadTimerRef.current); };
+  }, [mediaUrl]);
+  const loading = mediaUrl !== loadedUrl;
   const titleEff = effTitle;
   const filePathEff = effFilePath;
   const urlEff = effUrl;
@@ -77,12 +87,12 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     else if (document.fullscreenElement) document.exitFullscreen().then(() => el.requestFullscreen().catch(() => {})).catch(() => {});
     else el.requestFullscreen().catch(() => {});
   };
-  useEffect(() => { if (videoRef.current) videoRef.current.playbackRate = rate; }, [rate, mediaUrl]);
-  useEffect(() => { if (videoRef.current) videoRef.current.muted = muted; }, [muted, mediaUrl]);
+  useEffect(() => { if (videoRef.current) videoRef.current.playbackRate = rate; }, [rate, loadedUrl]);
+  useEffect(() => { if (videoRef.current) videoRef.current.muted = muted; }, [muted, loadedUrl]);
   useEffect(() => { try { localStorage.setItem("xdl_viewer_muted", muted ? "1" : "0"); } catch {} }, [muted]);
   useEffect(() => { try { localStorage.setItem("xdl_viewer_rate", String(rate)); } catch {} }, [rate]);
   useEffect(() => { try { localStorage.setItem("xdl_viewer_seekFrames", seekFrames ? "1" : "0"); } catch {} }, [seekFrames]);
-  useEffect(() => { setZoom(1); setOrigin("50% 50%"); setPan({x:0,y:0}); setCurrent(0); setDuration(0); setTimeout(() => videoRef.current?.focus(), 50); }, [mediaUrl]);
+  useEffect(() => { setZoom(1); setOrigin("50% 50%"); setPan({x:0,y:0}); setCurrent(0); setDuration(0); setTimeout(() => videoRef.current?.focus(), 50); }, [loadedUrl]);
   useEffect(() => {
     const onFs = () => setIsFs(document.fullscreenElement === viewerRef.current);
     document.addEventListener("fullscreenchange", onFs);
@@ -390,18 +400,20 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
 }`}</style>
         <div ref={containerRef} onWheel={handleWheel} onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp} onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd} title={zoom>1 ? "Drag to pan · scroll to zoom" : "Scroll to zoom · drag to pan when zoomed · swipe up/down prev/next, left/right seek"} style={{ position: "relative", flex: "1 1 auto", minHeight: 0, overflow: "hidden", background: "#080a14", display: "flex", alignItems: "center", justifyContent: "center", padding: isImage ? 16 : 0, cursor: "default", touchAction: "none" }}>
           {zoom>1 && <span style={{ position: "absolute", top: 10, right: 10, zIndex: 3, background: "rgba(0,0,0,.6)", color: "#fff", padding: "4px 8px", borderRadius: 6, fontSize: 11, fontFamily: "var(--mono)" }}>{Math.round(zoom*100)}%</span>}
-          {isImage ? (
-            <img src={mediaUrl} alt={titleEff} onContextMenu={(e) => e.preventDefault()} draggable={false} style={{ width: "100%", height: "100%", objectFit: "contain", background: "#000", borderRadius: 0, transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: origin, transition: zoom===1 ? "transform 0.15s" : "none", WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none" }} />
+          {loading ? (
+            <div style={{ color: "var(--muted)", fontSize: 13 }}><i className="bi bi-hourglass-split" /> Loading…</div>
+          ) : isImage ? (
+            <img src={loadedUrl} alt={titleEff} onContextMenu={(e) => e.preventDefault()} draggable={false} style={{ width: "100%", height: "100%", objectFit: "contain", background: "#000", borderRadius: 0, transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: origin, transition: zoom===1 ? "transform 0.15s" : "none", WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none" }} />
           ) : isAudio ? (
             <div style={{ width: "100%", padding: 24, display: "grid", placeItems: "center" }}>
-              <audio key={mediaUrl} ref={videoRef} src={mediaUrl} autoPlay style={{ width: "100%", display: "none" }} onTimeUpdate={(e)=> setCurrent(e.currentTarget.currentTime)} onLoadedMetadata={(e)=> setDuration(e.currentTarget.duration)} onPlay={() => setIsPlaying(true)} onPause={() => setIsPlaying(false)} />
+              <audio key={loadedUrl} ref={videoRef} src={loadedUrl} autoPlay style={{ width: "100%", display: "none" }} onTimeUpdate={(e)=> setCurrent(e.currentTarget.currentTime)} onLoadedMetadata={(e)=> setDuration(e.currentTarget.duration)} onPlay={() => setIsPlaying(true)} onPause={() => setIsPlaying(false)} />
               <div style={{ width: "100%", textAlign: "center", color: "var(--muted)", fontSize: 13 }}><i className="bi bi-music-note-beamed" style={{ fontSize: 32, display: "block", marginBottom: 8 }} /> Audio playback — use controls below</div>
             </div>
           ) : (
             <video
-              key={mediaUrl}
+              key={loadedUrl}
               ref={videoRef}
-              src={mediaUrl}
+              src={loadedUrl}
               autoPlay
               playsInline
               preload="metadata"
