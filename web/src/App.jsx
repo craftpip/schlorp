@@ -42,10 +42,26 @@ export default function App() {
     e.preventDefault(); setPwErr("");
     const r = await fetch("/api/auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: pw }) });
     const j = await r.json().catch(() => ({}));
-    if (r.ok && j.ok) { localStorage.setItem("xdl_admin_pw", pw); localStorage.setItem("xdl_panel_pw", pw); setAuth({ checking: false, protected: true, authed: true }); setPw(""); }
+    if (r.ok && j.ok) { localStorage.setItem("xdl_admin_pw", pw); localStorage.setItem("xdl_panel_pw", pw); localStorage.setItem("xdl_last_activity", String(Date.now())); setAuth({ checking: false, protected: true, authed: true }); setPw(""); }
     else setPwErr(j.error || "Invalid password");
   };
-  const doLogout = () => { localStorage.removeItem("xdl_admin_pw"); localStorage.removeItem("xdl_panel_pw"); setAuth({ checking: false, protected: true, authed: false }); };
+  const doLogout = () => { localStorage.removeItem("xdl_admin_pw"); localStorage.removeItem("xdl_panel_pw"); localStorage.removeItem("xdl_last_activity"); setAuth({ checking: false, protected: true, authed: false }); };
+
+  useEffect(() => {
+    if (!auth.protected || !auth.authed) return;
+    const touch = () => { try { localStorage.setItem("xdl_last_activity", String(Date.now())); } catch {} };
+    const events = ["keydown", "click", "mousedown", "touchstart", "scroll"];
+    events.forEach((ev) => document.addEventListener(ev, touch, { passive: true }));
+    const check = () => {
+      try {
+        const last = Number(localStorage.getItem("xdl_last_activity") || 0);
+        if (last && Date.now() - last > 600000) doLogout();
+      } catch {}
+    };
+    const t = setInterval(check, 30000);
+    check();
+    return () => { events.forEach((ev) => document.removeEventListener(ev, touch)); clearInterval(t); };
+  }, [auth.protected, auth.authed]);
 
   useEffect(() => {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";

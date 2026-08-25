@@ -47,6 +47,9 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const dragRef = useRef({ dragging: false, startX: 0, startY: 0, origX: 0, origY: 0 });
   const wasPlayingRef = useRef(false);
   const shiftWasPlayingRef = useRef(false);
+  const jogRef = useRef(null);
+  const jogWasPlayingRef = useRef(false);
+
   const [current, setCurrent] = useState(0);
   const [duration, setDuration] = useState(0);
   const [seekFrames, setSeekFrames] = useState(() => { try { return localStorage.getItem("xdl_viewer_seekFrames") === "1"; } catch { return false; } });
@@ -242,10 +245,38 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
         e.preventDefault(); stepRate(0.1);
       } else if (isLeft) {
         if (isImage) { if (hasPrev) { e.preventDefault(); onPrev(); } else if (hasNext) { e.preventDefault(); onNext(); } }
-        else if (videoRef.current) { e.preventDefault(); const v = videoRef.current; const d = seekFrames ? 1/30 : 1; v.currentTime = Math.max(0, v.currentTime - d); }
+        else if (videoRef.current) {
+          e.preventDefault(); const v = videoRef.current;
+          if (e.shiftKey) {
+            v.currentTime = Math.max(0, v.currentTime - 5);
+          } else if (seekFrames) {
+            if (jogRef.current) { clearInterval(jogRef.current); jogRef.current = null; }
+            jogWasPlayingRef.current = !v.paused;
+            v.pause();
+            let steps = 0; const max = 30;
+            jogRef.current = setInterval(() => {
+              if (steps >= max) { clearInterval(jogRef.current); jogRef.current = null; if (jogWasPlayingRef.current) { jogWasPlayingRef.current = false; v.play().catch(() => {}); } return; }
+              v.currentTime = Math.max(0, v.currentTime - 1/30); steps++;
+            }, 33 / rate);
+          } else { v.currentTime = Math.max(0, v.currentTime - 1); }
+        }
       } else if (isRight) {
         if (isImage) { if (hasNext) { e.preventDefault(); onNext(); } else if (hasPrev) { e.preventDefault(); onPrev(); } }
-        else if (videoRef.current) { e.preventDefault(); const v = videoRef.current; const d = seekFrames ? 1/30 : 1; v.currentTime = Math.min(duration || v.duration || Infinity, v.currentTime + d); }
+        else if (videoRef.current) {
+          e.preventDefault(); const v = videoRef.current;
+          if (e.shiftKey) {
+            v.currentTime = Math.min(duration || v.duration || Infinity, v.currentTime + 5);
+          } else if (seekFrames) {
+            if (jogRef.current) { clearInterval(jogRef.current); jogRef.current = null; }
+            jogWasPlayingRef.current = !v.paused;
+            v.pause();
+            let steps = 0; const max = 30;
+            jogRef.current = setInterval(() => {
+              if (steps >= max) { clearInterval(jogRef.current); jogRef.current = null; if (jogWasPlayingRef.current) { jogWasPlayingRef.current = false; v.play().catch(() => {}); } return; }
+              v.currentTime = Math.min(duration || v.duration || Infinity, v.currentTime + 1/30); steps++;
+            }, 33 / rate);
+          } else { v.currentTime = Math.min(duration || v.duration || Infinity, v.currentTime + 1); }
+        }
       } else if (isUp && hasPrev) { e.preventDefault(); onPrev(); }
       else if (isDown && hasNext) { e.preventDefault(); onNext(); }
     };
@@ -253,7 +284,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     const prev = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     return () => { document.removeEventListener("keydown", onKey); document.body.style.overflow = prev; };
-  }, [onClose, hasPrev, hasNext, onPrev, onNext, isImage, duration, seekFrames]);
+  }, [onClose, hasPrev, hasNext, onPrev, onNext, isImage, duration, seekFrames, rate]);
   const onCloseRef = useRef(onClose);
   useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
   useEffect(() => {
@@ -276,16 +307,16 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     };
     const onShiftUp = (e) => {
       if (e.key !== "Shift") return;
-      if (e.target && ((e.target.tagName === "INPUT" && e.target.type !== "range") || e.target.tagName === "TEXTAREA" || e.target.isContentEditable)) {
-        shiftWasPlayingRef.current = false;
-        return;
-      }
+      if (e.target && ((e.target.tagName === "INPUT" && e.target.type !== "range") || e.target.tagName === "TEXTAREA" || e.target.isContentEditable)) { shiftWasPlayingRef.current = false; return; }
       if (!shiftWasPlayingRef.current || !videoRef.current || isImage) { shiftWasPlayingRef.current = false; return; }
       shiftWasPlayingRef.current = false;
-      if (wasPlayingRef.current) return;
       videoRef.current.play().catch(() => {});
     };
-    const onBlur = () => { shiftWasPlayingRef.current = false; };
+    const stopJog = () => {
+      if (jogRef.current) { clearInterval(jogRef.current); jogRef.current = null; }
+      if (jogWasPlayingRef.current && videoRef.current) { jogWasPlayingRef.current = false; videoRef.current.play().catch(() => {}); }
+    };
+    const onBlur = () => { shiftWasPlayingRef.current = false; stopJog(); };
     window.addEventListener("keydown", onShiftDown);
     window.addEventListener("keyup", onShiftUp);
     window.addEventListener("blur", onBlur);
@@ -293,6 +324,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       window.removeEventListener("keydown", onShiftDown);
       window.removeEventListener("keyup", onShiftUp);
       window.removeEventListener("blur", onBlur);
+      stopJog();
     };
   }, [isImage]);
 
