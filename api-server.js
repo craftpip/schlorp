@@ -475,9 +475,8 @@ function ensureQueueWorker() {
 
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: false }));
-app.use("/media", express.static(mediaDir));
 
-// New React app at / (web/dist).
+// ---- Public: SPA assets (React app, must load before auth check) ----
 const fsSync = require("fs");
 app.use(express.static(webDistDir));
 app.get("/", (_req, res) => {
@@ -488,17 +487,162 @@ app.get("/", (_req, res) => {
   return res.status(503).send("web/dist not built — run npm run build in /web");
 });
 
+app.get("/health", (_req, res) => {
+  res.json({
+    ok: true,
+    shuttingDown,
+    busy: Boolean(activeJob || scanActiveJob || queueActiveJob),
+    browserReady: Boolean(sharedBrowser && sharedBrowser.isConnected && sharedBrowser.isConnected()),
+    accountBrowsersReady: Array.from(browsersByAccount.values()).filter(
+      (browser) => browser && browser.isConnected && browser.isConnected()
+    ).length,
+    manualBrowsers: Array.from(manualBrowsersByAccount.keys()),
+  });
+});
+
+app.get("/api/auth/status", (_req, res) => {
+  const pw = String(process.env.UI_PANEL_PASSWORD || process.env.ADMIN_PASSWORD || UI_PANEL_PASSWORD || "").trim();
+  res.json({ ok: true, protected: !!pw });
+});
+app.post("/api/auth", (req, res) => {
+  const expected = String(process.env.UI_PANEL_PASSWORD || process.env.ADMIN_PASSWORD || UI_PANEL_PASSWORD || "").trim();
+  if (!expected) return res.json({ ok: true });
+  const provided = String(req.body?.password || "").trim();
+  if (provided === expected) {
+    res.cookie("xdl_session", expected, { httpOnly: true, sameSite: "lax", path: "/" });
+    return res.json({ ok: true });
+  }
+  return res.status(401).json({ ok: false, error: "Invalid password" });
+});
+app.post("/api/auth/logout", (_req, res) => {
+  res.clearCookie("xdl_session", { path: "/" });
+  res.json({ ok: true });
+});
+
+// ---- VNC helpers (public status, protected control) ----
+const { exec: execCb } = require("child_process");
+const { promisify: _promisify } = require("util");
+const execAsync = _promisify(execCb);
+const fsSyncVnc = require("fs");
+
+let vncOpChain = Promise.resolve();
+function withVncLock(fn) {
+  let result, error;
+  const task = async () => {
+    try { result = await fn(); } catch (e) { error = e; }
+  };
+  vncOpChain = vncOpChain.then(task, task);
+  return vncOpChain.then(() => { if (error) throw error; return result; });
+}
+function isVncFlagEnabled() {
+  try {
+    if (fsSyncVnc.existsSync(VNC_FLAG_PATH)) return fsSyncVnc.readFileSync(VNC_FLAG_PATH, "utf8").trim() === "1";
+  } catch {}
+  return String(process.env.ENABLE_VNC || "0") === "1";
+}
+async function isVncProcessRunning() {
+  async function canConnect(port) {
+    try {
+      const net = require("net");
+      const ok = await new Promise((resolve) => {
+        const s = net.createConnection({ host: "127.0.0.1", port, timeout: 800 }, () => { s.end(); resolve(true); });
+        s.on("error", () => resolve(false));
+        s.on("timeout", () => { s.destroy(); resolve(false); });
+      });
+      return ok;
+    } catch { return false; }
+  }
+  const vncUp = await canConnect(VNC_PORT_NUM);
+  if (!vncUp) return false;
+  const novncUp = await canConnect(NOVNC_PORT_NUM);
+  return novncUp;
+}
+app.get("/vnc/status", async (_req, res) => {
+  const enabled = isVncFlagEnabled();
+  const running = await isVncProcessRunning();
+  res.json({ ok: true, enabled, running, vncPort: VNC_PORT_NUM, novncPort: NOVNC_PORT_NUM });
+});
+
+// ---- Auth middleware: everything below this line requires a password when set ----
+function parseCookies(header) {
+  const out = {};
+  if (!header) return out;
+  for (const part of header.split(";")) {
+    const [k, ...v] = part.split("=");
+    if (k) out[k.trim()] = decodeURIComponent(v.join("="));
+  }
+  return out;
+}
+app.use((req, res, next) => {
+  const expected = String(process.env.UI_PANEL_PASSWORD || process.env.ADMIN_PASSWORD || UI_PANEL_PASSWORD || "").trim();
+  if (!expected) return next();
+  // Public endpoints
+  if (req.path === "/api/auth/status" || req.path === "/api/auth" || req.path === "/health" || req.path.startsWith("/health") || req.path === "/vnc/status") return next();
+  // Check header auth, query param, or session cookie
+  const provided = String(req.headers["x-panel-password"] || req.headers["x-admin-password"] || req.headers["x-admin-token"] || req.query?.password || "");
+  if (provided === expected) return next();
+  const cookies = parseCookies(req.headers.cookie);
+  if (cookies.xdl_session === expected) return next();
+  // Unauthenticated browser GET → serve login page (index.html). API/POST → JSON 401.
+  if (req.method === "GET") {
+    const distIndex = path.join(webDistDir, "index.html");
+    return fsSync.existsSync(distIndex) ? res.sendFile(distIndex) : res.status(503).send("web/dist not built");
+  }
+  return res.status(401).json({ ok: false, error: "Password is required" });
+});
+
+// ---- Protected: media files, SPA page routes (React enforces auth client-side on hard reload) ----
 app.get("/scan-saved", (_req, res) => {
   res.redirect("/dashboard");
 });
+app.use("/media", express.static(mediaDir));
+function fileEntryTimes(stat) {
+  const birth =
+    stat.birthtime && Number.isFinite(stat.birthtimeMs) && stat.birthtimeMs > 0
+      ? stat.birthtime
+      : null;
+  const created = birth || stat.ctime || stat.mtime;
+  return {
+    mtime: stat.mtime.toISOString(),
+    created: created.toISOString(),
+  };
+}
 
-app.get("/api/media", async (req, res) => {
-  try {
-    const folder = String(req.query?.folder || "").trim();
-    const resolved = resolveMediaOutputDir(folder);
+async function walkMediaFlat(dir, relPrefix, out, depth) {
+  if (depth > 32) return;
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.isSymbolicLink()) continue;
+    const fullPath = path.join(dir, entry.name);
+    const rel = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) {
+      if (depth + 1 > 32) continue;
+      await walkMediaFlat(fullPath, rel, out, depth + 1);
+      continue;
+    }
+    let stat;
+    try {
+      stat = await fs.stat(fullPath);
+    } catch {
+      continue;
+    }
+    if (!stat.isFile()) continue;
+    out.push({
+      name: entry.name,
+      rel,
+      dir: false,
+      size: stat.size,
+      ...fileEntryTimes(stat),
+    });
+  }
+}
+
+async function listMediaDir(resolved, flat) {
+  const items = [];
+  if (flat) {
+    await walkMediaFlat(resolved, "", items, 0);
+  } else {
     const entries = await fs.readdir(resolved, { withFileTypes: true });
-    const items = [];
-
     for (const entry of entries) {
       const fullPath = path.join(resolved, entry.name);
       let stat;
@@ -511,17 +655,36 @@ app.get("/api/media", async (req, res) => {
         name: entry.name,
         dir: entry.isDirectory(),
         size: stat.size,
-        mtime: stat.mtime.toISOString(),
+        ...fileEntryTimes(stat),
       });
     }
-
     items.sort((a, b) => {
       if (a.dir !== b.dir) return a.dir ? -1 : 1;
       if (!a.dir && !b.dir) return new Date(b.mtime) - new Date(a.mtime);
       return a.name.localeCompare(b.name);
     });
+  }
+  const posterByStem = new Map();
+  for (const it of items) {
+    const m = /^(.*)-poster\.(jpe?g|png|webp|avif|gif)$/i.exec(it.rel || it.name);
+    if (m && !posterByStem.has(m[1].toLowerCase())) posterByStem.set(m[1].toLowerCase(), it);
+  }
+  for (const it of items) {
+    if (it.dir) continue;
+    const key = (it.rel || it.name).replace(/\.[^.]+$/, "").toLowerCase();
+    const poster = posterByStem.get(key);
+    it.thumb = poster ? (poster.rel || poster.name) : null;
+  }
+  return items;
+}
 
-    return res.json({ ok: true, folder, items });
+app.get("/api/media", async (req, res) => {
+  try {
+    const folder = String(req.query?.folder || "").trim();
+    const flat = String(req.query?.flat || "") === "1";
+    const resolved = resolveMediaOutputDir(folder);
+    const items = await listMediaDir(resolved, flat);
+    return res.json({ ok: true, folder, flat, items });
   } catch (error) {
     return res.status(400).json({ ok: false, error: error.message });
   }
@@ -545,64 +708,6 @@ app.delete("/api/media", async (req, res) => {
     return res.status(500).json({ ok: false, error: error.message });
   }
 });
-
-app.get("/health", (_req, res) => {
-  res.json({
-    ok: true,
-    shuttingDown,
-    busy: Boolean(activeJob || scanActiveJob || queueActiveJob),
-    browserReady: Boolean(sharedBrowser && sharedBrowser.isConnected && sharedBrowser.isConnected()),
-    accountBrowsersReady: Array.from(browsersByAccount.values()).filter(
-      (browser) => browser && browser.isConnected && browser.isConnected()
-    ).length,
-    manualBrowsers: Array.from(manualBrowsersByAccount.keys()),
-  });
-});
-
-// ---- VNC on-demand ----
-const { exec: execCb } = require("child_process");
-const { promisify: _promisify } = require("util");
-const execAsync = _promisify(execCb);
-const fsSyncVnc = require("fs");
-
-let vncOpChain = Promise.resolve();
-function withVncLock(fn) {
-  let result, error;
-  const task = async () => {
-    try { result = await fn(); } catch (e) { error = e; }
-  };
-  vncOpChain = vncOpChain.then(task, task);
-  return vncOpChain.then(() => { if (error) throw error; return result; });
-}
-function isVncFlagEnabled() {
-  try {
-    if (fsSyncVnc.existsSync(VNC_FLAG_PATH)) return fsSyncVnc.readFileSync(VNC_FLAG_PATH, "utf8").trim() === "1";
-  } catch {}
-  return String(process.env.ENABLE_VNC || "0") === "1";
-}
-async function isVncProcessRunning() {
-  // check both x11vnc (6777) and novnc (6778) via TCP; avoids pid file defunct false-positives
-  async function canConnect(port) {
-    try {
-      const net = require("net");
-      const ok = await new Promise((resolve) => {
-        const s = net.createConnection({ host: "127.0.0.1", port, timeout: 800 }, () => { s.end(); resolve(true); });
-        s.on("error", () => resolve(false));
-        s.on("timeout", () => { s.destroy(); resolve(false); });
-      });
-      return ok;
-    } catch { return false; }
-  }
-  const vncUp = await canConnect(VNC_PORT_NUM);
-  if (!vncUp) return false;
-  const novncUp = await canConnect(NOVNC_PORT_NUM);
-  return novncUp;
-}
-app.get("/vnc/status", async (_req, res) => {
-  const enabled = isVncFlagEnabled();
-  const running = await isVncProcessRunning();
-  res.json({ ok: true, enabled, running, vncPort: VNC_PORT_NUM, novncPort: NOVNC_PORT_NUM });
-});
 app.post("/vnc/enable", async (_req, res) => {
   try {
     await withVncLock(async () => {
@@ -624,33 +729,6 @@ app.post("/vnc/disable", async (_req, res) => {
     });
     res.json({ ok: true, enabled: false, running: false });
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-});
-
-app.get("/api/auth/status", (_req, res) => {
-  const pw = String(process.env.UI_PANEL_PASSWORD || process.env.ADMIN_PASSWORD || UI_PANEL_PASSWORD || "").trim();
-  res.json({ ok: true, protected: !!pw });
-});
-app.post("/api/auth", (req, res) => {
-  const expected = String(process.env.UI_PANEL_PASSWORD || process.env.ADMIN_PASSWORD || UI_PANEL_PASSWORD || "").trim();
-  if (!expected) return res.json({ ok: true });
-  const provided = String(req.body?.password || "").trim();
-  if (provided === expected) return res.json({ ok: true });
-  return res.status(401).json({ ok: false, error: "Invalid password" });
-});
-// protect API when password set (except auth/health/vnc status)
-app.use((req, res, next) => {
-  const expected = String(process.env.UI_PANEL_PASSWORD || process.env.ADMIN_PASSWORD || UI_PANEL_PASSWORD || "").trim();
-  if (!expected) return next();
-  if (req.path === "/api/auth/status" || req.path === "/api/auth" || req.path === "/health" || req.path.startsWith("/health") || req.path === "/vnc/status") return next();
-  // SPA pages — must be reachable on hard reload without header; React will enforce auth via JS (trailing-slash tolerant)
-  {
-    const p = req.path.replace(/\/+$/, "") || "/";
-    if (req.method === "GET" && ["/", "/dashboard", "/collections", "/media", "/profiles", "/settings"].includes(p)) return next();
-  }
-  if (!req.path.startsWith("/api/") && !req.path.startsWith("/queue") && !req.path.startsWith("/sync-queue") && !req.path.startsWith("/sync-config") && !req.path.startsWith("/accounts") && !req.path.startsWith("/collections") && !req.path.startsWith("/scan-saved") && !req.path.startsWith("/download") && !req.path.startsWith("/media")) return next();
-  const provided = String(req.headers["x-panel-password"] || req.headers["x-admin-password"] || req.headers["x-admin-token"] || req.query?.password || "");
-  if (provided === expected) return next();
-  return res.status(401).json({ ok: false, error: "Password is required" });
 });
 
 app.get("/api/config", (_req, res) => {

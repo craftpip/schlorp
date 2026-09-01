@@ -29,7 +29,7 @@ function deriveTitleLocal(url, filePath) {
     return u.hostname.replace(/^www\./, "") + u.pathname.slice(0, 40);
   } catch { return url; }
 }
-export default function FileViewer({ src, title, filePath, url, file, viewable, idx, onPrev, onNext, onClose, onDeleted }) {
+export default function FileViewer({ src, title, filePath, url, file, viewable, idx, onPrev, onNext, onGoto, onClose, onDeleted }) {
   const effFilePath = filePath || file?.filePath || "";
   const effUrl = url || file?.url || "";
   const effSrc = src || (effFilePath ? toMediaUrlLocal(effFilePath) : "");
@@ -49,11 +49,21 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const shiftWasPlayingRef = useRef(false);
   const jogRef = useRef(null);
   const jogWasPlayingRef = useRef(false);
+  const jogGenRef = useRef(0);
 
   const [current, setCurrent] = useState(0);
   const [duration, setDuration] = useState(0);
   const [seekFrames, setSeekFrames] = useState(() => { try { return localStorage.getItem("xdl_viewer_seekFrames") === "1"; } catch { return false; } });
   const [muted, setMuted] = useState(() => { try { return localStorage.getItem("xdl_viewer_muted") === "1"; } catch { return false; } });
+  const [endMode, setEndMode] = useState(() => { try { const v = localStorage.getItem("xdl_viewer_endMode"); if (v === "stop") return "next"; if (v === "repeat" || v === "random") return v; return "none"; } catch { return "none"; } });
+  const [randHistory, setRandHistory] = useState([]);
+  const [randCursor, setRandCursor] = useState(-1);
+  const randHistoryRef = useRef([]);
+  const [yConfirm, setYConfirm] = useState(false);
+  const lastYRef = useRef(0);
+  const yConfirmTimerRef = useRef(null);
+  const doDeleteFileRef = useRef(null);
+  const randCursorRef = useRef(-1);
   const fmtTime = (s) => { if (!s || Number.isNaN(s)) return "0:00"; const m = Math.floor(s/60); const sec = String(Math.floor(s%60)).padStart(2,"0"); return `${m}:${sec}`; };
   const mediaUrl = effSrc;
   const navRef = useRef(mediaUrl);
@@ -61,8 +71,9 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const loadTimerRef = useRef(null);
   useEffect(() => {
     navRef.current = mediaUrl;
+    if (videoRef.current && !videoRef.current.paused) videoRef.current.pause();
     if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
-    loadTimerRef.current = setTimeout(() => { if (navRef.current === mediaUrl) setLoadedUrl(mediaUrl); }, 350);
+    loadTimerRef.current = setTimeout(() => { if (navRef.current === mediaUrl) setLoadedUrl(mediaUrl); }, 150);
     return () => { if (loadTimerRef.current) clearTimeout(loadTimerRef.current); };
   }, [mediaUrl]);
   const loading = mediaUrl !== loadedUrl;
@@ -73,6 +84,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const isVideo = /^(mp4|webm|mkv|mov|m4v|avi|mpg|mpeg|3gp|flv|ts|m3u8)$/i.test(ext);
   const isAudio = /^(mp3|m4a|aac|ogg|wav|flac|opus)$/i.test(ext);
   const isImage = /^(jpg|jpeg|png|gif|webp|bmp|avif)$/i.test(ext);
+  const isFormatKnown = isVideo || isAudio || isImage;
   const hasPrev = idx != null && idx > 0;
   const hasNext = idx != null && viewable && idx < viewable.length - 1;
   const total = viewable ? viewable.length : 0;
@@ -92,12 +104,136 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   useEffect(() => { try { localStorage.setItem("xdl_viewer_muted", muted ? "1" : "0"); } catch {} }, [muted]);
   useEffect(() => { try { localStorage.setItem("xdl_viewer_rate", String(rate)); } catch {} }, [rate]);
   useEffect(() => { try { localStorage.setItem("xdl_viewer_seekFrames", seekFrames ? "1" : "0"); } catch {} }, [seekFrames]);
-  useEffect(() => { setZoom(1); setOrigin("50% 50%"); setPan({x:0,y:0}); setCurrent(0); setDuration(0); setTimeout(() => videoRef.current?.focus(), 50); }, [loadedUrl]);
+  useEffect(() => { try { localStorage.setItem("xdl_viewer_endMode", endMode); } catch {} }, [endMode]);
+  useEffect(() => { setZoom(1); setOrigin("50% 50%"); setPan({x:0,y:0}); setCurrent(0); setDuration(0); setYConfirm(false); lastYRef.current = 0; if (yConfirmTimerRef.current) { clearTimeout(yConfirmTimerRef.current); yConfirmTimerRef.current = null; } setTimeout(() => videoRef.current?.focus(), 50); }, [loadedUrl]);
+  useEffect(() => () => { if (yConfirmTimerRef.current) clearTimeout(yConfirmTimerRef.current); }, []);
+  const navigatingViaRandomRef = useRef(false);
+  useEffect(() => {
+    if (navigatingViaRandomRef.current) { navigatingViaRandomRef.current = false; return; }
+    setRandHistory([]);
+    setRandCursor(-1);
+    randHistoryRef.current = [];
+    randCursorRef.current = -1;
+  }, [idx]);
   useEffect(() => {
     const onFs = () => setIsFs(document.fullscreenElement === viewerRef.current);
     document.addEventListener("fullscreenchange", onFs);
     return () => document.removeEventListener("fullscreenchange", onFs);
   }, []);
+  const endModeRef = useRef(endMode);
+  endModeRef.current = endMode;
+  const viewableRef = useRef(viewable);
+  viewableRef.current = viewable;
+  const idxRef = useRef(idx);
+  idxRef.current = idx;
+  const onGotoRef = useRef(onGoto);
+  onGotoRef.current = onGoto;
+  const onNextRef = useRef(onNext);
+  onNextRef.current = onNext;
+  const onPrevRef = useRef(onPrev);
+  onPrevRef.current = onPrev;
+  const hasNextRef = useRef(hasNext);
+  hasNextRef.current = hasNext;
+
+  const pickRandomDifferent = (total, exclude) => {
+    if (total <= 1) return exclude;
+    const r = Math.floor(Math.random() * (total - 1));
+    return r >= exclude ? r + 1 : r;
+  };
+
+  const dispatchNext = () => {
+    const v = viewableRef.current;
+    if (!v || !v.length) return;
+    if (endModeRef.current === "random") {
+      const cur = randCursorRef.current;
+      const hist = randHistoryRef.current;
+      if (cur < hist.length - 1) {
+        const next = cur + 1;
+        setRandCursor(next);
+        randCursorRef.current = next;
+        navigatingViaRandomRef.current = true;
+        onGotoRef.current(hist[next]);
+      } else {
+        const newIdx = pickRandomDifferent(v.length, idxRef.current);
+        const newHist = [...hist.slice(0, cur + 1), newIdx];
+        setRandHistory(newHist);
+        setRandCursor(cur + 1);
+        randHistoryRef.current = newHist;
+        randCursorRef.current = cur + 1;
+        navigatingViaRandomRef.current = true;
+        onGotoRef.current(newIdx);
+      }
+    } else {
+      onNextRef.current();
+    }
+  };
+
+  const dispatchPrev = () => {
+    const v = viewableRef.current;
+    if (!v || !v.length) return;
+    if (endModeRef.current === "random") {
+      const cur = randCursorRef.current;
+      const hist = randHistoryRef.current;
+      if (cur > 0) {
+        const prev = cur - 1;
+        setRandCursor(prev);
+        randCursorRef.current = prev;
+        navigatingViaRandomRef.current = true;
+        onGotoRef.current(hist[prev]);
+      } else {
+        const newIdx = pickRandomDifferent(v.length, idxRef.current);
+        const newHist = [newIdx, ...hist];
+        setRandHistory(newHist);
+        setRandCursor(0);
+        randHistoryRef.current = newHist;
+        randCursorRef.current = 0;
+        navigatingViaRandomRef.current = true;
+        onGotoRef.current(newIdx);
+      }
+    } else {
+      onPrevRef.current();
+    }
+  };
+
+  const dispatchNextRef = useRef(dispatchNext);
+  dispatchNextRef.current = dispatchNext;
+  const dispatchPrevRef = useRef(dispatchPrev);
+  dispatchPrevRef.current = dispatchPrev;
+
+  const handleVideoEndedRef = useRef(null);
+  handleVideoEndedRef.current = () => {
+    const mode = endModeRef.current;
+    const v = viewableRef.current;
+    const i = idxRef.current;
+    const hasN = hasNextRef.current;
+    setIsPlaying(false);
+    if (mode === "next") {
+      if (hasN) onNextRef.current();
+    } else if (mode === "repeat") {
+      if (videoRef.current) { videoRef.current.currentTime = 0; videoRef.current.play().catch(() => {}); }
+    } else if (mode === "random" && v && v.length > 1) {
+      const newIdx = pickRandomDifferent(v.length, i);
+      const cur = randCursorRef.current;
+      const hist = randHistoryRef.current;
+      const newHist = [...hist.slice(0, cur + 1), newIdx];
+      setRandHistory(newHist);
+      setRandCursor(cur + 1);
+      randHistoryRef.current = newHist;
+      randCursorRef.current = cur + 1;
+      navigatingViaRandomRef.current = true;
+      if (onGotoRef.current) onGotoRef.current(newIdx);
+    }
+  };
+  useEffect(() => {
+    const el = videoRef.current;
+    if (!el) return;
+    const handler = () => { if (handleVideoEndedRef.current) handleVideoEndedRef.current(); };
+    el.addEventListener("ended", handler);
+    return () => el.removeEventListener("ended", handler);
+  }, [loadedUrl]);
+  const cycleEndMode = () => setEndMode((m) => m === "none" ? "next" : m === "next" ? "repeat" : m === "repeat" ? "random" : "none");
+  const cycleEndModeRef = useRef(cycleEndMode);
+  cycleEndModeRef.current = cycleEndMode;
   const handleWheel = (e) => {
     if (e.shiftKey) {
       if ((isVideo || isAudio) && videoRef.current) {
@@ -211,11 +347,12 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     if (!t) return;
     const dx = t.clientX - touchRef.current.startX;
     const dy = t.clientY - touchRef.current.startY;
-    const wasNav = Math.abs(dy) > 25 && Math.abs(dy) > Math.abs(dx) && ((dy < 0 && hasNext) || (dy > 0 && hasPrev));
+    const isRandom = endModeRef.current === "random";
+    const wasNav = Math.abs(dy) > 25 && Math.abs(dy) > Math.abs(dx) && (isRandom ? total > 1 : ((dy < 0 && hasNext) || (dy > 0 && hasPrev)));
     if (wasNav) {
       wasPlayingRef.current = false;
-      if (dy < 0 && hasNext) onNext();
-      else if (dy > 0 && hasPrev) onPrev();
+      if (dy < 0) dispatchNextRef.current();
+      else if (dy > 0) dispatchPrevRef.current();
       return;
     }
     if (wasPlayingRef.current && videoRef.current && !isImage) {
@@ -239,12 +376,20 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
         e.preventDefault(); onClose();
       } else if (e.key.toLowerCase() === "f" && !e.ctrlKey && !e.altKey && !e.metaKey) {
         e.preventDefault(); toggleFullscreen();
+      } else if (e.key.toLowerCase() === "q" && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        e.preventDefault(); onClose();
       } else if (e.key.toLowerCase() === "e" && !e.ctrlKey && !e.altKey && !e.metaKey) {
         if (e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA" && !e.target.isContentEditable) { e.preventDefault(); setSeekFrames((v) => !v); }
       } else if ((e.code === "Space" || e.key === " " || e.key === "Spacebar") && !e.ctrlKey && !e.altKey && !e.metaKey) {
-        if (!isImage && videoRef.current) { e.preventDefault(); if (videoRef.current.paused) videoRef.current.play(); else videoRef.current.pause(); }
+        if (!isImage && videoRef.current) {
+          e.preventDefault();
+          if (jogRef.current) { clearInterval(jogRef.current); jogRef.current = null; jogWasPlayingRef.current = false; videoRef.current.pause(); }
+          else { if (videoRef.current.paused) videoRef.current.play(); else videoRef.current.pause(); }
+        }
        } else if (e.key.toLowerCase() === "m" && !e.ctrlKey && !e.altKey && !e.metaKey) {
         if (e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA" && !e.target.isContentEditable) { e.preventDefault(); setMuted((v) => !v); }
+      } else if (e.key.toLowerCase() === "r" && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        if (e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA" && !e.target.isContentEditable) { e.preventDefault(); cycleEndModeRef.current(); }
       } else if (e.key.toLowerCase() === "c" && !e.ctrlKey && !e.altKey && !e.metaKey) {
         if (e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA" && !e.target.isContentEditable) { e.preventDefault(); stepRate(-0.1); }
       } else if (e.key.toLowerCase() === "v" && !e.ctrlKey && !e.altKey && !e.metaKey) {
@@ -254,41 +399,59 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       } else if ((e.key === ">" || (e.key === "." && e.shiftKey)) && !e.ctrlKey && !e.altKey) {
         e.preventDefault(); stepRate(0.1);
       } else if (isLeft) {
-        if (isImage) { if (hasPrev) { e.preventDefault(); onPrev(); } else if (hasNext) { e.preventDefault(); onNext(); } }
+        if (isImage) { e.preventDefault(); dispatchPrevRef.current(); }
         else if (videoRef.current) {
           e.preventDefault(); const v = videoRef.current;
           if (e.shiftKey) {
             v.currentTime = Math.max(0, v.currentTime - 5);
           } else if (seekFrames) {
             if (jogRef.current) { clearInterval(jogRef.current); jogRef.current = null; }
-            jogWasPlayingRef.current = !v.paused;
+            else { jogWasPlayingRef.current = !v.paused; }
             v.pause();
+            const gen = ++jogGenRef.current;
             let steps = 0; const max = 30;
             jogRef.current = setInterval(() => {
-              if (steps >= max) { clearInterval(jogRef.current); jogRef.current = null; if (jogWasPlayingRef.current) { jogWasPlayingRef.current = false; v.play().catch(() => {}); } return; }
+              if (steps >= max || jogGenRef.current !== gen) { clearInterval(jogRef.current); if (jogGenRef.current === gen) { jogRef.current = null; if (jogWasPlayingRef.current) { jogWasPlayingRef.current = false; v.play().catch(() => {}); } } return; }
               v.currentTime = Math.max(0, v.currentTime - 1/30); steps++;
             }, 33 / rate);
           } else { v.currentTime = Math.max(0, v.currentTime - 1); }
         }
       } else if (isRight) {
-        if (isImage) { if (hasNext) { e.preventDefault(); onNext(); } else if (hasPrev) { e.preventDefault(); onPrev(); } }
+        if (isImage) { e.preventDefault(); dispatchNextRef.current(); }
         else if (videoRef.current) {
           e.preventDefault(); const v = videoRef.current;
           if (e.shiftKey) {
             v.currentTime = Math.min(duration || v.duration || Infinity, v.currentTime + 5);
           } else if (seekFrames) {
             if (jogRef.current) { clearInterval(jogRef.current); jogRef.current = null; }
-            jogWasPlayingRef.current = !v.paused;
+            else { jogWasPlayingRef.current = !v.paused; }
             v.pause();
+            const gen = ++jogGenRef.current;
             let steps = 0; const max = 30;
             jogRef.current = setInterval(() => {
-              if (steps >= max) { clearInterval(jogRef.current); jogRef.current = null; if (jogWasPlayingRef.current) { jogWasPlayingRef.current = false; v.play().catch(() => {}); } return; }
+              if (steps >= max || jogGenRef.current !== gen) { clearInterval(jogRef.current); if (jogGenRef.current === gen) { jogRef.current = null; if (jogWasPlayingRef.current) { jogWasPlayingRef.current = false; v.play().catch(() => {}); } } return; }
               v.currentTime = Math.min(duration || v.duration || Infinity, v.currentTime + 1/30); steps++;
             }, 33 / rate);
           } else { v.currentTime = Math.min(duration || v.duration || Infinity, v.currentTime + 1); }
         }
-      } else if (isUp && hasPrev) { e.preventDefault(); onPrev(); }
-      else if (isDown && hasNext) { e.preventDefault(); onNext(); }
+      } else if (isUp) { if (endModeRef.current === "random" || hasPrev) { e.preventDefault(); dispatchPrevRef.current(); } }
+      else if (isDown) { if (endModeRef.current === "random" || hasNext) { e.preventDefault(); dispatchNextRef.current(); } }
+      else if (e.key.toLowerCase() === "y" && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        if (e.repeat) return;
+        e.preventDefault();
+        const now = Date.now();
+        if (now - lastYRef.current < 600) {
+          lastYRef.current = 0;
+          setYConfirm(false);
+          if (yConfirmTimerRef.current) { clearTimeout(yConfirmTimerRef.current); yConfirmTimerRef.current = null; }
+          if (doDeleteFileRef.current) doDeleteFileRef.current();
+        } else {
+          lastYRef.current = now;
+          setYConfirm(true);
+          if (yConfirmTimerRef.current) clearTimeout(yConfirmTimerRef.current);
+          yConfirmTimerRef.current = setTimeout(() => { setYConfirm(false); lastYRef.current = 0; yConfirmTimerRef.current = null; }, 600);
+        }
+      }
     };
     document.addEventListener("keydown", onKey);
     const prev = document.body.style.overflow;
@@ -338,24 +501,31 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     };
   }, [isImage]);
 
-  const handleDelete = async () => {
+  const doDeleteFile = async () => {
     const { folder, base } = parseFolderBase(filePathEff);
     if (!base) return;
-    if (!confirm(`Delete "${base}"? This removes the file from /media.`)) return;
+    if (deleting) return;
     setDeleting(true);
     try {
       const r = await fetch(`/api/media?folder=${encodeURIComponent(folder)}&name=${encodeURIComponent(base)}`, { method: "DELETE" });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j.error || "delete failed");
-      const hadNext = hasNext;
-      const hadPrev = hasPrev;
-      if (hadNext) onNext();
-      else if (hadPrev) onPrev();
-      else onClose();
+      // Stay at current index: after deletion the next file slides into this position.
+      // Only navigate if we deleted the last item (no next) or it was the only file.
+      if (total <= 1) onClose();
+      else if (!hasNext && hasPrev) onPrev();
+      // else hasNext -> stay at same idx; onDeleted reload will make that idx point to next file
       if (onDeleted) onDeleted(filePathEff);
     } catch (e) { alert(e.message); }
     finally { setDeleting(false); }
   };
+  const handleDelete = async () => {
+    const { base } = parseFolderBase(filePathEff);
+    if (!base) return;
+    if (!confirm(`Delete "${base}"? This removes the file from /media.`)) return;
+    await doDeleteFile();
+  };
+  doDeleteFileRef.current = doDeleteFile;
 
   return (
     <div
@@ -370,18 +540,19 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       >
         <div className="fv-header" style={{ position: "absolute", top: 0, left: 0, right: 0, zIndex: 5, display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", background: "transparent", border: "none", pointerEvents: "none" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6, pointerEvents: "auto" }}>
-            <button type="button" tabIndex={-1} className="btn btn-sm" onClick={(e) => { e.stopPropagation(); onPrev(); }} onTouchStart={(e) => e.stopPropagation()} disabled={!hasPrev} title="Previous (↑)" style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}><i className="bi bi-chevron-up" /></button>
-            <span className="badge" style={{ fontFamily: "var(--mono)", fontSize: 11, minWidth: 54, justifyContent: "center", background: "rgba(0,0,0,.55)", border: "1px solid rgba(255,255,255,.18)", color: "#fff", backdropFilter: "blur(6px)" }}>{idx + 1} / {total}</span>
-            <button type="button" tabIndex={-1} className="btn btn-sm" onClick={(e) => { e.stopPropagation(); onNext(); }} onTouchStart={(e) => e.stopPropagation()} disabled={!hasNext} title="Next (↓)" style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}><i className="bi bi-chevron-down" /></button>
+            <button type="button" tabIndex={-1} className="btn btn-sm" onClick={(e) => { e.stopPropagation(); dispatchPrevRef.current(); }} onTouchStart={(e) => e.stopPropagation()} disabled={endMode !== "random" && !hasPrev} title="Previous (↑)" style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}><i className="bi bi-chevron-up" /></button>
+            <span className="badge" style={{ fontFamily: "var(--mono)", fontSize: 11, minWidth: 54, justifyContent: "center", background: "rgba(0,0,0,.55)", border: "1px solid rgba(255,255,255,.18)", color: "#fff", backdropFilter: "blur(6px)" }}>{endMode === "random" && randHistory.length > 1 ? `${randCursor + 1}/${randHistory.length} · ` : ""}{idx + 1} / {total}</span>
+            <button type="button" tabIndex={-1} className="btn btn-sm" onClick={(e) => { e.stopPropagation(); dispatchNextRef.current(); }} onTouchStart={(e) => e.stopPropagation()} disabled={endMode !== "random" && !hasNext} title="Next (↓)" style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}><i className="bi bi-chevron-down" /></button>
           </div>
           <span style={{ flex: 1 }} />
           <div style={{ display: "flex", alignItems: "center", gap: 8, pointerEvents: "auto" }}>
-            <button type="button" tabIndex={-1} onClick={handleDelete} disabled={deleting} className="btn btn-sm" aria-label="Delete file" title="Delete file" style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#ff8080", backdropFilter: "blur(6px)" }}><i className="bi bi-trash" /></button>
+            {yConfirm && <span style={{ fontSize: 11, fontWeight: 600, color: "#fff", background: "#ef4444", padding: "4px 8px", borderRadius: 999, border: "1px solid rgba(255,255,255,.2)", whiteSpace: "nowrap" }}>Press y again to confirm delete</span>}
+            <button type="button" tabIndex={-1} onClick={handleDelete} disabled={deleting} className="btn btn-sm" aria-label="Delete file" title={yConfirm ? "Press y again to confirm — or click to delete" : "Delete file (press y twice)"} style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: yConfirm ? "1px solid #ef4444" : "1px solid rgba(255,255,255,.18)", background: yConfirm ? "#ef4444" : "rgba(0,0,0,.55)", color: yConfirm ? "#fff" : "#ff8080", backdropFilter: "blur(6px)", animation: yConfirm ? "pulse 0.6s ease infinite" : "none" }}><i className="bi bi-trash" /></button>
             <button type="button" tabIndex={-1} onClick={onClose} className="btn btn-sm" aria-label="Close" style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}><i className="bi bi-x-lg" /></button>
           </div>
         </div>
 
-        <style>{`video::-webkit-media-controls-panel,video::-webkit-media-controls-enclosure{ background: transparent !important; background-image: none !important; box-shadow: none !important; } video::-webkit-media-controls-timeline{ background: transparent !important; }
+        <style>{`@keyframes pulse{0%{transform:scale(1)}50%{transform:scale(1.08)}100%{transform:scale(1)}} video::-webkit-media-controls-panel,video::-webkit-media-controls-enclosure{ background: transparent !important; background-image: none !important; box-shadow: none !important; } video::-webkit-media-controls-timeline{ background: transparent !important; }
 @media (max-width: 640px){
   .fv-header{ padding: 6px 8px !important; gap: 4px !important; }
   .fv-header .btn{ padding: 3px 6px !important; font-size: 10px !important; }
@@ -409,7 +580,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
               <audio key={loadedUrl} ref={videoRef} src={loadedUrl} autoPlay style={{ width: "100%", display: "none" }} onTimeUpdate={(e)=> setCurrent(e.currentTarget.currentTime)} onLoadedMetadata={(e)=> setDuration(e.currentTarget.duration)} onPlay={() => setIsPlaying(true)} onPause={() => setIsPlaying(false)} />
               <div style={{ width: "100%", textAlign: "center", color: "var(--muted)", fontSize: 13 }}><i className="bi bi-music-note-beamed" style={{ fontSize: 32, display: "block", marginBottom: 8 }} /> Audio playback — use controls below</div>
             </div>
-          ) : (
+          ) : isFormatKnown ? (
             <video
               key={loadedUrl}
               ref={videoRef}
@@ -426,14 +597,24 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
               onPlay={() => setIsPlaying(true)}
               onPause={() => setIsPlaying(false)}
             />
+          ) : (
+            <div style={{ width: "100%", padding: 24, display: "grid", placeItems: "center", color: "var(--muted)", fontSize: 13 }}>
+              <div style={{ textAlign: "center" }}>
+                <i className="bi bi-file-earmark-x" style={{ fontSize: 32, display: "block", marginBottom: 8 }} />
+                Cannot preview <span style={{ fontFamily: "var(--mono)" }}>{ext ? ext : "unknown"}</span> in the browser.
+                <div style={{ marginTop: 12 }}>
+                  <a href={loadedUrl} target="_blank" rel="noopener noreferrer" download className="btn btn-sm btn-outline-secondary"><i className="bi bi-download" /> Open / download original</a>
+                </div>
+              </div>
+            </div>
           )}
         </div>
 
         <div className="fv-controls" style={{ padding: "8px 10px", borderTop: "1px solid var(--border)", background: "var(--surface)", display: "grid", gap: 6 }}>
-          {!isImage && (
+          {(isVideo || isAudio) && (
             <div className="fv-timeline" style={{ display: "flex", alignItems: "center", gap: 6 }}>
               <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--muted)", minWidth: 32 }}>{fmtTime(current)}</span>
-              <input type="range" tabIndex={-1} min={0} max={duration || 0} step={0.1} value={current} onChange={(e)=> { const v=parseFloat(e.target.value); if(videoRef.current){ videoRef.current.currentTime=v; setCurrent(v);} }} style={{ flex: 1, accentColor: "#6366f1", height: 4 }} />
+              <input type="range" tabIndex={-1} min={0} max={duration || 0} step={0.1} value={current} onChange={(e)=> { const v=parseFloat(e.target.value); if(videoRef.current){ videoRef.current.currentTime=v; setCurrent(v);} }} onMouseUp={(e)=>e.target.blur()} onTouchEnd={(e)=>e.target.blur()} style={{ flex: 1, accentColor: "#6366f1", height: 4 }} />
               <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--muted)", minWidth: 32 }}>{fmtTime(duration)}</span>
               <button type="button" tabIndex={-1} className="btn btn-sm btn-outline-secondary" onClick={toggleFullscreen} title="Fullscreen (f)" style={{ padding: "4px 8px", fontSize: 11 }}><i className="bi bi-arrows-fullscreen" /></button>
             </div>
@@ -441,15 +622,18 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
           <div className="fv-speed" style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
             <span className="badge text-bg-primary" style={{ fontFamily: "var(--mono)", fontSize: 10, padding: "2px 6px" }}>{rate.toFixed(1)}×</span>
             <div style={{ display: "flex", alignItems: "center", gap: 4, marginLeft: 4 }}>
-              <input type="range" tabIndex={-1} min="0.1" max="1" step="0.1" value={rate} onChange={(e) => setRate(parseFloat(e.target.value))} style={{ width: 90, accentColor: "#6366f1", height: 4 }} />
+              <input type="range" tabIndex={-1} min="0.1" max="1" step="0.1" value={rate} onChange={(e) => setRate(parseFloat(e.target.value))} onMouseUp={(e)=>e.target.blur()} onTouchEnd={(e)=>e.target.blur()} style={{ width: 90, accentColor: "#6366f1", height: 4 }} />
             </div>
             <div style={{ display: "flex", gap: 3, alignItems: "center", border: "1px solid var(--border)", borderRadius: 6, padding: 2, background: "var(--surface-2)" }}>
               <button type="button" tabIndex={-1} onClick={() => setSeekFrames(false)} className={`btn btn-sm ${!seekFrames ? "btn-primary" : "btn-outline-secondary"}`} style={{ padding: "2px 6px", fontSize: 11, minWidth: 32 }} title="Seek by 1 second (←/→)">1s</button>
               <button type="button" tabIndex={-1} onClick={() => setSeekFrames(true)} className={`btn btn-sm ${seekFrames ? "btn-primary" : "btn-outline-secondary"}`} style={{ padding: "2px 6px", fontSize: 11, minWidth: 32 }} title="Seek by 1 frame (~33ms)">1f</button>
             </div>
             <span style={{ flex: 1 }} />
-            {!isImage && (
-              <div style={{ display: "flex", gap: 4 }}>
+            {(isVideo || isAudio) && (
+              <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                <button type="button" tabIndex={-1} className="btn btn-sm" onClick={cycleEndMode} title={`End mode: ${endMode} (r)`} style={{ padding: "4px 6px", fontSize: 11, minWidth: 52, borderRadius: 6, border: "1px solid " + (endMode !== "none" ? "transparent" : "var(--border)"), background: endMode === "next" ? "#6366f1" : endMode === "repeat" ? "#10b981" : endMode === "random" ? "#8b5cf6" : "var(--surface-2)", color: endMode !== "none" ? "#fff" : "var(--muted)" }}>
+                  <i className={`bi ${endMode === "next" ? "bi-skip-forward-fill" : endMode === "repeat" ? "bi-repeat" : endMode === "random" ? "bi-shuffle" : "bi-arrow-repeat"}`} /> {endMode === "next" ? "Next" : endMode === "repeat" ? "Loop" : endMode === "random" ? "Shuffle" : "End"}
+                </button>
                 <button type="button" tabIndex={-1} className="btn btn-sm btn-outline-secondary" onClick={() => setMuted((m) => !m)} title={muted ? "Unmute (m)" : "Mute (m)"} style={{ color: muted ? "#f87171" : undefined, minWidth: 36, padding: "4px 6px", fontSize: 11 }}><i className={`bi ${muted ? "bi-volume-mute-fill" : "bi-volume-up-fill"}`} /></button>
                 <button type="button" tabIndex={-1} className="fv-10s btn btn-sm btn-outline-secondary" onClick={() => { if (videoRef.current) videoRef.current.currentTime = Math.max(0, videoRef.current.currentTime - 10); videoRef.current?.focus(); }} title="Back 10s" style={{ padding: "4px 6px", fontSize: 11 }}><i className="bi bi-skip-backward" /> 10s</button>
                 <button type="button" tabIndex={-1} className="btn btn-sm btn-primary" onClick={() => { if (!videoRef.current) return; if (videoRef.current.paused) videoRef.current.play(); else videoRef.current.pause(); videoRef.current?.focus(); }} style={{ padding: "4px 8px", fontSize: 11 }}>
