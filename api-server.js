@@ -12,6 +12,17 @@ const { WebSocketServer } = require("ws");
 const http = require("http");
 const { EventEmitter } = require("events");
 
+const ffmpegBin =
+  process.env.FFMPEG_BIN ||
+  (() => {
+    try {
+      require("child_process").execSync("which ffmpeg", { stdio: "ignore" });
+      return "ffmpeg";
+    } catch {
+      return null;
+    }
+  })();
+
 const app = express();
 const rootDir = __dirname;
 const mediaDir = path.join(rootDir, "media");
@@ -708,6 +719,73 @@ app.delete("/api/media", async (req, res) => {
     return res.status(500).json({ ok: false, error: error.message });
   }
 });
+// --- GIF → MP4 streaming conversion (cache in tmp, single-flight per key) ---
+const gifCacheDir = path.join(require("os").tmpdir(), "xdl-gifcache");
+const gifInFlight = new Map();
+const { spawn } = require("child_process");
+const crypto = require("crypto");
+
+app.get("/api/gifvideo", async (req, res) => {
+  try {
+    if (!ffmpegBin) {
+      return res.status(500).json({ ok: false, error: "ffmpeg not installed" });
+    }
+    const folder = String(req.query?.folder || "");
+    const name = String(req.query?.name || "");
+    if (!name || !/\.gif$/i.test(name)) {
+      return res.status(400).json({ ok: false, error: "name must be a .gif file" });
+    }
+    const dir = resolveMediaOutputDir(folder);
+    const srcPath = path.join(dir, name);
+    const rel = path.relative(mediaDir, srcPath);
+    if (rel.startsWith("..") || path.isAbsolute(rel)) {
+      return res.status(400).json({ ok: false, error: "invalid path" });
+    }
+    const stat = await fs.stat(srcPath).catch(() => null);
+    if (!stat) return res.status(404).json({ ok: false, error: "not found" });
+    if (!stat.isFile()) return res.status(400).json({ ok: false, error: "not a file" });
+
+    const key = `${stat.mtimeMs}:${rel}`;
+    const hash = crypto.createHash("sha1").update(key).digest("hex").slice(0, 20);
+    const outPath = path.join(gifCacheDir, `${hash}.mp4`);
+
+    if (!fsSync.existsSync(outPath)) {
+      const existing = gifInFlight.get(hash);
+      if (existing) {
+        await existing.catch(() => {});
+      } else {
+        const job = (async () => {
+          await fs.mkdir(gifCacheDir, { recursive: true });
+          await new Promise((resolve, reject) => {
+            const cp = spawn(ffmpegBin, ["-y", "-i", srcPath, "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-movflags", "+faststart", "-pix_fmt", "yuv420p", outPath], {
+              stdio: "ignore",
+            });
+            const timer = setTimeout(() => cp.kill("SIGKILL"), 180000);
+            cp.on("error", reject);
+            cp.on("close", (code) => {
+              clearTimeout(timer);
+              code === 0 ? resolve() : reject(new Error(`ffmpeg exited with code ${code}`));
+            });
+          });
+          await fs.mkdir(gifCacheDir, { recursive: true });
+        })();
+        gifInFlight.set(hash, job);
+        try {
+          await job;
+        } catch (error) {
+          await fs.unlink(outPath).catch(() => {});
+          throw error;
+        } finally {
+          gifInFlight.delete(hash);
+        }
+      }
+    }
+    return res.sendFile(outPath);
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
 app.post("/vnc/enable", async (_req, res) => {
   try {
     await withVncLock(async () => {

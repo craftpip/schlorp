@@ -72,12 +72,14 @@ async function launchBrowser(userDataDir, profileDir, options = {}) {
     "--no-sandbox",
     "--disable-setuid-sandbox",
     `--profile-directory=${profileDir}`,
+    "--start-maximized",
   ];
 
   const cbOptions = {
     headless,
     args,
     userDataDir,
+    defaultViewport: null,
   };
 
   try {

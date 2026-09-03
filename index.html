@@ -935,25 +935,21 @@
                 <button id="media-refresh" class="btn btn-outline-secondary" type="button"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
               </div>
             </div>
-            <div class="card">
-              <div class="card-body">
-                <nav class="small" aria-label="breadcrumb" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:10px">
-                  <span class="crumb-link" data-media-path="" style="display:inline-flex;align-items:center;gap:6px;background:var(--surface-2);padding:4px 10px;border-radius:999px;border:1px solid var(--border)"><i class="bi bi-house"></i> Media</span>
-                  <span id="media-crumbs" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap"></span>
-                </nav>
-                <div id="media-before" class="d-none" style="margin-bottom:10px">
-                  <button id="media-back" type="button" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-left"></i> Up one level</button>
-                </div>
-                <div class="table-responsive" style="border:1px solid var(--border);border-radius:12px;overflow:hidden">
-                  <table class="table table-sm" style="margin:0">
-                    <thead><tr><th>Name</th><th class="text-end">Size</th><th>Modified</th><th class="text-end">Actions</th></tr></thead>
-                    <tbody id="media-rows"></tbody>
-                  </table>
-                </div>
-                <div id="media-empty" class="empty d-none"><i class="bi bi-inbox"></i> No files here yet — download something!</div>
-                <div id="media-error" class="status-text error" style="margin-top:8px"></div>
-              </div>
+            <nav class="small" aria-label="breadcrumb" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:10px">
+              <span class="crumb-link" data-media-path="" style="display:inline-flex;align-items:center;gap:6px;background:var(--surface-2);padding:4px 10px;border-radius:999px;border:1px solid var(--border)"><i class="bi bi-house"></i> Media</span>
+              <span id="media-crumbs" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap"></span>
+            </nav>
+            <div id="media-before" class="d-none" style="margin-bottom:10px">
+              <button id="media-back" type="button" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-left"></i> Up one level</button>
             </div>
+            <div class="table-responsive" style="border:1px solid var(--border);border-radius:12px;overflow:hidden">
+              <table class="table table-sm" style="margin:0">
+                <thead><tr><th>Name</th><th class="text-end">Size</th><th>Modified</th><th class="text-end">Actions</th></tr></thead>
+                <tbody id="media-rows"></tbody>
+              </table>
+            </div>
+            <div id="media-empty" class="empty d-none"><i class="bi bi-inbox"></i> No files here yet — download something!</div>
+            <div id="media-error" class="status-text error" style="margin-top:8px"></div>
           </section>
 
           <!-- Console -->

@@ -332,7 +332,7 @@ export default function Dashboard() {
           if (id) persistHighlightDash(id);
           else { el.style.background = "rgba(99,102,241,0.14)"; el.setAttribute("data-highlighted", "true"); }
         };
-        if (idx === -1) return <FileViewer file={viewerFile} viewable={sameViewable} idx={-1} onClose={() => { lastViewedRef.current = viewerFile; setViewerFile(null); setTimeout(() => { const el = document.getElementById(`dash-file-${viewerFile.id}`); scrollAndHighlight(el); }, 80); }} onPrev={() => {}} onNext={() => {}} />;
+        if (idx === -1) return <FileViewer file={viewerFile} viewable={sameViewable} idx={-1} onClose={() => { lastViewedRef.current = viewerFile; setViewerFile(null); setTimeout(() => { const el = document.getElementById(`dash-file-${viewerFile.id}`); scrollAndHighlight(el); }, 80); }} onPrev={() => {}} onNext={() => {}} onGoto={() => {}} />;
         const handleClose = () => {
           const cur = viewerFile;
           lastViewedRef.current = cur;
@@ -353,6 +353,7 @@ export default function Dashboard() {
             onClose={handleClose}
             onPrev={() => { if (idx > 0) { const p = sameViewable[idx - 1]; persistHighlightDash(p.id); setViewerFile(p); } }}
             onNext={() => { if (idx < sameViewable.length - 1) { const n = sameViewable[idx + 1]; persistHighlightDash(n.id); setViewerFile(n); } }}
+            onGoto={(targetIdx) => { if (targetIdx >= 0 && targetIdx < sameViewable.length) { const item = sameViewable[targetIdx]; persistHighlightDash(item.id); setViewerFile(item); } }}
             onDeleted={handleDeleted}
           />
         );

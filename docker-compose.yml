@@ -3,7 +3,10 @@ services:
     build: .
     image: xdl-app-image:local
     container_name: xdl
-    network_mode: "container:gluetun-proton1"
+    ports:
+      - "6767:6767"
+      - "6777:6777"
+      - "6778:6778"
     environment:
       PORT: 6767
       API_HEADLESS: 0
@@ -20,6 +23,8 @@ services:
       - /app/node_modules
       - ./docker/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro
       - /mnt/media2t/downloads/studies/xdl:/app/media
+      - /mnt/media2t/downloads/studies/bin:/app/media/bin
+      - /mnt/media2t/downloads/studies:/app/media/studies
       - browser-data:/data/browser
       - cloakbrowser-cache:/data/cloakbrowser
     healthcheck:
@@ -29,24 +34,6 @@ services:
       retries: 5
       start_period: 20s
     restart: unless-stopped
-
-  xdl-bridge:
-    image: alpine/socat
-    container_name: xdl-bridge
-    entrypoint: sh
-    command: -c "socat TCP-LISTEN:6767,fork,reuseaddr TCP:gluetun-proton1:6767 & socat TCP-LISTEN:6777,fork,reuseaddr TCP:gluetun-proton1:6777 & socat TCP-LISTEN:6778,fork,reuseaddr TCP:gluetun-proton1:6778 & wait"
-    ports:
-      - "6767:6767"
-      - "6777:6777"
-      - "6778:6778"
-    networks:
-      - gluetun
-    restart: unless-stopped
-
-networks:
-  gluetun:
-    external: true
-    name: gluetun_default
 
 volumes:
   browser-data:

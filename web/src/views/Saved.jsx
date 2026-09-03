@@ -234,6 +234,7 @@ export default function Saved() {
               <select className="form-control" value={account} onChange={(e) => setAccount(e.target.value)}>
                 <option value="default">default</option>
                 {accounts.filter((a) => a.name !== "default").map((a) => <option key={a.name} value={a.name}>{a.name}</option>)}
+                {account && account !== "default" && !accounts.some((a) => a.name === account) && <option key={account} value={account}>{account} (not configured)</option>}
               </select>
             </div>
             <div>
@@ -335,6 +336,7 @@ export default function Saved() {
                             <select className="form-control" value={account} onChange={(e) => setAccount(e.target.value)}>
                               <option value="default">default</option>
                               {accounts.filter((a) => a.name !== "default").map((a) => <option key={a.name} value={a.name}>{a.name}</option>)}
+                              {account && account !== "default" && !accounts.some((a) => a.name === account) && <option key={account} value={account}>{account} (not configured)</option>}
                             </select>
                           </div>
                           <div>

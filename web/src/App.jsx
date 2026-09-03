@@ -45,7 +45,7 @@ export default function App() {
     if (r.ok && j.ok) { localStorage.setItem("xdl_admin_pw", pw); localStorage.setItem("xdl_panel_pw", pw); localStorage.setItem("xdl_last_activity", String(Date.now())); setAuth({ checking: false, protected: true, authed: true }); setPw(""); }
     else setPwErr(j.error || "Invalid password");
   };
-  const doLogout = () => { localStorage.removeItem("xdl_admin_pw"); localStorage.removeItem("xdl_panel_pw"); localStorage.removeItem("xdl_last_activity"); setAuth({ checking: false, protected: true, authed: false }); };
+  const doLogout = () => { fetch("/api/auth/logout", { method: "POST" }); localStorage.removeItem("xdl_admin_pw"); localStorage.removeItem("xdl_panel_pw"); localStorage.removeItem("xdl_last_activity"); setAuth({ checking: false, protected: true, authed: false }); };
 
   useEffect(() => {
     if (!auth.protected || !auth.authed) return;
@@ -115,7 +115,7 @@ export default function App() {
   }
   return (
     <div style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", justifyContent: "center", padding: "24px 16px" }}>
-      <div style={{ width: "100%", maxWidth: 860 }}>
+      <div style={{ width: "100%", maxWidth: 860, padding: "0 var(--pane-pad, 18px)", boxSizing: "border-box" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
           <span className="brand-mark" style={{ width: 36, height: 36, borderRadius: 10, background: "linear-gradient(135deg,#6366f1 0%,#8b5cf6 50%,#ec4899 100%)", display: "grid", placeItems: "center", color: "#fff" }}><i className="bi bi-play-fill" /></span>
           <div>
