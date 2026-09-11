@@ -107,14 +107,49 @@ async function loadAppConfig() {
   return { accounts: [], savedLists: [] };
 }
 
+function normalizeCdpUrl(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return "";
+  if (s.length > 500) throw new Error("CDP URL too long (max 500 chars)");
+  let u;
+  try {
+    u = new URL(s);
+  } catch {
+    throw new Error("Invalid CDP URL. Use ws://, wss://, http:// or https://");
+  }
+  const proto = u.protocol.toLowerCase();
+  if (!["ws:", "wss:", "http:", "https:"].includes(proto)) {
+    throw new Error("CDP URL must start with ws://, wss://, http:// or https://");
+  }
+  return s;
+}
+
+function isCdpUrl(value) {
+  try {
+    const s = String(value || "").trim();
+    if (!s) return false;
+    const u = new URL(s);
+    return ["ws:", "wss:", "http:", "https:"].includes(u.protocol.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 function resolveAccountConfig(accountName, accounts) {
   const match = Array.isArray(accounts)
     ? accounts.find((a) => a && a.name === accountName)
     : null;
   const defaults = resolveProfileConfig();
+  let cdpUrl = "";
+  try {
+    cdpUrl = match && match.cdpUrl ? normalizeCdpUrl(match.cdpUrl) : "";
+  } catch {
+    cdpUrl = String(match.cdpUrl || "").trim();
+  }
   return {
     userDataDir: (match && match.userDataDir) || defaults.userDataDir,
     profileDir: (match && match.profileDir) || defaults.profileDir,
+    cdpUrl,
   };
 }
 
@@ -132,5 +167,7 @@ module.exports = {
   loadAppConfig,
   resolveAccountConfig,
   normalizeAccountName,
+  normalizeCdpUrl,
+  isCdpUrl,
   getStateFilePath,
 };

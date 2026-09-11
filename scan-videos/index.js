@@ -387,7 +387,53 @@ async function waitForInstagram429Cooldown(log, cooldownMs) {
 }
 
 async function gotoWithInstagram429Retry(page, targetUrl, isInstagramTarget, log, cooldownMs) {
-  const response = await page.goto(targetUrl, { waitUntil: "networkidle2", timeout: 60000 });
+  try { await page.bringToFront().catch(() => {}); } catch {}
+  const isCdp = (() => {
+    try {
+      if (page.browser && typeof page.browser === "function") {
+        const b = page.browser();
+        if (b && b.__isCdp) return true;
+      }
+    } catch {}
+    return false;
+  })();
+  let response;
+  if (isCdp) {
+    log(`CDP browser — using domcontentloaded for ${targetUrl}`);
+    try {
+      response = await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+    } catch (e) {
+      const curUrl = page.url();
+      if (curUrl && curUrl !== "about:blank") {
+        log(`proceeding despite goto timeout — page url is ${curUrl}`);
+        return null;
+      }
+      throw e;
+    }
+  } else {
+    try {
+      response = await page.goto(targetUrl, { waitUntil: "networkidle2", timeout: 30000 });
+    } catch (e) {
+      const msg = String(e && e.message || e);
+      const isTimeout = /timeout/i.test(msg) && /navigation/i.test(msg);
+      if (isTimeout) {
+        log(`page.goto networkidle2 timed out, trying domcontentloaded fallback: ${msg}`);
+        try {
+          response = await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+        } catch (e2) {
+          const curUrl = page.url();
+          if (curUrl && curUrl !== "about:blank") {
+            log(`proceeding despite goto timeout — page url is ${curUrl}`);
+            return null;
+          }
+          throw e2;
+        }
+      } else {
+        throw e;
+      }
+    }
+  }
+  try { await page.bringToFront().catch(() => {}); } catch {}
   const status = response && typeof response.status === "function" ? response.status() : 0;
 
   if (isInstagramTarget && status === 429) {
@@ -443,6 +489,7 @@ async function run(options = {}) {
     }
     const browser = await buildBrowserFromLocalProfile(browserOptions);
     const page = await browser.newPage();
+    try { await page.bringToFront().catch(() => {}); } catch {}
     await page.goto("https://www.google.com/", {
       waitUntil: "domcontentloaded",
       timeout: 60000,
@@ -522,6 +569,7 @@ async function run(options = {}) {
       const redditPostId = isRedditTarget ? extractRedditPostId(targetUrl) : "";
 
       const page = await browser.newPage();
+      try { await page.bringToFront().catch(() => {}); } catch {}
 
       try {
         if (isInstagramTarget) {

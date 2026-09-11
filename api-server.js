@@ -7,7 +7,7 @@ const fs = require("fs/promises");
 const { run } = require("./scan-videos/index");
 const { buildBrowserFromLocalProfile } = require("./scan-videos/browser");
 const { scanSavedPage } = require("./scan-videos/scan-saved");
-const { loadAppConfig, normalizeAccountName, resolveAccountConfig, resolveProfileConfig, getStateFilePath } = require("./scan-videos/config");
+const { loadAppConfig, normalizeAccountName, resolveAccountConfig, resolveProfileConfig, getStateFilePath, normalizeCdpUrl } = require("./scan-videos/config");
 const { WebSocketServer } = require("ws");
 const http = require("http");
 const { EventEmitter } = require("events");
@@ -45,6 +45,56 @@ let browserInitPromise = null;
 const browsersByAccount = new Map();
 const manualBrowsersByAccount = new Map();
 const manualBrowserTimeoutMs = parsePositiveInt(process.env.MANUAL_BROWSER_TIMEOUT_MS, 900000);
+
+const cdpStatusCache = new Map(); // accountName -> { status, cdpUrl, wsEndpoint, error, latencyMs, checkedAt }
+const CDP_STATUS_TTL_MS = 15000;
+
+async function getCdpStatusForAccount(accountName, { force = false } = {}) {
+  const name = normalizeAccountName(accountName);
+  try {
+    const appConfig = await loadAppConfig();
+    const cfg = resolveAccountConfig(name, appConfig.accounts);
+    const cdpUrl = String(cfg.cdpUrl || "").trim();
+    if (!cdpUrl) {
+      const entry = { status: "not_configured", cdpUrl: "", wsEndpoint: null, error: null, latencyMs: 0, checkedAt: new Date().toISOString() };
+      cdpStatusCache.set(name, entry);
+      return entry;
+    }
+    const cached = cdpStatusCache.get(name);
+    if (!force && cached && cached.cdpUrl === cdpUrl && cached.checkedAt) {
+      const age = Date.now() - new Date(cached.checkedAt).getTime();
+      if (age < CDP_STATUS_TTL_MS && cached.status !== "checking") return cached;
+    }
+    const checking = { status: "checking", cdpUrl, wsEndpoint: cached?.wsEndpoint || null, error: null, latencyMs: 0, checkedAt: new Date().toISOString() };
+    cdpStatusCache.set(name, checking);
+    try {
+      const { checkCdpStatus } = require("./scan-videos/browser");
+      const result = await checkCdpStatus(cdpUrl);
+      const entry = result.ok
+        ? { status: "up", cdpUrl, wsEndpoint: result.wsEndpoint, error: null, latencyMs: result.latencyMs, checkedAt: new Date().toISOString() }
+        : { status: "down", cdpUrl, wsEndpoint: null, error: result.error, latencyMs: result.latencyMs, checkedAt: new Date().toISOString() };
+      cdpStatusCache.set(name, entry);
+      return entry;
+    } catch (e) {
+      const entry = { status: "down", cdpUrl, wsEndpoint: null, error: e.message || String(e), latencyMs: 0, checkedAt: new Date().toISOString() };
+      cdpStatusCache.set(name, entry);
+      return entry;
+    }
+  } catch (e) {
+    return { status: "down", cdpUrl: "", wsEndpoint: null, error: e.message || String(e), latencyMs: 0, checkedAt: new Date().toISOString() };
+  }
+}
+
+function getCachedCdpStatus(accountName) {
+  const name = normalizeAccountName(accountName);
+  const cached = cdpStatusCache.get(name);
+  if (cached) return cached;
+  return { status: "not_configured", cdpUrl: "", wsEndpoint: null, error: null, latencyMs: 0, checkedAt: null };
+}
+
+async function refreshCdpStatusInBackground(accountName) {
+  void getCdpStatusForAccount(accountName, { force: false }).catch(() => {});
+}
 
 // --- Web queue (active = queued|running, completed = done|error) ---
 const webQueueFile = path.join(rootDir, ".web-queue.json");
@@ -925,32 +975,53 @@ app.get("/accounts", async (_req, res) => {
     const appConfig = await loadAppConfig();
     const defaults = resolveProfileConfig();
 
-    const accounts = [{ name: "default", userDataDir: defaults.userDataDir, profileDir: defaults.profileDir }];
+    const accounts = [{ name: "default", userDataDir: defaults.userDataDir, profileDir: defaults.profileDir, cdpUrl: "" }];
+    // default may have cdpUrl stored
+    const defaultCfg = appConfig.accounts.find((a) => a && String(a.name).toLowerCase() === "default");
+    if (defaultCfg && defaultCfg.cdpUrl) {
+      try { accounts[0].cdpUrl = normalizeCdpUrl(defaultCfg.cdpUrl); } catch { accounts[0].cdpUrl = String(defaultCfg.cdpUrl || "").trim(); }
+    }
     for (const account of appConfig.accounts) {
       if (!account || !account.name) continue;
-      if (account.name === "default") continue;
+      if (String(account.name).toLowerCase() === "default") continue;
+      let cdpUrl = "";
+      try { cdpUrl = account.cdpUrl ? normalizeCdpUrl(account.cdpUrl) : ""; } catch { cdpUrl = String(account.cdpUrl || "").trim(); }
       accounts.push({
         name: account.name,
         userDataDir: account.userDataDir || defaults.userDataDir,
         profileDir: account.profileDir || defaults.profileDir,
+        cdpUrl,
       });
     }
 
-    return res.json({
-      ok: true,
-      accounts: accounts.map((account) => {
-        const manual = manualBrowsersByAccount.get(account.name);
-        const accountBrowser = browsersByAccount.get(account.name);
-        const isShared = account.name === "default" && sharedBrowser;
-        return {
-          ...account,
-          manualOpen: browserIsAlive(manual && manual.browser),
-          sharedOpen: Boolean(isShared && browserIsAlive(sharedBrowser)),
-          accountBrowserOpen: browserIsAlive(accountBrowser),
-          openedAt: manual ? manual.openedAt : null,
-        };
-      }),
+    const enriched = accounts.map((account) => {
+      const manual = manualBrowsersByAccount.get(account.name);
+      const accountBrowser = browsersByAccount.get(account.name);
+      const isShared = account.name === "default" && sharedBrowser;
+      const cdpCached = getCachedCdpStatus(account.name);
+      // trigger background refresh if stale and has cdpUrl
+      if (account.cdpUrl) {
+        const age = cdpCached.checkedAt ? Date.now() - new Date(cdpCached.checkedAt).getTime() : Infinity;
+        if (!cdpCached.checkedAt || age > CDP_STATUS_TTL_MS) refreshCdpStatusInBackground(account.name);
+        // if cache mismatched url, refresh
+        if (cdpCached.cdpUrl !== account.cdpUrl) refreshCdpStatusInBackground(account.name);
+      }
+      const cdpStatus = account.cdpUrl ? (cdpCached.cdpUrl === account.cdpUrl ? cdpCached.status : "checking") : "not_configured";
+      return {
+        ...account,
+        cdpStatus,
+        cdpCheckedAt: cdpCached.checkedAt,
+        cdpError: cdpCached.error,
+        cdpWsEndpoint: cdpCached.wsEndpoint,
+        cdpLatencyMs: cdpCached.latencyMs,
+        manualOpen: browserIsAlive(manual && manual.browser),
+        sharedOpen: Boolean(isShared && browserIsAlive(sharedBrowser)),
+        accountBrowserOpen: browserIsAlive(accountBrowser),
+        openedAt: manual ? manual.openedAt : null,
+      };
     });
+
+    return res.json({ ok: true, accounts: enriched });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message });
   }
@@ -968,6 +1039,11 @@ app.post("/accounts", async (req, res) => {
       return res.status(400).json({ ok: false, error: "\"default\" is the built-in account; use another name." });
     }
 
+    let cdpUrl = "";
+    if (body.cdpUrl != null && String(body.cdpUrl).trim()) {
+      try { cdpUrl = normalizeCdpUrl(body.cdpUrl); } catch (e) { return res.status(400).json({ ok: false, error: e.message }); }
+    }
+
     const state = await readStateFile();
     const accounts = Array.isArray(state.config?.accounts) ? state.config.accounts : [];
     if (accounts.some((a) => a && String(a.name || "").trim().toLowerCase() === key)) {
@@ -981,15 +1057,125 @@ app.post("/accounts", async (req, res) => {
     const profileDir = String(body.profileDir || "Default").trim() || "Default";
 
     const account = { name, userDataDir, profileDir };
+    if (cdpUrl) account.cdpUrl = cdpUrl;
     accounts.push(account);
     state.config = state.config || {};
     state.config.accounts = accounts;
     state.updatedAt = new Date().toISOString();
     await writeStateFile(state);
+    if (cdpUrl) refreshCdpStatusInBackground(name);
 
     return res.status(201).json({ ok: true, account });
   } catch (error) {
     return res.status(400).json({ ok: false, error: error.message });
+  }
+});
+
+app.put("/accounts/:name", async (req, res) => {
+  try {
+    const name = String(req.params.name || "").trim();
+    if (!name) return res.status(400).json({ ok: false, error: "name required" });
+    const key = name.toLowerCase();
+    const body = req.body || {};
+    const state = await readStateFile();
+    const accounts = Array.isArray(state.config?.accounts) ? state.config.accounts : [];
+    let idx = accounts.findIndex((a) => a && String(a.name || "").trim().toLowerCase() === key);
+    // allow updating default even though it's not in accounts array — create entry if cdpUrl is being set
+    const isDefault = key === "default";
+    let existing = idx !== -1 ? accounts[idx] : null;
+    if (!existing && !isDefault) return res.status(404).json({ ok: false, error: `Account "${name}" not found` });
+
+    // cdpUrl handling: if field present in body, update; null/empty clears it
+    let nextCdpUrl;
+    if (Object.prototype.hasOwnProperty.call(body, "cdpUrl")) {
+      const raw = body.cdpUrl == null ? "" : String(body.cdpUrl).trim();
+      if (!raw) {
+        nextCdpUrl = "";
+      } else {
+        try { nextCdpUrl = normalizeCdpUrl(raw); } catch (e) { return res.status(400).json({ ok: false, error: e.message }); }
+      }
+    } else {
+      nextCdpUrl = existing ? String(existing.cdpUrl || "").trim() : "";
+    }
+
+    let nextProfileDir = existing ? String(existing.profileDir || "Default") : "Default";
+    if (Object.prototype.hasOwnProperty.call(body, "profileDir")) {
+      nextProfileDir = String(body.profileDir || "Default").trim() || "Default";
+    }
+    let nextUserDataDir = existing ? String(existing.userDataDir || "").trim() : "";
+    if (Object.prototype.hasOwnProperty.call(body, "userDataDir")) {
+      nextUserDataDir = String(body.userDataDir || "").trim();
+    }
+
+    const prevCdpUrl = existing ? String(existing.cdpUrl || "").trim() : "";
+    if (isDefault && idx === -1) {
+      // create default entry to store cdpUrl (userDataDir/profileDir stay defaults)
+      const defaults = resolveProfileConfig();
+      const entry = { name: "default", userDataDir: nextUserDataDir || defaults.userDataDir, profileDir: nextProfileDir, cdpUrl: nextCdpUrl };
+      if (!nextCdpUrl) delete entry.cdpUrl;
+      accounts.push(entry);
+    } else {
+      const updated = { ...existing, profileDir: nextProfileDir, userDataDir: nextUserDataDir };
+      if (nextCdpUrl) updated.cdpUrl = nextCdpUrl;
+      else delete updated.cdpUrl;
+      // if was cdpUrl and cleared, keep other fields
+      accounts[idx] = updated;
+      // if default and cdpUrl cleared and userDataDir/profileDir are defaults, we could remove the entry entirely to keep file clean
+      if (isDefault && !nextCdpUrl) {
+        const defaults = resolveProfileConfig();
+        const isDefaultDirs = (updated.userDataDir || defaults.userDataDir) === defaults.userDataDir && (updated.profileDir || "Default") === defaults.profileDir;
+        if (isDefaultDirs) {
+          accounts.splice(idx, 1);
+        }
+      }
+    }
+
+    state.config = state.config || {};
+    state.config.accounts = accounts;
+    state.updatedAt = new Date().toISOString();
+    await writeStateFile(state);
+
+    // if cdpUrl changed, close any existing browser for that account so next job reconnects
+    if (prevCdpUrl !== nextCdpUrl) {
+      try { await closeBrowserForAccount(name); } catch {}
+      try { await closeManualBrowser(name); } catch {}
+      if (isDefault) try { await closeSharedBrowser(); } catch {}
+      cdpStatusCache.delete(normalizeAccountName(name));
+      if (nextCdpUrl) refreshCdpStatusInBackground(name);
+    }
+
+    const updatedAccount = accounts.find((a) => String(a.name).toLowerCase() === key) || { name, cdpUrl: nextCdpUrl, profileDir: nextProfileDir, userDataDir: nextUserDataDir };
+    return res.json({ ok: true, account: updatedAccount });
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error.message });
+  }
+});
+
+app.post("/accounts/:name/cdp/check", async (req, res) => {
+  try {
+    const name = String(req.params.name || "").trim();
+    if (!name) return res.status(400).json({ ok: false, error: "name required" });
+    const result = await getCdpStatusForAccount(name, { force: true });
+    return res.json({ ok: true, cdpUrl: result.cdpUrl, status: result.status, wsEndpoint: result.wsEndpoint, error: result.error, latencyMs: result.latencyMs, checkedAt: result.checkedAt });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+app.get("/accounts/:name/cdp/status", async (req, res) => {
+  try {
+    const name = String(req.params.name || "").trim();
+    if (!name) return res.status(400).json({ ok: false, error: "name required" });
+    const cached = getCachedCdpStatus(name);
+    // if no cached and has cdpUrl, trigger background refresh
+    try {
+      const appConfig = await loadAppConfig();
+      const cfg = resolveAccountConfig(name, appConfig.accounts);
+      if (cfg.cdpUrl && !cached.checkedAt) refreshCdpStatusInBackground(name);
+    } catch {}
+    return res.json({ ok: true, ...cached });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message });
   }
 });
 
@@ -1017,6 +1203,7 @@ app.delete("/accounts/:name", async (req, res) => {
 
     await closeManualBrowser(name);
     await closeBrowserForAccount(name);
+    cdpStatusCache.delete(normalizeAccountName(name));
 
     const state = await readStateFile();
     const accounts = Array.isArray(state.config?.accounts) ? state.config.accounts : [];
@@ -1306,6 +1493,15 @@ app.post("/open-browser", async (req, res) => {
   }
 
   const accountName = normalizeAccountName(req.body?.account || req.query?.account);
+  // CDP profiles have no VNC — reject with guidance
+  try {
+    const appConfig = await loadAppConfig();
+    const cfg = resolveAccountConfig(accountName, appConfig.accounts);
+    if (cfg.cdpUrl) {
+      const st = await getCdpStatusForAccount(accountName, { force: true });
+      return res.status(400).json({ ok: false, error: `CDP profile "${accountName}" has no VNC — remote browser is ${st.status}. Use Test to check CDP.`, cdpStatus: st.status, cdpError: st.error });
+    }
+  } catch {}
 
   const existing = manualBrowsersByAccount.get(accountName);
   if (existing && existing.browser) {
@@ -2031,7 +2227,18 @@ async function getSharedBrowser(log) {
 
   const headless = parseBooleanInput(process.env.API_HEADLESS, parseBooleanInput(process.env.HEADLESS, true));
 
-  browserInitPromise = buildBrowserFromLocalProfile({ headless, log })
+  // if default account has cdpUrl, use CDP path via buildBrowserFromLocalProfile with account
+  let useDefaultCdp = false;
+  try {
+    const appConfig = await loadAppConfig();
+    const defCfg = resolveAccountConfig("default", appConfig.accounts);
+    if (defCfg.cdpUrl) useDefaultCdp = true;
+  } catch {}
+
+  const launchOpts = useDefaultCdp ? { headless, account: "default", log } : { headless, log };
+  if (useDefaultCdp && log) log(`Using default account CDP`);
+
+  browserInitPromise = buildBrowserFromLocalProfile(launchOpts)
     .then((browser) => {
       sharedBrowser = browser;
       browser.on("disconnected", () => {
@@ -2047,13 +2254,18 @@ async function getSharedBrowser(log) {
   return browserInitPromise;
 }
 
+function isCdpBrowser(browser) {
+  return Boolean(browser && browser.__isCdp);
+}
+
 async function closeSharedBrowser() {
   if (!sharedBrowser) return;
 
   const browser = sharedBrowser;
   sharedBrowser = null;
   try {
-    await browser.close();
+    if (isCdpBrowser(browser) && typeof browser.disconnect === "function") await browser.disconnect();
+    else await browser.close();
   } catch {
     // ignore
   }
@@ -2065,7 +2277,8 @@ async function closeBrowserForAccount(accountName, expectedBrowser) {
 
   browsersByAccount.delete(accountName);
   try {
-    await browser.close();
+    if (isCdpBrowser(browser) && typeof browser.disconnect === "function") await browser.disconnect();
+    else await browser.close();
   } catch {
     // ignore
   }
@@ -2076,12 +2289,18 @@ async function getBrowserForAccount(accountName, jobId) {
   if (existing && existing.isConnected && existing.isConnected()) {
     return existing;
   }
+  if (existing) {
+    // stale disconnected entry
+    browsersByAccount.delete(accountName);
+    try { if (isCdpBrowser(existing) && typeof existing.disconnect === "function") await existing.disconnect(); else await existing.close(); } catch {}
+  }
 
   const appConfig = await loadAppConfig();
   const config = resolveAccountConfig(accountName, appConfig.accounts);
   const headless = parseBooleanInput(process.env.API_HEADLESS, parseBooleanInput(process.env.HEADLESS, true));
 
-  console.log(`[browser] launching browser for account "${accountName}" (${config.userDataDir}/${config.profileDir})`);
+  if (config.cdpUrl) console.log(`[browser] connecting via CDP for account "${accountName}" (${config.cdpUrl})`);
+  else console.log(`[browser] launching browser for account "${accountName}" (${config.userDataDir}/${config.profileDir})`);
   const browser = await buildBrowserFromLocalProfile({
     headless,
     account: accountName,
@@ -2111,7 +2330,8 @@ async function closeManualBrowser(accountName, expectedBrowser) {
   manualBrowsersByAccount.delete(accountName);
   if (entry.timer) clearTimeout(entry.timer);
   try {
-    await entry.browser.close();
+    if (isCdpBrowser(entry.browser) && typeof entry.browser.disconnect === "function") await entry.browser.disconnect();
+    else await entry.browser.close();
   } catch {
     // ignore
   }
@@ -2356,11 +2576,16 @@ function normalizeAccountsInput(value) {
     if (seen.has(key)) continue;
     seen.add(key);
 
-    result.push({
+    const entry = {
       name,
       profileDir: String(raw.profileDir || "Default").trim() || "Default",
       userDataDir: String(raw.userDataDir || "").trim(),
-    });
+    };
+    const rawCdp = raw.cdpUrl != null ? String(raw.cdpUrl).trim() : "";
+    if (rawCdp) {
+      try { entry.cdpUrl = normalizeCdpUrl(rawCdp); } catch {}
+    }
+    result.push(entry);
   }
   return result;
 }

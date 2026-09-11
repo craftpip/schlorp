@@ -1,10 +1,121 @@
 const fs = require("fs/promises");
 const os = require("os");
 const path = require("path");
-const { shouldRunHeadless, resolveProfileConfig, resolveAccountConfig } = require("./config");
+const { shouldRunHeadless, resolveProfileConfig, resolveAccountConfig, normalizeCdpUrl } = require("./config");
 
 async function getCloakBrowser() {
   return import("cloakbrowser/puppeteer");
+}
+
+async function getPuppeteerCore() {
+  return import("puppeteer-core");
+}
+
+async function resolveCdpWsEndpoint(cdpUrl) {
+  const raw = String(cdpUrl || "").trim();
+  if (!raw) throw new Error("CDP URL is empty");
+  const normalized = normalizeCdpUrl(raw);
+  const u = new URL(normalized);
+  const proto = u.protocol.toLowerCase();
+  if (proto === "ws:" || proto === "wss:") {
+    return normalized;
+  }
+  // http(s) -> fetch /json/version
+  const origin = `${u.protocol}//${u.host}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4000);
+  try {
+    const res = await fetch(`${origin}/json/version`, { signal: controller.signal });
+    if (res.ok) {
+      const j = await res.json().catch(() => null);
+      if (j && j.webSocketDebuggerUrl) return j.webSocketDebuggerUrl;
+    }
+    // fallback: /json
+    const res2 = await fetch(`${origin}/json`, { signal: controller.signal });
+    if (res2.ok) {
+      const arr = await res2.json().catch(() => null);
+      if (Array.isArray(arr) && arr.length) {
+        const found = arr.find((x) => x && x.webSocketDebuggerUrl);
+        if (found) return found.webSocketDebuggerUrl;
+      }
+    }
+    throw new Error(`CDP probe failed at ${origin}/json/version (status ${res.status})`);
+  } catch (e) {
+    if (e.name === "AbortError") throw new Error(`CDP probe timed out for ${origin}`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function checkCdpStatus(cdpUrl) {
+  const start = Date.now();
+  try {
+    const raw = String(cdpUrl || "").trim();
+    const normalized = normalizeCdpUrl(raw);
+    const u = new URL(normalized);
+    const proto = u.protocol.toLowerCase();
+    if (proto === "ws:" || proto === "wss:") {
+      // probe http counterpart to verify the browser is actually listening
+      const httpProto = proto === "wss:" ? "https:" : "http:";
+      const origin = `${httpProto}//${u.host}`;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 3000);
+      try {
+        const res = await fetch(`${origin}/json/version`, { signal: controller.signal });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        await res.json().catch(() => ({}));
+        clearTimeout(timer);
+        return { ok: true, wsEndpoint: normalized, latencyMs: Date.now() - start };
+      } catch (e) {
+        clearTimeout(timer);
+        if (e.name === "AbortError") return { ok: false, error: `CDP probe timed out for ${origin}`, latencyMs: Date.now() - start };
+        // try direct WS connect as fallback before declaring down
+        try {
+          const WebSocket = require("ws");
+          const ws = new WebSocket(normalized, { handshakeTimeout: 3000 });
+          const result = await new Promise((resolve, reject) => {
+            const t = setTimeout(() => { try { ws.terminate(); } catch {} ; reject(new Error(`WS connect timed out for ${normalized}`)); }, 3000);
+            ws.on("open", () => { clearTimeout(t); try { ws.terminate(); } catch {} ; resolve(true); });
+            ws.on("error", (err) => { clearTimeout(t); reject(err); });
+          });
+          if (result) return { ok: true, wsEndpoint: normalized, latencyMs: Date.now() - start };
+        } catch (wsErr) {
+          return { ok: false, error: wsErr.message || String(wsErr) || (e.message || String(e)), latencyMs: Date.now() - start };
+        }
+        return { ok: false, error: e.message || String(e), latencyMs: Date.now() - start };
+      }
+    }
+    const wsEndpoint = await resolveCdpWsEndpoint(cdpUrl);
+    return { ok: true, wsEndpoint, latencyMs: Date.now() - start };
+  } catch (e) {
+    return { ok: false, error: e.message || String(e), latencyMs: Date.now() - start };
+  }
+}
+
+async function connectToCdp(cdpUrl, { log } = {}) {
+  const wsEndpoint = await resolveCdpWsEndpoint(cdpUrl);
+  let browser;
+  // prefer cloakbrowser if it exposes connect, else puppeteer-core
+  try {
+    const cb = await getCloakBrowser();
+    if (cb && typeof cb.connect === "function") {
+      browser = await cb.connect({ browserWSEndpoint: wsEndpoint });
+    } else if (cb && cb.default && typeof cb.default.connect === "function") {
+      browser = await cb.default.connect({ browserWSEndpoint: wsEndpoint });
+    }
+  } catch {}
+  if (!browser) {
+    const pc = await getPuppeteerCore();
+    const connectFn = pc.connect || (pc.default && pc.default.connect);
+    if (!connectFn) throw new Error("puppeteer-core connect not available");
+    browser = await connectFn({ browserWSEndpoint: wsEndpoint });
+  }
+  browser.__isCdp = true;
+  browser.__cdpUrl = String(cdpUrl).trim();
+  browser.__wsEndpoint = wsEndpoint;
+  if (log) log(`Connected via CDP ${wsEndpoint}`);
+  return browser;
 }
 
 async function cloneProfileDir(sourceDir, profileDir) {
@@ -126,9 +237,27 @@ async function launchBrowser(userDataDir, profileDir, options = {}) {
 async function buildBrowserFromLocalProfile(options = {}) {
   const log = typeof options.log === "function" ? options.log : console.log;
 
+  // direct cdpUrl override (for tests / explicit callers)
+  if (options.cdpUrl) {
+    const cdp = normalizeCdpUrl(options.cdpUrl);
+    log(`Using CDP ${cdp}`);
+    return connectToCdp(cdp, { log });
+  }
+
   if (options.account) {
     const appConfig = await resolveAppConfigWithRetry(log);
     const config = resolveAccountConfig(options.account, appConfig.accounts);
+    if (config.cdpUrl) {
+      log(`Using account "${options.account}" -> CDP ${config.cdpUrl}`);
+      try {
+        return await connectToCdp(config.cdpUrl, { log });
+      } catch (e) {
+        const msg = e && e.message ? e.message : String(e);
+        const err = new Error(`CDP unreachable for "${options.account}" (${config.cdpUrl}): ${msg}`);
+        err.cause = e;
+        throw err;
+      }
+    }
     log(`Using account "${options.account}" -> ${config.userDataDir}/${config.profileDir}`);
     return launchBrowser(config.userDataDir, config.profileDir, options);
   }
@@ -149,4 +278,7 @@ async function resolveAppConfigWithRetry(log) {
 
 module.exports = {
   buildBrowserFromLocalProfile,
+  resolveCdpWsEndpoint,
+  checkCdpStatus,
+  connectToCdp,
 };

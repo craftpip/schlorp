@@ -164,6 +164,7 @@ async function scanInstagramSavedPage(options = {}) {
   const matchedStopUrls = new Set();
   const matchedStopIds = new Set();
   const page = await browser.newPage();
+  try { await page.bringToFront().catch(() => {}); } catch {}
 
   let reason = "max_iterations";
   let iterations = 0;
@@ -171,7 +172,46 @@ async function scanInstagramSavedPage(options = {}) {
   try {
     await page.setExtraHTTPHeaders({ "accept-language": "en-US,en;q=0.9" });
 
-    const response = await page.goto(targetUrl, { waitUntil: "networkidle2", timeout: 60000 });
+    const isCdp = Boolean(browser && browser.__isCdp);
+    let response = null;
+    if (isCdp) {
+      log(`CDP browser — using domcontentloaded for ${targetUrl}`);
+      try {
+        response = await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+      } catch (e) {
+        log(`domcontentloaded failed: ${e.message} — checking page state`);
+        const curUrl = page.url();
+        if (curUrl && curUrl !== "about:blank") {
+          log(`proceeding despite goto timeout — page url is ${curUrl}`);
+        } else {
+          throw e;
+        }
+      }
+    } else {
+      try {
+        response = await page.goto(targetUrl, { waitUntil: "networkidle2", timeout: 30000 });
+      } catch (e) {
+        const msg = String(e && e.message || e);
+        const isTimeout = /timeout/i.test(msg) && /navigation/i.test(msg);
+        if (isTimeout) {
+          log(`page.goto networkidle2 timed out, trying domcontentloaded fallback: ${msg}`);
+          try {
+            response = await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+          } catch (e2) {
+            log(`domcontentloaded also failed: ${e2.message} — checking page state`);
+            const curUrl = page.url();
+            if (curUrl && curUrl !== "about:blank") {
+              log(`proceeding despite goto timeout — page url is ${curUrl}`);
+            } else {
+              throw e2;
+            }
+          }
+        } else {
+          throw e;
+        }
+      }
+    }
+    try { await page.bringToFront().catch(() => {}); } catch {}
     const status = response && typeof response.status === "function" ? response.status() : 0;
     if (status === 429) {
       log("Instagram saved-page scan got 429.");
@@ -321,6 +361,7 @@ async function scanRedditSavedPage(options = {}) {
   const matchedStopUrls = new Set();
   const matchedStopIds = new Set();
   const page = await browser.newPage();
+  try { await page.bringToFront().catch(() => {}); } catch {}
 
   let reason = "max_iterations";
   let iterations = 0;
@@ -329,7 +370,46 @@ async function scanRedditSavedPage(options = {}) {
     await page.setExtraHTTPHeaders({ "accept-language": "en-US,en;q=0.9" });
     await page.setViewport({ width: 1280, height: 900 });
 
-    const response = await page.goto(targetUrl, { waitUntil: "networkidle2", timeout: 60000 });
+    const isCdp = Boolean(browser && browser.__isCdp);
+    let response = null;
+    if (isCdp) {
+      log(`CDP browser — using domcontentloaded for ${targetUrl}`);
+      try {
+        response = await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+      } catch (e) {
+        log(`domcontentloaded failed: ${e.message} — checking page state`);
+        const curUrl = page.url();
+        if (curUrl && curUrl !== "about:blank") {
+          log(`proceeding despite goto timeout — page url is ${curUrl}`);
+        } else {
+          throw e;
+        }
+      }
+    } else {
+      try {
+        response = await page.goto(targetUrl, { waitUntil: "networkidle2", timeout: 30000 });
+      } catch (e) {
+        const msg = String(e && e.message || e);
+        const isTimeout = /timeout/i.test(msg) && /navigation/i.test(msg);
+        if (isTimeout) {
+          log(`page.goto networkidle2 timed out, trying domcontentloaded fallback: ${msg}`);
+          try {
+            response = await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+          } catch (e2) {
+            log(`domcontentloaded also failed: ${e2.message} — checking page state`);
+            const curUrl = page.url();
+            if (curUrl && curUrl !== "about:blank") {
+              log(`proceeding despite goto timeout — page url is ${curUrl}`);
+            } else {
+              throw e2;
+            }
+          }
+        } else {
+          throw e;
+        }
+      }
+    }
+    try { await page.bringToFront().catch(() => {}); } catch {}
     const status = response && typeof response.status === "function" ? response.status() : 0;
     if (status === 429) {
       log("Reddit saved-page scan got 429.");
