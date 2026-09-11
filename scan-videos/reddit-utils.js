@@ -98,6 +98,14 @@ function parseJsonWithPrefix(rawText) {
   }
 }
 
+function decodeRedditHtmlUrl(value) {
+  return String(value || "").replace(/&amp;/g, "&").trim();
+}
+
+function isStillImageUrl(value) {
+  return /\.(jpe?g|png|webp|avif|bmp)(\?|$)/i.test(String(value || ""));
+}
+
 function findPostNode(parsed, postId) {
   if (!parsed) return null;
   // reddit .json is array of listings
@@ -289,6 +297,127 @@ function extractRedditMediaHintsFromJsonText(rawText, postId) {
   };
 }
 
+function collectGalleryImageUrls(post) {
+  const out = [];
+  if (!post || typeof post !== "object") return out;
+  const items =
+    post.gallery_data && Array.isArray(post.gallery_data.items)
+      ? post.gallery_data.items
+      : [];
+  if (!items.length) return out;
+  const meta =
+    post.media_metadata && typeof post.media_metadata === "object"
+      ? post.media_metadata
+      : {};
+  for (const item of items) {
+    const mediaId = item && item.media_id ? String(item.media_id) : "";
+    if (!mediaId) continue;
+    const m = meta[mediaId];
+    if (!m || typeof m !== "object") continue;
+    if (m.status && String(m.status).toLowerCase() !== "valid") continue;
+    const raw = m.s && m.s.u ? decodeRedditHtmlUrl(m.s.u) : "";
+    if (raw && isStillImageUrl(raw)) {
+      out.push(stripByteRangeParams(raw));
+      continue;
+    }
+    // fallback: largest preview in p[]
+    if (m.p && Array.isArray(m.p) && m.p.length) {
+      const last = m.p[m.p.length - 1];
+      const pu = last && last.u ? decodeRedditHtmlUrl(last.u) : "";
+      if (pu && isStillImageUrl(pu)) out.push(stripByteRangeParams(pu));
+    }
+  }
+  return out;
+}
+
+function redditImageBasename(value) {
+  try {
+    const u = new URL(String(value || "").trim());
+    const base = u.pathname.split("/").filter(Boolean).pop() || "";
+    const stem = base.replace(/\.[a-z0-9]+$/i, "").toLowerCase();
+    // DOM slug variants: <post-slug>-v0-<mediaId> → key is the media id
+    const m = stem.match(/-v0-([a-z0-9]+)$/);
+    if (m) return m[1];
+    return stem;
+  } catch {
+    return "";
+  }
+}
+
+function dedupeRedditPhotos(urls) {
+  // same image often appears as i.redd.it/<id>.jpg AND preview.redd.it/<id>.jpg?width=...
+  // prefer i.redd.it direct, keep first per basename otherwise
+  const seen = new Set();
+  const out = [];
+  const ordered = [...urls].map((u, i) => ({ u, i })).sort((a, b) => {
+    const aD = /i\.redd\.it\//i.test(a.u) ? 0 : 1;
+    const bD = /i\.redd\.it\//i.test(b.u) ? 0 : 1;
+    if (aD !== bD) return aD - bD;
+    return a.i - b.i;
+  });
+  for (const { u } of ordered) {
+    const key = redditImageBasename(u) || String(u).toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(u);
+  }
+  return out;
+}
+
+function extractRedditImageHintsFromJsonText(rawText, postId) {
+  if (!rawText || !postId) return { imageUrls: [] };
+  const parsed = parseJsonWithPrefix(rawText);
+  if (!parsed) return { imageUrls: [] };
+  const post = findPostNode(parsed, postId);
+  if (!post) return { imageUrls: [] };
+
+  // gallery posts: gallery order only (preview.images would duplicate)
+  const gallery = collectGalleryImageUrls(post);
+  if (Array.isArray(post.crosspost_parent_list)) {
+    for (const parent of post.crosspost_parent_list) {
+      for (const u of collectGalleryImageUrls(parent)) gallery.push(u);
+    }
+  }
+  if (gallery.length) return { imageUrls: dedupeRedditPhotos(gallery) };
+
+  // video posts (redgifs/v.redd.it/hosted:video): preview.images is just a poster — skip photos
+  if (isRedditVideoPost(post)) return { imageUrls: [] };
+
+  const ordered = [];
+  const seen = new Set();
+  const push = (u) => {
+    const cleaned = stripByteRangeParams(decodeRedditHtmlUrl(u));
+    if (!cleaned || seen.has(cleaned)) return;
+    if (!isStillImageUrl(cleaned)) return;
+    seen.add(cleaned);
+    ordered.push(cleaned);
+  };
+
+  // single-image posts: url_overridden_by_dest
+  const singles = [];
+  if (post.url_overridden_by_dest) singles.push(post.url_overridden_by_dest);
+  if (post.url) singles.push(post.url);
+  if (Array.isArray(post.crosspost_parent_list)) {
+    for (const parent of post.crosspost_parent_list) {
+      if (parent && parent.url_overridden_by_dest) singles.push(parent.url_overridden_by_dest);
+    }
+  }
+  for (const s of singles) {
+    const decoded = decodeRedditHtmlUrl(s);
+    if (isStillImageUrl(decoded)) push(decoded);
+  }
+  // preview.images source (single image fallback when uod missing)
+  if (!ordered.length) {
+    const previewImgs =
+      post.preview && Array.isArray(post.preview.images) ? post.preview.images : [];
+    for (const img of previewImgs) {
+      if (img && img.source && img.source.url) push(img.source.url);
+    }
+  }
+
+  return { imageUrls: dedupeRedditPhotos(ordered) };
+}
+
 module.exports = {
   isRedditUrl,
   isRedditSavedUrl,
@@ -296,4 +425,6 @@ module.exports = {
   extractRedditPostId,
   isRedditVideoPost,
   extractRedditMediaHintsFromJsonText,
+  extractRedditImageHintsFromJsonText,
+  dedupeRedditPhotos,
 };

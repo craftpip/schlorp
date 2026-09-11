@@ -33,6 +33,15 @@ function isGifUrl(url) {
   return /\.gif(\?|$)/i.test(String(url || ""));
 }
 
+function isImageUrl(url) {
+  return /\.(jpe?g|png|webp|avif|bmp)(\?|$)/i.test(String(url || ""));
+}
+
+function isPhotoUrl(url) {
+  // photos = still images, excluding gif (gif handled via video flow)
+  return isImageUrl(url);
+}
+
 function stripByteRangeParams(rawUrl) {
   try {
     const u = new URL(rawUrl);
@@ -293,6 +302,8 @@ module.exports = {
   extractRedgifsId,
   isRedditMediaUrl,
   isGifUrl,
+  isImageUrl,
+  isPhotoUrl,
   stripByteRangeParams,
   isStreamingManifestUrl,
   isDirectFileUrl,

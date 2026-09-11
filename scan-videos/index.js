@@ -20,6 +20,7 @@ const {
   prioritizeRedditCandidates,
   isRedgifsUrl,
   isGifUrl,
+  isPhotoUrl,
   extractQualityHint,
   sanitizeFileToken,
 } = require("./media-utils");
@@ -33,6 +34,8 @@ const {
   isRedditUrl,
   extractRedditPostId,
   extractRedditMediaHintsFromJsonText,
+  extractRedditImageHintsFromJsonText,
+  dedupeRedditPhotos,
 } = require("./reddit-utils");
 const {
   extractXhamsterMediaData,
@@ -597,6 +600,7 @@ async function run(options = {}) {
         const instagramTargetHintAssetIds = new Set();
         const redditHintUrls = new Set();
         const redditRedgifsIds = new Set();
+        const redditImageHintUrls = new Set();
         let redditIsVideoPost = null; // null=unknown, true=video, false=photo-only
 
         page.on("response", async (response) => {
@@ -746,8 +750,10 @@ async function run(options = {}) {
               else if (hints.urls.length || hints.redgifsIds.length) redditIsVideoPost = true;
               for (const u of hints.urls) redditHintUrls.add(stripByteRangeParams(u));
               for (const id of hints.redgifsIds) redditRedgifsIds.add(id);
-              if (hints.isVideo === false) log(`Reddit .json indicates photo-only for ${redditPostId}`);
-              else log(`Reddit .json hints: ${hints.urls.length} url(s), ${hints.redgifsIds.length} redgifs`);
+              const imgHints = extractRedditImageHintsFromJsonText(jsonText, redditPostId);
+              for (const u of imgHints.imageUrls) redditImageHintUrls.add(stripByteRangeParams(u));
+              if (hints.isVideo === false && !imgHints.imageUrls.length) log(`Reddit .json indicates photo-only for ${redditPostId}`);
+              else log(`Reddit .json hints: ${hints.urls.length} url(s), ${hints.redgifsIds.length} redgifs, ${imgHints.imageUrls.length} photo(s)`);
             }
           } catch {}
         }
@@ -875,15 +881,20 @@ async function run(options = {}) {
           extractedXvideosUrls = [];
         }
 
-        // Reddit specific extraction (video/GIF only)
-        let redditData = { urls: [], redgifsIds: [] };
+        // Reddit specific extraction (video/GIF + photos)
+        let redditData = { urls: [], redgifsIds: [], imageUrls: [] };
         let redgifsResolvedUrls = [];
+        let redditOrderedImages = [];
         if (isRedditTarget) {
           try {
             redditData = await extractRedditMediaData(page);
-            for (const id of redditData.redgifsIds) {
+            for (const id of redditData.redgifsIds || []) {
               if (redditRedgifsIds.has(id)) continue;
               redditRedgifsIds.add(id);
+            }
+            for (const u of redditData.imageUrls || []) {
+              const cleaned = stripByteRangeParams(u);
+              if (cleaned && !redditImageHintUrls.has(cleaned)) redditImageHintUrls.add(cleaned);
             }
           } catch {}
           // merge intercepted hints
@@ -907,7 +918,12 @@ async function run(options = {}) {
               }
             } catch {}
           }
-          log(`Reddit hints: ${redditData.urls.length} URL(s), ${redditData.redgifsIds.length} redgifs id(s), ${redgifsResolvedUrls.length} resolved`);
+          // ordered photos: JSON gallery order first (insertion order of redditImageHintUrls),
+          // deduped by basename (i.redd.it direct wins over preview.redd.it variant)
+          redditOrderedImages = dedupeRedditPhotos(
+            Array.from(redditImageHintUrls).filter((u) => isPhotoUrl(u))
+          );
+          log(`Reddit hints: ${redditData.urls.length} URL(s), ${redditData.redgifsIds.length} redgifs id(s), ${redgifsResolvedUrls.length} resolved, ${redditOrderedImages.length} photo(s)`);
         }
 
         const allVideos = Array.from(
@@ -921,20 +937,24 @@ async function run(options = {}) {
             ...(isRedditTarget ? redgifsResolvedUrls : []),
           ])
         );
-        // Reddit: early photo-only skip if JSON indicated not video
-        if (isRedditTarget && redditIsVideoPost === false) {
-          log("No video/GIF found — photo-only, skipped.");
-          failedTargets.push({ url: targetUrl, reason: "No video/GIF found — photo-only, skipped." });
+        // Reddit: only skip when neither video/GIF nor photos found
+        if (isRedditTarget && redditIsVideoPost === false && !redditOrderedImages.length) {
+          log("No media found — photo-only with no downloadable images, skipped.");
+          failedTargets.push({ url: targetUrl, reason: "No media found — photo-only with no downloadable images, skipped." });
           continue;
         }
         log(`\n=== Video/Media URLs found for ${targetUrl} ===`);
-        if (!allVideos.length) {
+        if (!allVideos.length && !redditOrderedImages.length) {
           log("No video media URLs detected.");
           await captureFailureSnapshot(page, targetUrl, "no-video-urls", log);
           failedTargets.push({ url: targetUrl, reason: "No video media URLs detected." });
           continue;
         }
         allVideos.forEach((u, i) => log(`${i + 1}. ${u}`));
+        if (redditOrderedImages.length) {
+          log(`--- Photos (${redditOrderedImages.length}) ---`);
+          redditOrderedImages.forEach((u, i) => log(`p${i + 1}. ${u}`));
+        }
 
         // For reddit, allow .gif via forceInclude (video/GIF only, photos skipped)
         let forceIncludeForReddit = null;
@@ -955,22 +975,17 @@ async function run(options = {}) {
           ]),
           ...(forceIncludeForReddit ? { forceIncludeUrls: forceIncludeForReddit } : {}),
         });
-        // For reddit, filter to video/gif only (skip leftover image-only urls)
+        // For reddit, filter to video/gif only (photos handled separately below)
         let filteredDownloadable = downloadableUrls;
         if (isRedditTarget) {
           filteredDownloadable = downloadableUrls.filter(
             (u) => isLikelyVideoUrl(u) || isGifUrl(u) || /preview\.redd\.it.*format=mp4/i.test(u)
           );
-          if (!filteredDownloadable.length && downloadableUrls.length) {
-            log("No video/GIF candidate after filter — photo-only, skipped.");
-            failedTargets.push({ url: targetUrl, reason: "No video/GIF found — photo-only, skipped." });
-            continue;
-          }
           if (filteredDownloadable.length !== downloadableUrls.length) {
             log(`Reddit video/GIF filter: ${filteredDownloadable.length}/${downloadableUrls.length} kept`);
           }
         }
-        if (!filteredDownloadable.length) {
+        if (!filteredDownloadable.length && !(isRedditTarget && redditOrderedImages.length)) {
           log("\nNo downloadable direct or stream URL found.");
           await captureFailureSnapshot(page, targetUrl, "no-downloadable-url", log);
           failedTargets.push({ url: targetUrl, reason: "No downloadable direct or stream URL found." });
@@ -984,7 +999,7 @@ async function run(options = {}) {
           ? applyMaxQualityLimit(downloadableUrlsForFlow, maxQuality)
           : downloadableUrlsForFlow;
 
-        if (!qualityCappedUrls.length) {
+        if (!qualityCappedUrls.length && !(isRedditTarget && redditOrderedImages.length)) {
           log(`\nNo downloadable media URL found at or below ${maxQuality}p.`);
           await captureFailureSnapshot(page, targetUrl, `no-url-below-${maxQuality}p`, log);
           failedTargets.push({
@@ -1003,6 +1018,10 @@ async function run(options = {}) {
         if (parsed.linkOnly) {
           log(`\n=== Downloadable media links for ${targetUrl} ===`);
           qualityCappedUrls.forEach((u, i) => log(`${i + 1}. ${u}`));
+          if (isRedditTarget && redditOrderedImages.length) {
+            log(`--- Photo links (${redditOrderedImages.length}) ---`);
+            redditOrderedImages.forEach((u, i) => log(`p${i + 1}. ${u}`));
+          }
           continue;
         }
 
@@ -1139,42 +1158,83 @@ async function run(options = {}) {
           }
         }
 
-        for (const candidate of candidatesToTry) {
-          try {
-            const headers = await buildDownloadHeaders(candidate);
-
+        const downloadedFiles = [];
+        if (candidatesToTry.length) {
+          for (const candidate of candidatesToTry) {
             try {
-              result = await downloadMedia(
-                candidate,
+              const headers = await buildDownloadHeaders(candidate);
+
+              try {
+                result = await downloadMedia(
+                  candidate,
+                  outputDir,
+                  headers,
+                  filePrefix,
+                  {
+                    includeTimestamp: !isInstagramTarget && !isRedditTarget,
+                    onProgress: (p) => onProgress({ ...p, stage: p.stage || "downloading", candidate }),
+                  }
+                );
+              } catch (err) {
+                if (isInstagramTarget && isInstagram429Error(err)) {
+                  log(`Instagram media request hit 429 for candidate ${candidate}.`);
+                  await waitForInstagram429Cooldown(log, instagram429CooldownMs);
+                  throw createInstagram429CooldownError("Instagram responded with 429. Suspending this run; retry later.");
+                }
+                throw err;
+              }
+
+              selectedCandidate = candidate;
+              selectedAssetId = getInstagramAssetId(candidate);
+              break;
+            } catch (err) {
+              lastError = err;
+            }
+          }
+        }
+
+        // Reddit photos: download each as filePrefix-001, -002, ... (gallery order)
+        let photoResults = [];
+        if (isRedditTarget && redditOrderedImages.length) {
+          log(`\nDownloading ${redditOrderedImages.length} photo(s) as ${filePrefix}-001...`);
+          for (let pi = 0; pi < redditOrderedImages.length; pi += 1) {
+            const photoUrl = redditOrderedImages[pi];
+            const numberedPrefix = `${filePrefix}-${String(pi + 1).padStart(3, "0")}`;
+            try {
+              const headers = await buildDownloadHeaders(photoUrl);
+              const photoResult = await downloadMedia(
+                photoUrl,
                 outputDir,
                 headers,
-                filePrefix,
+                numberedPrefix,
                 {
-                  includeTimestamp: !isInstagramTarget && !isRedditTarget,
-                  onProgress: (p) => onProgress({ ...p, stage: p.stage || "downloading", candidate }),
+                  includeTimestamp: false,
+                  onProgress: (p) => onProgress({ ...p, stage: p.stage || "downloading", candidate: photoUrl }),
                 }
               );
+              photoResults.push(photoResult);
+              log(`\nDownloaded media to: ${photoResult.filePath}`);
+              log(`Source URL: ${photoResult.url}`);
             } catch (err) {
-              if (isInstagramTarget && isInstagram429Error(err)) {
-                log(`Instagram media request hit 429 for candidate ${candidate}.`);
-                await waitForInstagram429Cooldown(log, instagram429CooldownMs);
-                throw createInstagram429CooldownError("Instagram responded with 429. Suspending this run; retry later.");
-              }
-              throw err;
+              lastError = err;
+              log(`Photo ${pi + 1}/${redditOrderedImages.length} failed: ${err.message}`);
             }
-
-            selectedCandidate = candidate;
-            selectedAssetId = getInstagramAssetId(candidate);
-            break;
-          } catch (err) {
-            lastError = err;
+          }
+          if (photoResults.length) {
+            for (const pr of photoResults) downloadedFiles.push(pr);
+            // result points at last photo so single-result consumers still work;
+            // all files are logged individually above
+            if (!result) {
+              result = photoResults[photoResults.length - 1];
+              selectedCandidate = "";
+            }
           }
         }
 
         if (!result) {
           await captureFailureSnapshot(page, targetUrl, "download-failed", log);
           throw new Error(
-            `Failed to download from ${qualityCappedUrls.length} candidate URLs. Last error: ${
+            `Failed to download from ${qualityCappedUrls.length} candidate URLs${redditOrderedImages.length ? ` + ${redditOrderedImages.length} photo(s)` : ""}. Last error: ${
               lastError ? lastError.message : "unknown"
             }`
           );
@@ -1229,8 +1289,20 @@ async function run(options = {}) {
           }
         }
 
-        log(`\nDownloaded media to: ${result.filePath}`);
-        log(`Source URL: ${result.url}`);
+        const resultWasPhotoLogged = Boolean(
+          isRedditTarget && photoResults.length && result && photoResults.some((pr) => pr.filePath === result.filePath)
+        );
+        if (isRedditTarget && photoResults.length && result && !resultWasPhotoLogged) {
+          // video + photos: video result not logged yet
+          log(`\nDownloaded media to: ${result.filePath}`);
+          log(`Source URL: ${result.url}`);
+          log(`Downloaded ${photoResults.length} photo(s) as ${filePrefix}-001... (logged individually above)`);
+        } else if (!resultWasPhotoLogged) {
+          log(`\nDownloaded media to: ${result.filePath}`);
+          log(`Source URL: ${result.url}`);
+        } else if (photoResults.length > 1) {
+          log(`Downloaded ${photoResults.length} photo(s) for ${targetUrl}`);
+        }
       } finally {
         await page.close().catch(() => {});
       }

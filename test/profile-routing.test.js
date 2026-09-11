@@ -35,10 +35,12 @@ test("named accounts resolve to isolated persistent profile directories", () => 
     assert.deepEqual(account, {
       userDataDir: "/profiles/work",
       profileDir: "Profile 2",
+      cdpUrl: "",
     });
     assert.deepEqual(unknown, {
       userDataDir: "/profiles/default",
       profileDir: "Default",
+      cdpUrl: "",
     });
   } finally {
     if (previousUserDataDir === undefined) delete process.env.BROWSER_USER_DATA_DIR;

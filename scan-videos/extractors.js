@@ -600,6 +600,7 @@ async function getInstagramUsernameFromOembed(page, targetUrl) {
 async function extractRedditMediaData(page) {
   const entries = await page.evaluate(() => {
     const out = new Set();
+    const imageOut = new Set();
     const toAbs = (value) => {
       if (!value) return "";
       const normalized = String(value)
@@ -628,10 +629,23 @@ async function extractRedditMediaData(page) {
       }
     };
 
+    const toAbsImg = (value) => toAbs(value);
+    const pushIfImage = (value) => {
+      const url = toAbsImg(value);
+      if (!url) return;
+      if (/\.gif(\?|$)/i.test(url)) return; // gif via video flow
+      if (/\.(jpe?g|png|webp|avif|bmp)(\?|$)/i.test(url)) {
+        imageOut.add(url);
+      }
+    };
+
     // shreddit-post content-href
     document.querySelectorAll("shreddit-post[content-href]").forEach((el) => {
       const href = el.getAttribute("content-href");
-      if (href) pushIfVideo(href);
+      if (href) {
+        pushIfVideo(href);
+        pushIfImage(href);
+      }
       // also permalink not needed
     });
 
@@ -642,10 +656,19 @@ async function extractRedditMediaData(page) {
     document.querySelectorAll('a[href*="redgifs"], a[href*="redd.it"], a[href*="v.redd"] ').forEach((el) => {
       const href = el.getAttribute("href") || el.href;
       pushIfVideo(href);
+      pushIfImage(href);
     });
     document.querySelectorAll('img[src*="preview.redd.it"]').forEach((el) => {
       const src = el.getAttribute("src") || el.src;
       if (src && /format=mp4/i.test(src)) pushIfVideo(src);
+    });
+    // still images (gallery / single): i.redd.it, preview.redd.it, external-preview
+    document.querySelectorAll("img[src]").forEach((el) => {
+      const src = el.getAttribute("src") || el.src || "";
+      if (!src) return;
+      if (/i\.redd\.it\//i.test(src) || /preview\.redd\.it\//i.test(src) || /external-preview\.redd\.it\//i.test(src)) {
+        pushIfImage(src);
+      }
     });
 
     // scripts regex
@@ -675,6 +698,7 @@ async function extractRedditMediaData(page) {
         if (depth > 6 || node == null) return;
         if (typeof node === "string") {
           pushIfVideo(node);
+          pushIfImage(node);
           return;
         }
         if (typeof node !== "object") return;
@@ -690,17 +714,30 @@ async function extractRedditMediaData(page) {
       if (window.__PRELOADED_STATE__) scan(window.__PRELOADED_STATE__);
     } catch {}
 
-    return Array.from(out);
+    return { videos: Array.from(out), images: Array.from(imageOut) };
   });
 
+  const rawVideos = Array.isArray(entries?.videos) ? entries.videos : Array.isArray(entries) ? entries : [];
+  const rawImages = Array.isArray(entries?.images) ? entries.images : [];
   const urls = [];
   const seen = new Set();
-  for (const raw of Array.isArray(entries) ? entries : []) {
+  for (const raw of rawVideos) {
     const cleaned = stripByteRangeParams(String(raw || "").trim());
     if (!cleaned) continue;
     if (seen.has(cleaned)) continue;
     seen.add(cleaned);
     urls.push(cleaned);
+  }
+  const imageUrls = [];
+  const seenImg = new Set();
+  for (const raw of rawImages) {
+    const cleaned = stripByteRangeParams(String(raw || "").trim());
+    if (!cleaned) continue;
+    if (/\.gif(\?|$)/i.test(cleaned)) continue;
+    if (!/\.(jpe?g|png|webp|avif|bmp)(\?|$)/i.test(cleaned)) continue;
+    if (seenImg.has(cleaned)) continue;
+    seenImg.add(cleaned);
+    imageUrls.push(cleaned);
   }
   // extract redgifs ids
   const redgifsIds = [];
@@ -713,7 +750,7 @@ async function extractRedditMediaData(page) {
     }
   }
   // also scan all urls again for watch ids in page content via separate evaluate already covered, but keep
-  return { urls, redgifsIds };
+  return { urls, redgifsIds, imageUrls };
 }
 
 async function fetchRedgifsMediaUrls(page, redgifsId) {
