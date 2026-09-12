@@ -267,8 +267,19 @@ function pickLargestDisplayResource(resources) {
 // Collect post images from one shortcode-media-like node, in display order.
 // Only touches post-image keys (display_url / display_resources / sidecar
 // children) so owner profile pics and other chrome never leak in.
+// Video nodes are skipped: a reel/video's display_url / og:image is just its
+// cover thumbnail, not a photo to download.
+function isInstagramVideoNode(node) {
+  if (!node || typeof node !== "object") return false;
+  if (node.is_video === true) return true;
+  const typename = String(node.__typename || "").toLowerCase();
+  if (typename === "graphvideo") return true;
+  return false;
+}
+
 function collectPostImagesFromMediaNode(node, out) {
   if (!node || typeof node !== "object" || Array.isArray(node)) return;
+  if (isInstagramVideoNode(node)) return;
 
   const edges =
     node.edge_sidecar_to_children &&
@@ -281,6 +292,7 @@ function collectPostImagesFromMediaNode(node, out) {
     for (const edge of edges) {
       const child = edge && typeof edge === "object" && edge.node ? edge.node : null;
       if (!child || typeof child !== "object") continue;
+      if (isInstagramVideoNode(child)) continue;
       const direct = decodeInstagramHtmlUrl(child.display_url);
       if (isInstagramPostImageUrl(direct)) out.push(stripByteRangeParams(direct));
       const largest = pickLargestDisplayResource(child.display_resources);

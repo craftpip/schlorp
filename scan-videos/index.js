@@ -961,6 +961,10 @@ async function run(options = {}) {
           const jsonPhotos = dedupeInstagramPhotos(Array.from(instagramImageHintUrls).filter((u) => isPhotoUrl(u)));
           if (jsonPhotos.length) {
             instagramOrderedImages = jsonPhotos;
+          } else if (instagramTargetHintUrls.size > 0) {
+            // Pure video/reel: meta og:image / DOM stills are just the video
+            // cover thumbnail, not photos to download.
+            instagramOrderedImages = [];
           } else {
             instagramOrderedImages = dedupeInstagramPhotos(
               [...metaPhotos, ...domPhotos].map((u) => stripByteRangeParams(u)).filter(Boolean)
