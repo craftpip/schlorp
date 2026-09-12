@@ -81,7 +81,13 @@ export default function App() {
         const r = await fetch("/sync-config");
         const j = await r.json();
         const lists = j.lists || {};
-        const flagged = Object.values(lists).some((v) => v && v.paused);
+        // Only configured lists count: stale state for removed lists must not flag the tab.
+        const configuredUrls = new Set(
+          (j.config?.savedLists || []).map((l) => String(l?.url || "").trim()).filter(Boolean)
+        );
+        const flagged = Object.entries(lists).some(
+          ([url, v]) => v && v.paused && configuredUrls.has(String(url).trim())
+        );
         setHasFlagged(!!flagged);
       } catch { setHasFlagged(false); }
     };

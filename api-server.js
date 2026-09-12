@@ -23,6 +23,17 @@ const ffmpegBin =
     }
   })();
 
+const ffprobeBin =
+  process.env.FFPROBE_BIN ||
+  (() => {
+    try {
+      require("child_process").execSync("which ffprobe", { stdio: "ignore" });
+      return "ffprobe";
+    } catch {
+      return null;
+    }
+  })();
+
 const app = express();
 const rootDir = __dirname;
 const mediaDir = path.join(rootDir, "media");
@@ -192,7 +203,7 @@ function wsBroadcast(obj) {
   }
 }
 function wsBroadcastQueue() {
-  wsBroadcast({ type: "queue:snapshot", active: webQueue.active, completed: webQueue.completed, gap: webQueue.gap || { minMs: 0, maxMs: 0 }, gapWait: gapWaitState });
+  wsBroadcast({ type: "queue:snapshot", active: webQueue.active, completed: webQueue.completed, gap: webQueue.gap || { minMs: 0, maxMs: 0 }, gapWait: gapWaitState, paused: queuePaused });
 }
 function wsBroadcastProgress(id, stage, pct, detail, filePath) {
   wsBroadcast({ type: "job:progress", id, stage, pct, detail, filePath });
@@ -656,7 +667,29 @@ app.use((req, res, next) => {
 app.get("/scan-saved", (_req, res) => {
   res.redirect("/dashboard");
 });
-app.use("/media", express.static(mediaDir));
+app.use("/media", express.static(mediaDir, {
+  // Some downloaded `.gif` files are actually MP4 bytes (saved from a .gif
+  // URL). Sniff the magic bytes so the player gets a playable MIME type:
+  // `ftyp` at offset 4 => MP4 container => serve as video/mp4.
+  setHeaders: (res, filePath) => {
+    if (/\.gif$/i.test(filePath)) {
+      let fd = null;
+      try {
+        fd = fsSync.openSync(filePath, "r");
+        const buf = Buffer.alloc(12);
+        if (fsSync.readSync(fd, buf, 0, 12, 0) >= 8 && buf.subarray(4, 8).toString("latin1") === "ftyp") {
+          res.setHeader("Content-Type", "video/mp4");
+        }
+      } catch {
+        // ignore sniffing errors — fall through with default content type
+      } finally {
+        if (fd !== null) {
+          try { fsSync.closeSync(fd); } catch {}
+        }
+      }
+    }
+  },
+}));
 function fileEntryTimes(stat) {
   const birth =
     stat.birthtime && Number.isFinite(stat.birthtimeMs) && stat.birthtimeMs > 0
@@ -830,6 +863,134 @@ app.get("/api/gifvideo", async (req, res) => {
         }
       }
     }
+    return res.sendFile(outPath);
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+// --- Embedded video thumbnail (attached_pic only, zero re-encode, cached) ---
+// Serves the cover art embedded inside the video file itself (e.g. mp4
+// `attached pic` stream). No frame extraction, no transcoding: ffprobe detects
+// the attached-pic stream, ffmpeg copies its bytes out with `-c copy`.
+// Files without an embedded thumbnail → 404 so the client falls back to icon.
+const thumbCacheDir = path.join(require("os").tmpdir(), "xdl-thumbcache");
+const thumbInFlight = new Map();
+const THUMB_VIDEO_EXTS = new Set(
+  ["mp4", "m4v", "mov", "mkv", "webm", "avi", "mpg", "mpeg", "3gp", "flv", "ts", "m2ts", "wmv", "ogv"]
+);
+
+app.get("/api/mediathumb", async (req, res) => {
+  try {
+    const folder = String(req.query?.folder || "");
+    // `key` is the Media rowKey: `rel` in flat mode (may contain "/"),
+    // plain file name otherwise. `name` kept as an alias for non-flat callers.
+    const key = String(req.query?.key || req.query?.name || req.query?.rel || "").replace(/\\/g, "/").trim();
+    if (!key) {
+      return res.status(400).json({ ok: false, error: "key (file) required" });
+    }
+    if (key.startsWith("/") || key.includes("..")) {
+      return res.status(400).json({ ok: false, error: "invalid path" });
+    }
+    const dir = resolveMediaOutputDir(folder);
+    const srcPath = path.join(dir, ...key.split("/").filter(Boolean));
+    const rel = path.relative(mediaDir, srcPath);
+    if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
+      return res.status(400).json({ ok: false, error: "invalid path" });
+    }
+    const stat = await fs.stat(srcPath).catch(() => null);
+    if (!stat) return res.status(404).json({ ok: false, error: "not found" });
+    if (!stat.isFile()) return res.status(400).json({ ok: false, error: "not a file" });
+    const ext = String(key.split(".").pop() || "").toLowerCase();
+    if (!THUMB_VIDEO_EXTS.has(ext)) {
+      return res.status(404).json({ ok: false, error: "not a video file" });
+    }
+    if (!ffmpegBin || !ffprobeBin) {
+      return res.status(503).json({ ok: false, error: "ffmpeg/ffprobe not installed" });
+    }
+
+    const cacheSeed = `${stat.mtimeMs}:${stat.size}:${rel}`;
+    const hash = crypto.createHash("sha1").update(cacheSeed).digest("hex").slice(0, 20);
+
+    const sendCached = async () => {
+      const entries = await fs.readdir(thumbCacheDir).catch(() => []);
+      const hit = entries.find((n) => n.startsWith(`${hash}.`));
+      if (!hit) return false;
+      res.set("Cache-Control", "public, max-age=86400, immutable");
+      return res.sendFile(path.join(thumbCacheDir, hit));
+    };
+    if (await sendCached()) return;
+
+    if (thumbInFlight.has(hash)) {
+      try { await thumbInFlight.get(hash); } catch {}
+      if (await sendCached()) return;
+      return res.status(404).json({ ok: false, error: "no embedded thumbnail" });
+    }
+
+    const job = (async () => {
+      await fs.mkdir(thumbCacheDir, { recursive: true });
+      const { execFile: _execFile } = require("child_process");
+      const { promisify: _promisify } = require("util");
+      const execFileAsync = _promisify(_execFile);
+      // Cheap probe: stream metadata only, no decoding.
+      const { stdout } = await execFileAsync(
+        ffprobeBin,
+        ["-v", "error", "-show_streams", "-of", "json", srcPath],
+        { timeout: 15000, maxBuffer: 4 * 1024 * 1024 }
+      );
+      let streams = [];
+      try { streams = JSON.parse(stdout || "{}").streams || []; } catch { streams = []; }
+      const attached = streams.find((s) => {
+        const disp = s && s.disposition;
+        if (disp && Number(disp.attached_pic) === 1) return true;
+        // Fallback: image-codec stream that is not the primary video track.
+        if (s && s.codec_type === "video" && /^(mjpeg|png|jpg|jpeg|webp)$/i.test(String(s.codec_name || ""))) {
+          if (Number(s.index) > 0) return true;
+        }
+        return false;
+      });
+      if (!attached) {
+        const err = new Error("no embedded thumbnail");
+        err.code = "NO_ATTACHED_PIC";
+        throw err;
+      }
+      const streamIndex = Number(attached.index);
+      const outExt = /png/i.test(String(attached.codec_name || "")) ? "png"
+        : /webp/i.test(String(attached.codec_name || "")) ? "webp" : "jpg";
+      const outPath = path.join(thumbCacheDir, `${hash}.${outExt}`);
+      if (!fsSync.existsSync(outPath)) {
+        await new Promise((resolve, reject) => {
+          const cp = spawn(ffmpegBin, ["-y", "-v", "error", "-i", srcPath, "-map", `0:${streamIndex}`, "-c", "copy", outPath], {
+            stdio: "ignore",
+          });
+          const timer = setTimeout(() => cp.kill("SIGKILL"), 30000);
+          cp.on("error", reject);
+          cp.on("close", (code) => {
+            clearTimeout(timer);
+            code === 0 ? resolve() : reject(new Error(`ffmpeg exited with code ${code}`));
+          });
+        });
+        const outStat = await fs.stat(outPath).catch(() => null);
+        if (!outStat || !outStat.size) {
+          await fs.unlink(outPath).catch(() => {});
+          throw new Error("thumbnail extraction produced no output");
+        }
+      }
+      return outPath;
+    })();
+    thumbInFlight.set(hash, job);
+    let outPath = null;
+    try {
+      outPath = await job;
+    } catch (error) {
+      if (error && error.code === "NO_ATTACHED_PIC") {
+        return res.status(404).json({ ok: false, error: "no embedded thumbnail" });
+      }
+      throw error;
+    } finally {
+      thumbInFlight.delete(hash);
+    }
+    res.set("Cache-Control", "public, max-age=86400, immutable");
     return res.sendFile(outPath);
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message });
@@ -1939,7 +2100,7 @@ app.post("/scan-saved", async (req, res) => {
 // --- Queue API ---
 app.get("/queue", async (_req, res) => {
   if (!queueLoaded) await loadWebQueue();
-  res.json({ ok: true, active: webQueue.active, completed: webQueue.completed, gap: webQueue.gap || { minMs: 0, maxMs: 0 }, gapWait: gapWaitState });
+  res.json({ ok: true, active: webQueue.active, completed: webQueue.completed, gap: webQueue.gap || { minMs: 0, maxMs: 0 }, gapWait: gapWaitState, paused: queuePaused });
 });
 app.post("/queue/add", async (req, res) => {
   const urls = Array.isArray(req.body?.urls)
@@ -2054,7 +2215,7 @@ const server = http.createServer(app);
 wss = new WebSocketServer({ server, path: "/ws" });
 wss.on("connection", async (ws) => {
   if (!queueLoaded) await loadWebQueue();
-  ws.send(JSON.stringify({ type: "queue:snapshot", active: webQueue.active, completed: webQueue.completed }));
+  ws.send(JSON.stringify({ type: "queue:snapshot", active: webQueue.active, completed: webQueue.completed, gap: webQueue.gap || { minMs: 0, maxMs: 0 }, gapWait: gapWaitState, paused: queuePaused }));
   ws.send(
     JSON.stringify({
       type: "health",

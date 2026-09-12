@@ -74,7 +74,7 @@ function fmtGapMs(ms) {
 }
 
 export default function Dashboard() {
-  const { active, completed, logsById, gap, gapWait, setGap, add, remove, retry, clearCompleted, clearActive } = useQueue();
+  const { active, completed, logsById, gap, gapWait, paused, pause, resume, setGap, add, remove, retry, retryAll, clearCompleted, clearActive } = useQueue();
   const [urls, setUrls] = useState("");
   const [folder, setFolder] = useState(() => { try { return localStorage.getItem("xdl_dash_folder") || ""; } catch { return ""; } });
   const [folderOptions, setFolderOptions] = useState([]);
@@ -86,6 +86,25 @@ export default function Dashboard() {
   useEffect(() => { try { localStorage.setItem("xdl_dash_account", account); } catch {} }, [account]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [pauseBusy, setPauseBusy] = useState(false);
+  const [retryAllBusy, setRetryAllBusy] = useState(false);
+  const failedCount = completed.filter((i) => i.status === "error").length;
+  const onRetryAll = async () => {
+    const ids = completed.filter((i) => i.status === "error").map((i) => i.id);
+    if (!ids.length) return;
+    setRetryAllBusy(true);
+    try { await retryAll(ids); } catch {}
+    finally { setRetryAllBusy(false); }
+  };
+  const queuedCount = active.filter((i) => i.status === "queued").length;
+  const onTogglePause = async () => {
+    setPauseBusy(true);
+    try {
+      if (paused) await resume();
+      else await pause();
+    } catch {}
+    finally { setPauseBusy(false); }
+  };
   const [gapMin, setGapMin] = useState("");
   const [gapMax, setGapMax] = useState("");
   const [gapErr, setGapErr] = useState("");
@@ -196,8 +215,15 @@ export default function Dashboard() {
                   {accountOptions.filter((n) => n !== "default").map((n) => <option key={n} value={n}>{n}</option>)}
                 </select>
               </div>
-              <div className="col" style={{ flex: "0 0 auto" }}>
+              <div className="col" style={{ flex: "0 0 auto", display: "flex", gap: 8, alignItems: "stretch" }}>
                 <button type="submit" className="btn btn-primary btn-block btn-lg" disabled={busy}><i className="bi bi-plus-lg" /> Add to queue</button>
+                {queuedCount > 0 && (
+                  paused ? (
+                    <button type="button" className="btn btn-primary btn-lg" disabled={pauseBusy} onClick={onTogglePause} title="Resume queue — start next download"><i className="bi bi-play-fill" /> Resume</button>
+                  ) : (
+                    <button type="button" className="btn btn-outline-secondary btn-lg" disabled={pauseBusy} onClick={onTogglePause} title="Pause after current file finishes"><i className="bi bi-pause-fill" /> Pause</button>
+                  )
+                )}
               </div>
             </div>
             {err && <div className="status-text" style={{ color: "var(--danger)", marginTop: 8 }}>{err}</div>}
@@ -245,7 +271,10 @@ export default function Dashboard() {
             <button type="button" className="btn btn-sm btn-outline-secondary" onClick={clearActive} disabled={!active.filter((i) => i.status !== "running").length} title="Clear queued items — running downloads are kept" style={{ height: 30 }}><i className="bi bi-x-lg" /> Clear</button>
           )}
           {tab === "completed" && (
-            <button type="button" className="btn btn-sm btn-outline-secondary" onClick={clearCompleted} disabled={!completed.length} title="Clear entries only — files stay in /media" style={{ height: 30 }}><i className="bi bi-x-lg" /> Clear</button>
+            <>
+              <button type="button" className="btn btn-sm btn-outline-secondary" onClick={onRetryAll} disabled={!failedCount || retryAllBusy} title="Retry all failed downloads" style={{ height: 30 }}><i className="bi bi-arrow-counterclockwise" /> Retry all{failedCount ? ` (${failedCount})` : ""}</button>
+              <button type="button" className="btn btn-sm btn-outline-secondary" onClick={clearCompleted} disabled={!completed.length} title="Clear entries only — files stay in /media" style={{ height: 30 }}><i className="bi bi-x-lg" /> Clear</button>
+            </>
           )}
         </div>
       </div>

@@ -100,16 +100,16 @@ async function connectToCdp(cdpUrl, { log } = {}) {
   try {
     const cb = await getCloakBrowser();
     if (cb && typeof cb.connect === "function") {
-      browser = await cb.connect({ browserWSEndpoint: wsEndpoint });
+      browser = await cb.connect({ browserWSEndpoint: wsEndpoint, defaultViewport: null });
     } else if (cb && cb.default && typeof cb.default.connect === "function") {
-      browser = await cb.default.connect({ browserWSEndpoint: wsEndpoint });
+      browser = await cb.default.connect({ browserWSEndpoint: wsEndpoint, defaultViewport: null });
     }
   } catch {}
   if (!browser) {
     const pc = await getPuppeteerCore();
     const connectFn = pc.connect || (pc.default && pc.default.connect);
     if (!connectFn) throw new Error("puppeteer-core connect not available");
-    browser = await connectFn({ browserWSEndpoint: wsEndpoint });
+    browser = await connectFn({ browserWSEndpoint: wsEndpoint, defaultViewport: null });
   }
   browser.__isCdp = true;
   browser.__cdpUrl = String(cdpUrl).trim();

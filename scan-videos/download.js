@@ -23,6 +23,76 @@ function parsePositiveIntEnv(name, fallback) {
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 }
 
+// Extension chosen from what the server actually sent, not the URL:
+// Reddit preview URLs end in `.gif` while returning MP4 bytes (and vice versa).
+const CONTENT_TYPE_EXT = {
+  "video/mp4": "mp4",
+  "video/webm": "webm",
+  "video/quicktime": "mov",
+  "video/x-matroska": "mkv",
+  "video/x-msvideo": "avi",
+  "image/gif": "gif",
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+  "image/avif": "avif",
+  "image/bmp": "bmp",
+  "audio/mpeg": "mp3",
+  "audio/mp4": "m4a",
+  "audio/ogg": "ogg",
+  "audio/wav": "wav",
+  "audio/flac": "flac",
+};
+
+function extFromContentType(value) {
+  const mime = String(value || "").split(";")[0].trim().toLowerCase();
+  return CONTENT_TYPE_EXT[mime] || "";
+}
+
+// Magic-byte sniff of the actual payload (content-type headers lie too).
+function sniffMediaKind(buffer) {
+  if (!buffer || buffer.length < 10) return "";
+  if (buffer.length >= 12 && buffer.subarray(4, 8).toString("latin1") === "ftyp") return "mp4";
+  const head6 = buffer.subarray(0, 6).toString("latin1");
+  if (head6 === "GIF87a" || head6 === "GIF89a") return "gif";
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return "jpg";
+  if (
+    buffer.length >= 8 &&
+    buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e &&
+    buffer[3] === 0x47 && buffer[4] === 0x0d && buffer[5] === 0x0a &&
+    buffer[6] === 0x1a && buffer[7] === 0x0a
+  ) return "png";
+  if (
+    buffer.length >= 12 &&
+    buffer.subarray(0, 4).toString("latin1") === "RIFF" &&
+    buffer.subarray(8, 12).toString("latin1") === "WEBP"
+  ) return "webp";
+  return "";
+}
+
+function gifDimensions(buffer) {
+  try {
+    if (!buffer || buffer.length < 10) return null;
+    const head = buffer.subarray(0, 6).toString("latin1");
+    if (head !== "GIF87a" && head !== "GIF89a") return null;
+    return { width: buffer.readUInt16LE(6), height: buffer.readUInt16LE(8) };
+  } catch {
+    return null;
+  }
+}
+
+async function readHead(filePath, length) {
+  let handle = null;
+  try {
+    handle = await fs.open(filePath, "r");
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, 0);
+    return buffer.subarray(0, bytesRead);
+  } finally {
+    if (handle) await handle.close().catch(() => {});
+  }
+}
+
 function createAbortControllerWithTimeout(timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => {
@@ -277,8 +347,11 @@ async function downloadMedia(url, outDir, headers = {}, filePrefix = "media", op
       throw new Error(`Download failed with status ${response.status}`);
     }
 
-    const extMatch = new URL(targetUrl).pathname.match(/\.([a-z0-9]+)$/i);
-    const ext = extMatch ? extMatch[1] : "bin";
+    const urlExtMatch = new URL(targetUrl).pathname.match(/\.([a-z0-9]+)$/i);
+    const urlExt = urlExtMatch ? urlExtMatch[1].toLowerCase() : "";
+    // Content-type first (preview.redd.it/*.gif often returns video/mp4),
+    // URL extension as fallback.
+    const ext = extFromContentType(response.headers.get("content-type")) || urlExt || "bin";
     const filePath = buildOutputFilePath(outDir, filePrefix, ext, options);
     if (typeof options.onProgress === "function") {
       try { options.onProgress({ stage: "downloading", filePath }); } catch {}
@@ -305,8 +378,40 @@ async function downloadMedia(url, outDir, headers = {}, filePrefix = "media", op
     });
 
     await pipeline(nodeStream, progressTransform, createWriteStream(filePath), { signal });
-    return { filePath, url: targetUrl };
+
+    // Verify the bytes match the extension; fix it when the URL lied
+    // (e.g. MP4 payload saved as .gif). Returns the final path.
+    let finalPath = filePath;
+    try {
+      const head = await readHead(filePath, 12);
+      const realKind = sniffMediaKind(head);
+      if (realKind && realKind !== ext.toLowerCase()) {
+        const corrected = /\.[a-z0-9]+$/i.test(filePath)
+          ? filePath.replace(/\.[a-z0-9]+$/i, `.${realKind}`)
+          : `${filePath}.${realKind}`;
+        await fs.rename(filePath, corrected);
+        finalPath = corrected;
+      }
+      // Reject Reddit 1px placeholder GIFs (e.g. 35-byte GIF87a 1x1) so the
+      // caller falls through to the next candidate instead of keeping junk.
+      if (/\.(gif)$/i.test(finalPath)) {
+        const dims = gifDimensions(await readHead(finalPath, 10));
+        if (dims && dims.width <= 2 && dims.height <= 2) {
+          await fs.unlink(finalPath).catch(() => {});
+          throw new Error(
+            `Downloaded GIF is a ${dims.width}x${dims.height} placeholder; trying next candidate`
+          );
+        }
+      }
+    } catch (error) {
+      // Placeholder rejection must propagate (caller tries next candidate);
+      // anything else here is best-effort verification — keep the file.
+      if (/placeholder; trying next candidate/i.test(error && error.message)) throw error;
+    }
+    return { filePath: finalPath, url: targetUrl };
   } catch (error) {
+    // Don't leave partial/failed payloads behind as fake successes.
+    try { await fs.unlink(filePath).catch(() => {}); } catch {}
     const isAbortError = error && (error.name === "AbortError" || error.code === "ABORT_ERR");
     if (isAbortError) {
       throw new Error(`Media download request timed out after ${DOWNLOAD_FETCH_TIMEOUT_MS}ms`);

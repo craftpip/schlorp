@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import ShortcutsHelp from "./ShortcutsHelp";
 
 function parseFolderBase(fp) {
   const raw = String(fp || "");
@@ -61,19 +62,16 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const [randCursor, setRandCursor] = useState(-1);
   const randHistoryRef = useRef([]);
   const [yConfirm, setYConfirm] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
+  // `.gif` files that are actually MP4 bytes (mislabeled at download time)
+  // fail in <img> — flip to a <video> element on image error.
+  const [gifAsVideo, setGifAsVideo] = useState(false);
   const lastYRef = useRef(0);
   const yConfirmTimerRef = useRef(null);
   const doDeleteFileRef = useRef(null);
   const randCursorRef = useRef(-1);
   const fmtTime = (s) => { if (!s || Number.isNaN(s)) return "0:00"; const m = Math.floor(s/60); const sec = String(Math.floor(s%60)).padStart(2,"0"); return `${m}:${sec}`; };
-  const isGif = String(filePathEff || effSrc || "").split(".").pop()?.toLowerCase() === "gif";
-  const gifVideoUrl = (() => {
-    if (!isGif) return "";
-    const { folder, base } = parseFolderBase(filePathEff);
-    return base ? `/api/gifvideo?folder=${encodeURIComponent(folder)}&name=${encodeURIComponent(base)}` : "";
-  })();
-  const [gifFailed, setGifFailed] = useState(false);
-  const mediaUrl = gifVideoUrl || effSrc;
+  const mediaUrl = effSrc;
   const navRef = useRef(mediaUrl);
   const [loadedUrl, setLoadedUrl] = useState(mediaUrl);
   const loadTimerRef = useRef(null);
@@ -91,6 +89,9 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const isVideo = /^(mp4|webm|mkv|mov|m4v|avi|mpg|mpeg|3gp|flv|ts|m3u8)$/i.test(ext);
   const isAudio = /^(mp3|m4a|aac|ogg|wav|flac|opus)$/i.test(ext);
   const isImage = /^(jpg|jpeg|png|gif|webp|bmp|avif)$/i.test(ext);
+  const isGif = ext === "gif";
+  const gifAsVideoEff = isGif && gifAsVideo;
+  const showImage = isImage && !gifAsVideoEff;
   const isFormatKnown = isVideo || isAudio || isImage;
   const hasPrev = idx != null && idx > 0;
   const hasNext = idx != null && viewable && idx < viewable.length - 1;
@@ -112,8 +113,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   useEffect(() => { try { localStorage.setItem("xdl_viewer_rate", String(rate)); } catch {} }, [rate]);
   useEffect(() => { try { localStorage.setItem("xdl_viewer_seekFrames", seekFrames ? "1" : "0"); } catch {} }, [seekFrames]);
   useEffect(() => { try { localStorage.setItem("xdl_viewer_endMode", endMode); } catch {} }, [endMode]);
-  useEffect(() => { setZoom(1); setOrigin("50% 50%"); setPan({x:0,y:0}); setCurrent(0); setDuration(0); setYConfirm(false); setGifFailed(false); lastYRef.current = 0; if (yConfirmTimerRef.current) { clearTimeout(yConfirmTimerRef.current); yConfirmTimerRef.current = null; } setTimeout(() => videoRef.current?.focus(), 50); }, [loadedUrl]);
-  useEffect(() => { if (isGif && endMode === "none") setEndMode("repeat"); }, [isGif]);
+  useEffect(() => { setZoom(1); setOrigin("50% 50%"); setPan({x:0,y:0}); setCurrent(0); setDuration(0); setGifAsVideo(false); setYConfirm(false); lastYRef.current = 0; if (yConfirmTimerRef.current) { clearTimeout(yConfirmTimerRef.current); yConfirmTimerRef.current = null; } setTimeout(() => videoRef.current?.focus(), 50); }, [loadedUrl]);
   useEffect(() => () => { if (yConfirmTimerRef.current) clearTimeout(yConfirmTimerRef.current); }, []);
   const navigatingViaRandomRef = useRef(false);
   useEffect(() => {
@@ -244,7 +244,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   cycleEndModeRef.current = cycleEndMode;
   const handleWheel = (e) => {
     if (e.shiftKey) {
-      if ((isVideo || isAudio || isGif) && videoRef.current) {
+      if ((isVideo || isAudio || gifAsVideoEff) && videoRef.current) {
         e.preventDefault();
         const d = seekFrames ? 1/30 : 1;
         const raw = (e.deltaY !== 0 ? e.deltaY : e.deltaX !== 0 ? e.deltaX : e.wheelDelta ? -e.wheelDelta : 0);
@@ -279,12 +279,12 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   };
   const resetZoom = () => { setZoom(1); setOrigin("50% 50%"); setPan({x:0,y:0}); };
   const handleMouseDown = (e) => {
-    if (!isImage && videoRef.current) {
+    if (!showImage && videoRef.current) {
       wasPlayingRef.current = !videoRef.current.paused;
       if (wasPlayingRef.current) videoRef.current.pause();
     }
     if (zoom === 1 || isAudio) {
-      if (!isImage) e.preventDefault();
+      if (!showImage) e.preventDefault();
       return;
     }
     dragRef.current = { dragging: true, startX: e.clientX, startY: e.clientY, origX: pan.x, origY: pan.y };
@@ -299,7 +299,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const handleMouseUp = () => {
     const wasDragging = dragRef.current.dragging;
     dragRef.current.dragging = false;
-    if (wasPlayingRef.current && videoRef.current && !isImage) {
+    if (wasPlayingRef.current && videoRef.current && !showImage) {
       const v = videoRef.current;
       wasPlayingRef.current = false;
       v.play().catch(() => {});
@@ -312,7 +312,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     const t = e.touches[0];
     if (!t) return;
     touchRef.current = { startX: t.clientX, startY: t.clientY, startTime: videoRef.current?.currentTime || 0, isSeeking: false, isHorizontal: null, startPan: { ...pan }, lastDx: 0 };
-    if (!isImage && videoRef.current) {
+    if (!showImage && videoRef.current) {
       wasPlayingRef.current = !videoRef.current.paused;
       if (wasPlayingRef.current) videoRef.current.pause();
     }
@@ -363,7 +363,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       else if (dy > 0) dispatchPrevRef.current();
       return;
     }
-    if (wasPlayingRef.current && videoRef.current && !isImage) {
+    if (wasPlayingRef.current && videoRef.current && !showImage) {
       const v = videoRef.current;
       wasPlayingRef.current = false;
       v.play().catch(() => {});
@@ -379,7 +379,11 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       const isRight = k === "ArrowRight" || k === "d" || k === "D";
       const isUp = k === "ArrowUp" || k === "w" || k === "W";
       const isDown = k === "ArrowDown" || k === "s" || k === "S";
+      if ((k === "/" || k === "?") && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        e.preventDefault(); setShowHelp((v) => !v); return;
+      }
       if (k === "Escape") {
+        if (showHelp) { e.preventDefault(); setShowHelp(false); return; }
         if (document.fullscreenElement) { document.exitFullscreen().catch(() => {}); e.preventDefault(); return; }
         e.preventDefault(); onClose();
       } else if (e.key.toLowerCase() === "f" && !e.ctrlKey && !e.altKey && !e.metaKey) {
@@ -389,7 +393,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       } else if (e.key.toLowerCase() === "e" && !e.ctrlKey && !e.altKey && !e.metaKey) {
         if (e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA" && !e.target.isContentEditable) { e.preventDefault(); setSeekFrames((v) => !v); }
       } else if ((e.code === "Space" || e.key === " " || e.key === "Spacebar") && !e.ctrlKey && !e.altKey && !e.metaKey) {
-        if ((!isImage || isGif) && videoRef.current) {
+        if ((!showImage) && videoRef.current) {
           e.preventDefault();
           if (jogRef.current) { clearInterval(jogRef.current); jogRef.current = null; jogWasPlayingRef.current = false; videoRef.current.pause(); }
           else { if (videoRef.current.paused) videoRef.current.play(); else videoRef.current.pause(); }
@@ -407,7 +411,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       } else if ((e.key === ">" || (e.key === "." && e.shiftKey)) && !e.ctrlKey && !e.altKey) {
         e.preventDefault(); stepRate(0.1);
       } else if (isLeft) {
-        if (isImage || isGif) { e.preventDefault(); dispatchPrevRef.current(); }
+        if (showImage) { e.preventDefault(); dispatchPrevRef.current(); }
         else if (videoRef.current) {
           e.preventDefault(); const v = videoRef.current;
           if (e.shiftKey) {
@@ -425,7 +429,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
           } else { v.currentTime = Math.max(0, v.currentTime - 1); }
         }
       } else if (isRight) {
-        if (isImage || isGif) { e.preventDefault(); dispatchNextRef.current(); }
+        if (showImage) { e.preventDefault(); dispatchNextRef.current(); }
         else if (videoRef.current) {
           e.preventDefault(); const v = videoRef.current;
           if (e.shiftKey) {
@@ -465,7 +469,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     const prev = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     return () => { document.removeEventListener("keydown", onKey); document.body.style.overflow = prev; };
-  }, [onClose, hasPrev, hasNext, onPrev, onNext, isImage, isGif, duration, seekFrames, rate]);
+  }, [onClose, hasPrev, hasNext, onPrev, onNext, showImage, duration, seekFrames, rate, showHelp]);
   const onCloseRef = useRef(onClose);
   useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
   useEffect(() => {
@@ -481,7 +485,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     const onShiftDown = (e) => {
       if (e.key !== "Shift" || e.repeat) return;
       if (e.target && ((e.target.tagName === "INPUT" && e.target.type !== "range") || e.target.tagName === "TEXTAREA" || e.target.isContentEditable)) return;
-      if (isImage || !videoRef.current || videoRef.current.paused) return;
+      if (showImage || !videoRef.current || videoRef.current.paused) return;
       if (shiftWasPlayingRef.current) return;
       shiftWasPlayingRef.current = true;
       videoRef.current.pause();
@@ -489,7 +493,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     const onShiftUp = (e) => {
       if (e.key !== "Shift") return;
       if (e.target && ((e.target.tagName === "INPUT" && e.target.type !== "range") || e.target.tagName === "TEXTAREA" || e.target.isContentEditable)) { shiftWasPlayingRef.current = false; return; }
-      if (!shiftWasPlayingRef.current || !videoRef.current || isImage) { shiftWasPlayingRef.current = false; return; }
+      if (!shiftWasPlayingRef.current || !videoRef.current || showImage) { shiftWasPlayingRef.current = false; return; }
       shiftWasPlayingRef.current = false;
       videoRef.current.play().catch(() => {});
     };
@@ -507,7 +511,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       window.removeEventListener("blur", onBlur);
       stopJog();
     };
-  }, [isImage]);
+  }, [showImage]);
 
   const doDeleteFile = async () => {
     const { folder, base } = parseFolderBase(filePathEff);
@@ -518,12 +522,12 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       const r = await fetch(`/api/media?folder=${encodeURIComponent(folder)}&name=${encodeURIComponent(base)}`, { method: "DELETE" });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j.error || "delete failed");
-      // Stay at current index: after deletion the next file slides into this position.
-      // Only navigate if we deleted the last item (no next) or it was the only file.
-      if (total <= 1) onClose();
-      else if (!hasNext && hasPrev) onPrev();
-      // else hasNext -> stay at same idx; onDeleted reload will make that idx point to next file
+      // Parent owns viewer position (key-based, plan 014): it moves to the
+      // neighbour (next ?? prev) and reloads without jumping to the top.
+      // Fall back to local navigation only when no parent handler is wired.
       if (onDeleted) onDeleted(filePathEff);
+      else if (total <= 1) onClose();
+      else if (!hasNext && hasPrev) onPrev();
     } catch (e) { alert(e.message); }
     finally { setDeleting(false); }
   };
@@ -536,6 +540,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   doDeleteFileRef.current = doDeleteFile;
 
   return (
+    <>
     <div
       onClick={onClose}
       onContextMenu={(e) => e.preventDefault()}
@@ -577,11 +582,13 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   .fv-header{ flex-wrap: nowrap !important; padding: 6px 8px !important; }
   .fv-header > div:nth-child(2){ display: none !important; }
 }`}</style>
-        <div ref={containerRef} onWheel={handleWheel} onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp} onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd} title={zoom>1 ? "Drag to pan · scroll to zoom" : "Scroll to zoom · drag to pan when zoomed · swipe up/down prev/next, left/right seek"} style={{ position: "relative", flex: "1 1 auto", minHeight: 0, overflow: "hidden", background: "#080a14", display: "flex", alignItems: "center", justifyContent: "center", padding: isImage ? 16 : 0, cursor: "default", touchAction: "none" }}>
+        <div ref={containerRef} onWheel={handleWheel} onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp} onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd} title={zoom>1 ? "Drag to pan · scroll to zoom" : "Scroll to zoom · drag to pan when zoomed · swipe up/down prev/next, left/right seek"} style={{ position: "relative", flex: "1 1 auto", minHeight: 0, overflow: "hidden", background: "#080a14", display: "flex", alignItems: "center", justifyContent: "center", padding: showImage ? 16 : 0, cursor: "default", touchAction: "none" }}>
           {zoom>1 && <span style={{ position: "absolute", top: 10, right: 10, zIndex: 3, background: "rgba(0,0,0,.6)", color: "#fff", padding: "4px 8px", borderRadius: 6, fontSize: 11, fontFamily: "var(--mono)" }}>{Math.round(zoom*100)}%</span>}
           {loading ? (
-            <div style={{ color: "var(--muted)", fontSize: 13 }}><i className="bi bi-hourglass-split" /> {isGif ? "Converting GIF…" : "Loading…"}</div>
-          ) : isGif && !gifFailed ? (
+            <div style={{ color: "var(--muted)", fontSize: 13 }}><i className="bi bi-hourglass-split" /> Loading…</div>
+          ) : showImage ? (
+            <img src={loadedUrl} alt={titleEff} onContextMenu={(e) => e.preventDefault()} draggable={false} onError={isGif ? () => setGifAsVideo(true) : undefined} style={{ width: "100%", height: "100%", objectFit: "contain", background: "#000", borderRadius: 0, transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: origin, transition: zoom===1 ? "transform 0.15s" : "none", WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none" }} />
+          ) : gifAsVideoEff ? (
             <video
               key={loadedUrl}
               ref={videoRef}
@@ -592,15 +599,13 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
               tabIndex={0}
               autoFocus
               onClick={(e)=> e.stopPropagation()}
-              onError={() => setGifFailed(true)}
+              onContextMenu={(e) => e.preventDefault()}
               style={{ width: "100%", height: "100%", background: "#000", display: "block", objectFit: "contain", transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: origin, transition: zoom===1 ? "transform 0.15s" : "none", WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none", outline: "none" }}
               onTimeUpdate={(e)=> setCurrent(e.currentTarget.currentTime)}
               onLoadedMetadata={(e)=> setDuration(e.currentTarget.duration)}
               onPlay={() => setIsPlaying(true)}
               onPause={() => setIsPlaying(false)}
             />
-          ) : isImage ? (
-            <img src={loadedUrl} alt={titleEff} onContextMenu={(e) => e.preventDefault()} draggable={false} style={{ width: "100%", height: "100%", objectFit: "contain", background: "#000", borderRadius: 0, transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: origin, transition: zoom===1 ? "transform 0.15s" : "none", WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none" }} />
           ) : isAudio ? (
             <div style={{ width: "100%", padding: 24, display: "grid", placeItems: "center" }}>
               <audio key={loadedUrl} ref={videoRef} src={loadedUrl} autoPlay style={{ width: "100%", display: "none" }} onTimeUpdate={(e)=> setCurrent(e.currentTarget.currentTime)} onLoadedMetadata={(e)=> setDuration(e.currentTarget.duration)} onPlay={() => setIsPlaying(true)} onPause={() => setIsPlaying(false)} />
@@ -637,7 +642,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
         </div>
 
         <div className="fv-controls" style={{ padding: "8px 10px", borderTop: "1px solid var(--border)", background: "var(--surface)", display: "grid", gap: 6 }}>
-          {(isVideo || isAudio || isGif) && (
+            {(isVideo || isAudio || gifAsVideoEff) && (
             <div className="fv-timeline" style={{ display: "flex", alignItems: "center", gap: 6 }}>
               <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--muted)", minWidth: 32 }}>{fmtTime(current)}</span>
               <input type="range" tabIndex={-1} min={0} max={duration || 0} step={0.1} value={current} onChange={(e)=> { const v=parseFloat(e.target.value); if(videoRef.current){ videoRef.current.currentTime=v; setCurrent(v);} }} onMouseUp={(e)=>e.target.blur()} onTouchEnd={(e)=>e.target.blur()} style={{ flex: 1, accentColor: "#6366f1", height: 4 }} />
@@ -658,9 +663,9 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
             <button type="button" tabIndex={-1} className="btn btn-sm" onClick={cycleEndMode} title={`End mode: ${endMode} (r)`} style={{ padding: "4px 6px", fontSize: 11, minWidth: 52, borderRadius: 6, border: "1px solid " + (endMode !== "none" ? "transparent" : "var(--border)"), background: endMode === "next" ? "#6366f1" : endMode === "repeat" ? "#10b981" : endMode === "random" ? "#8b5cf6" : "var(--surface-2)", color: endMode !== "none" ? "#fff" : "var(--muted)" }}>
               <i className={`bi ${endMode === "next" ? "bi-skip-forward-fill" : endMode === "repeat" ? "bi-repeat" : endMode === "random" ? "bi-shuffle" : "bi-arrow-repeat"}`} /> {endMode === "next" ? "Next" : endMode === "repeat" ? "Loop" : endMode === "random" ? "Shuffle" : "End"}
             </button>
-            {(isVideo || isAudio || isGif) && (
+          {(isVideo || isAudio || gifAsVideoEff) && (
               <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                {(isVideo || isAudio) && (
+                {(isVideo || isAudio || gifAsVideoEff) && (
                   <>
                     <button type="button" tabIndex={-1} className="btn btn-sm btn-outline-secondary" onClick={() => setMuted((m) => !m)} title={muted ? "Unmute (m)" : "Mute (m)"} style={{ color: muted ? "#f87171" : undefined, minWidth: 36, padding: "4px 6px", fontSize: 11 }}><i className={`bi ${muted ? "bi-volume-mute-fill" : "bi-volume-up-fill"}`} /></button>
                     <button type="button" tabIndex={-1} className="fv-10s btn btn-sm btn-outline-secondary" onClick={() => { if (videoRef.current) videoRef.current.currentTime = Math.max(0, videoRef.current.currentTime - 10); videoRef.current?.focus(); }} title="Back 10s" style={{ padding: "4px 6px", fontSize: 11 }}><i className="bi bi-skip-backward" /> 10s</button>
@@ -669,7 +674,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
                 <button type="button" tabIndex={-1} className="btn btn-sm btn-primary" onClick={() => { if (!videoRef.current) return; if (videoRef.current.paused) videoRef.current.play(); else videoRef.current.pause(); videoRef.current?.focus(); }} style={{ padding: "4px 8px", fontSize: 11 }}>
                   <i className={`bi ${isPlaying ? "bi-pause-fill" : "bi-play-fill"}`} /> {isPlaying ? "Pause" : "Play"}
                 </button>
-                {(isVideo || isAudio) && (
+                {(isVideo || isAudio || gifAsVideoEff) && (
                   <button type="button" tabIndex={-1} className="fv-10s btn btn-sm btn-outline-secondary" onClick={() => { if (videoRef.current) videoRef.current.currentTime += 10; videoRef.current?.focus(); }} title="Forward 10s" style={{ padding: "4px 6px", fontSize: 11 }}>10s <i className="bi bi-skip-forward" /></button>
                 )}
               </div>
@@ -678,5 +683,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
         </div>
       </div>
     </div>
+    {showHelp && <ShortcutsHelp active="viewer" onClose={() => setShowHelp(false)} />}
+    </>
   );
 }

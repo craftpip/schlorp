@@ -390,7 +390,6 @@ async function waitForInstagram429Cooldown(log, cooldownMs) {
 }
 
 async function gotoWithInstagram429Retry(page, targetUrl, isInstagramTarget, log, cooldownMs) {
-  try { await page.bringToFront().catch(() => {}); } catch {}
   const isCdp = (() => {
     try {
       if (page.browser && typeof page.browser === "function") {
@@ -400,6 +399,9 @@ async function gotoWithInstagram429Retry(page, targetUrl, isInstagramTarget, log
     } catch {}
     return false;
   })();
+  if (!isCdp) {
+    try { await page.bringToFront().catch(() => {}); } catch {}
+  }
   let response;
   if (isCdp) {
     log(`CDP browser — using domcontentloaded for ${targetUrl}`);
@@ -436,7 +438,9 @@ async function gotoWithInstagram429Retry(page, targetUrl, isInstagramTarget, log
       }
     }
   }
-  try { await page.bringToFront().catch(() => {}); } catch {}
+  if (!isCdp) {
+    try { await page.bringToFront().catch(() => {}); } catch {}
+  }
   const status = response && typeof response.status === "function" ? response.status() : 0;
 
   if (isInstagramTarget && status === 429) {
@@ -572,7 +576,9 @@ async function run(options = {}) {
       const redditPostId = isRedditTarget ? extractRedditPostId(targetUrl) : "";
 
       const page = await browser.newPage();
-      try { await page.bringToFront().catch(() => {}); } catch {}
+      if (!(browser && browser.__isCdp)) {
+        try { await page.bringToFront().catch(() => {}); } catch {}
+      }
 
       try {
         if (isInstagramTarget) {
@@ -582,13 +588,17 @@ async function run(options = {}) {
             await page.setExtraHTTPHeaders({
               "accept-language": "en-US,en;q=0.9",
             });
-            await page.setViewport({
-              width: 430,
-              height: 932,
-              isMobile: true,
-              hasTouch: true,
-              deviceScaleFactor: 3,
-            });
+            if (!(browser && browser.__isCdp)) {
+              await page.setViewport({
+                width: 430,
+                height: 932,
+                isMobile: true,
+                hasTouch: true,
+                deviceScaleFactor: 3,
+              });
+            } else {
+              log("CDP browser — keeping remote viewport (skipping setViewport).");
+            }
             log("Using Instagram mobile browser agent profile.");
           }
         }

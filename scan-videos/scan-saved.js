@@ -164,7 +164,9 @@ async function scanInstagramSavedPage(options = {}) {
   const matchedStopUrls = new Set();
   const matchedStopIds = new Set();
   const page = await browser.newPage();
-  try { await page.bringToFront().catch(() => {}); } catch {}
+  if (!(browser && browser.__isCdp)) {
+    try { await page.bringToFront().catch(() => {}); } catch {}
+  }
 
   let reason = "max_iterations";
   let iterations = 0;
@@ -211,7 +213,9 @@ async function scanInstagramSavedPage(options = {}) {
         }
       }
     }
+    if (!(browser && browser.__isCdp)) {
     try { await page.bringToFront().catch(() => {}); } catch {}
+  }
     const status = response && typeof response.status === "function" ? response.status() : 0;
     if (status === 429) {
       log("Instagram saved-page scan got 429.");
@@ -361,16 +365,22 @@ async function scanRedditSavedPage(options = {}) {
   const matchedStopUrls = new Set();
   const matchedStopIds = new Set();
   const page = await browser.newPage();
-  try { await page.bringToFront().catch(() => {}); } catch {}
+  if (!(browser && browser.__isCdp)) {
+    try { await page.bringToFront().catch(() => {}); } catch {}
+  }
 
   let reason = "max_iterations";
   let iterations = 0;
 
   try {
     await page.setExtraHTTPHeaders({ "accept-language": "en-US,en;q=0.9" });
-    await page.setViewport({ width: 1280, height: 900 });
-
     const isCdp = Boolean(browser && browser.__isCdp);
+    if (!isCdp) {
+      await page.setViewport({ width: 1280, height: 900 });
+    } else {
+      log("CDP browser — keeping remote viewport (skipping setViewport).");
+    }
+
     let response = null;
     if (isCdp) {
       log(`CDP browser — using domcontentloaded for ${targetUrl}`);
@@ -409,7 +419,9 @@ async function scanRedditSavedPage(options = {}) {
         }
       }
     }
+    if (!(browser && browser.__isCdp)) {
     try { await page.bringToFront().catch(() => {}); } catch {}
+  }
     const status = response && typeof response.status === "function" ? response.status() : 0;
     if (status === 429) {
       log("Reddit saved-page scan got 429.");

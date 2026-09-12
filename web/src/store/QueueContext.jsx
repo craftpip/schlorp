@@ -9,6 +9,7 @@ export function QueueProvider({ children }) {
   const [logsById, setLogsById] = useState({});
   const [gap, setGapState] = useState({ minMs: 0, maxMs: 0 });
   const [gapWait, setGapWait] = useState(null);
+  const [paused, setPaused] = useState(false);
   const { connected, lastMessage, send } = useWebSocket("/ws");
 
   useEffect(() => {
@@ -18,6 +19,9 @@ export function QueueProvider({ children }) {
       setCompleted(lastMessage.completed || []);
       if (lastMessage.gap) setGapState(lastMessage.gap);
       if (lastMessage.gapWait !== undefined) setGapWait(lastMessage.gapWait);
+      if (lastMessage.paused !== undefined) setPaused(!!lastMessage.paused);
+    } else if (lastMessage.type === "queue:paused") {
+      setPaused(!!lastMessage.paused);
     } else if (lastMessage.type === "queue:gap") {
       setGapWait(lastMessage.waiting ? { remainingSec: lastMessage.remainingSec ?? 0, paused: !!lastMessage.paused } : null);
     } else if (lastMessage.type === "job:progress") {
@@ -42,11 +46,33 @@ export function QueueProvider({ children }) {
         setCompleted(j.completed || []);
         if (j.gap) setGapState(j.gap);
         if (j.gapWait?.waiting) setGapWait(j.gapWait);
+        if (j.paused !== undefined) setPaused(!!j.paused);
       }
     }).catch(() => {});
     load();
     t = setInterval(load, 1000);
     return () => clearInterval(t);
+  }, []);
+
+  const pause = useCallback(async () => {
+    setPaused(true);
+    const res = await fetch("/queue/pause", { method: "POST" });
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      setPaused(false);
+      throw new Error(j.error || "pause failed");
+    }
+    return res.json();
+  }, []);
+
+  const resume = useCallback(async () => {
+    setPaused(false);
+    const res = await fetch("/queue/resume", { method: "POST" });
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      throw new Error(j.error || "resume failed");
+    }
+    return res.json();
   }, []);
 
   const setGap = useCallback(async (minMs, maxMs) => {
@@ -85,6 +111,12 @@ export function QueueProvider({ children }) {
     await fetch("/queue/retry", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }) });
   }, []);
 
+  const retryAll = useCallback(async (ids) => {
+    for (const id of ids || []) {
+      await fetch("/queue/retry", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }) });
+    }
+  }, []);
+
   const clearCompleted = useCallback(async () => {
     setCompleted([]);
     await fetch("/queue/clear", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ which: "completed" }) });
@@ -96,7 +128,7 @@ export function QueueProvider({ children }) {
   }, []);
 
   return (
-    <QueueContext.Provider value={{ active, completed, logsById, connected, gap, gapWait, setGap, add, remove, retry, clearCompleted, clearActive, send }}>
+    <QueueContext.Provider value={{ active, completed, logsById, connected, gap, gapWait, paused, pause, resume, setGap, add, remove, retry, retryAll, clearCompleted, clearActive, send }}>
       {children}
     </QueueContext.Provider>
   );

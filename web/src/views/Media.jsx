@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef, useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 import FileViewer from "../components/FileViewer";
+import ShortcutsHelp from "../components/ShortcutsHelp";
 
 function fmtSize(bytes) {
   if (bytes == null) return "";
@@ -48,11 +49,31 @@ const catIcon = {
 };
 const TYPE_CHIPS = [["all", "All"], ["photo", "Img"], ["video", "Vid"], ["gif", "GIF"]];
 
+// Obfuscated URL params: `?f=` = base64url(folder), `?s=` = base64url(selKey).
+// Legacy plaintext `?folder=` / `?sel=` still read (old bookmarks) but never written.
+function encB64(s) {
+  try {
+    return btoa(unescape(encodeURIComponent(String(s ?? ""))))
+      .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  } catch { return ""; }
+}
+function decB64(s) {
+  try {
+    const b64 = String(s ?? "").replace(/-/g, "+").replace(/_/g, "/");
+    const pad = b64.length % 4 ? "=".repeat(4 - (b64.length % 4)) : "";
+    return decodeURIComponent(escape(atob(b64 + pad)));
+  } catch { return ""; }
+}
+
 export default function Media() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const folder = searchParams.get("folder") || "";
+  const folder = (() => {
+    const v = searchParams.get("f");
+    if (v != null) return decB64(v);
+    return searchParams.get("folder") || "";
+  })();
   const isFlat = searchParams.get("flat") === "1";
-  const isGrid = searchParams.get("view") === "grid";
+  const isGrid = searchParams.get("view") !== "list";
   const type = searchParams.get("type") || "all";
   const sort = searchParams.get("sort") || null;
   const sortDir = searchParams.get("dir") || "asc";
@@ -98,15 +119,20 @@ export default function Media() {
 
   const setParam = (k, v) => {
     const ns = new URLSearchParams(searchParams);
-    if (v == null || v === "") ns.delete(k);
-    else ns.set(k, v);
+    const key = k === "folder" ? "f" : k === "sel" ? "s" : k;
+    const val = k === "folder" || k === "sel" ? encB64(v) : v;
+    if (v == null || v === "" || val === "") ns.delete(key);
+    else ns.set(key, val);
+    if (k === "folder") ns.delete("folder");
+    if (k === "sel") ns.delete("sel");
     setSearchParams(ns, { replace: true });
   };
   const setFilter = (v) => setParam("q", v);
   const setType = (v) => setParam("type", v === "all" ? "" : v);
-  const [viewerIdx, setViewerIdx] = useState(null);
-  const [selectedIdx, setSelectedIdx] = useState(0);
+  const [viewerKey, setViewerKey] = useState(null);
+  const [showHelp, setShowHelp] = useState(false);
   const [ratios, setRatios] = useState({});
+  const [imgErr, setImgErr] = useState({});
   const [gridW, setGridW] = useState(0);
   const gridRef = useRef(null);
   const clampRatio = (r) => Math.min(2.2, Math.max(0.55, Number(r) || NaN));
@@ -129,109 +155,130 @@ export default function Media() {
     const r = clampRatio(nw / nh);
     setRatios((prev) => (prev[rk] === r ? prev : { ...prev, [rk]: r }));
   };
-  const selectAfterLoadRef = useRef(null);
-  const lastViewedNameRef = useRef(null);
-  const lastHighlightedMediaRef = useRef(null);
   const sanitizeKey = (s) => String(s || "").replace(/[^a-zA-Z0-9]/g, "-");
   const rowKey = (it) => (isFlat ? it.rel || it.name : it.name);
   const displayName = (it) => (isFlat ? String(it.rel || it.name).replace(/\//g, " > ") : it.name);
-  const persistHighlightMedia = (keyName) => {
-    const n = keyName ? sanitizeKey(keyName) : "";
-    if (lastHighlightedMediaRef.current && lastHighlightedMediaRef.current !== n) {
-      const prev = document.getElementById(`media-file-${lastHighlightedMediaRef.current}`);
-      if (prev) { prev.style.background = ""; prev.removeAttribute("data-highlighted"); }
-    }
-    const el = n ? document.getElementById(`media-file-${n}`) : null;
-    if (el) { el.style.background = "rgba(99,102,241,0.14)"; el.setAttribute("data-highlighted", "true"); }
-    lastHighlightedMediaRef.current = n;
+  // Single-select model (plan 014): `?s=<base64url rowKey>` is the source of truth (single select only).
+  // 1 click = select, double-click = open. Derived index follows the key across reloads.
+  const selKey = (() => {
+    const v = searchParams.get("s");
+    if (v != null) return decB64(v);
+    return searchParams.get("sel") || "";
+  })();
+  const setSelectedKey = (k) => {
+    const next = k || "";
+    if (next !== selKey) setParam("sel", next);
   };
+  const isCoarsePointer = () => {
+    try { return !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches); }
+    catch { return false; }
+  };
+  const pendingSelectRef = useRef(null); // key to restore after the next load (go-up, delete)
+  const freshLoadRef = useRef(false); // next committed items scroll once to the selection
+  const keyboardScrollRef = useRef(false); // next selection commit scrolls (arrow-key nav)
 
-  const load = async (f) => {
+  // Same-folder reloads (refresh / delete) keep the stale rows mounted while
+  // fetching — unmounting the list collapses the page height and the browser
+  // clamps scrollY to the top with no way back. Only fresh navigation clears.
+  const load = async (f, { clear = false } = {}) => {
+    if (clear) setItems([]);
     setLoading(true); setErr("");
+    const pending = pendingSelectRef.current;
+    pendingSelectRef.current = null;
     try {
-      const target = selectAfterLoadRef.current;
-      selectAfterLoadRef.current = null;
       const qs = new URLSearchParams();
       if (f) qs.set("folder", f);
       if (isFlat) qs.set("flat", "1");
       const r = await fetch(`/api/media?${qs.toString()}`);
       const j = await r.json();
       if (!j.ok) throw new Error(j.error || "failed");
-      setItems((j.items || []).filter((it) => it.dir || !isPosterFile(it.name)));
+      const fresh = (j.items || []).filter((it) => it.dir || !isPosterFile(it.name));
+      setItems(fresh);
       setRatios({});
-      if (target) {
-        const idx = (j.items || []).findIndex((it) => (it.rel || it.name) === target || it.name === target);
-        if (idx !== -1) setSelectedIdx(idx);
-      } else { setSelectedIdx(0); }
+      setImgErr({});
+      // Key-based restore: explicit pending key wins, then keep ?s if still present,
+      // else select the first item (empty folder = no selection).
+      const keyOf = (it) => (isFlat ? it.rel || it.name : it.name);
+      const keys = new Set(fresh.map(keyOf));
+      const curSel = selKey;
+      if (pending && keys.has(pending)) {
+        if (pending !== curSel) setParam("sel", pending);
+      } else if (curSel && keys.has(curSel)) {
+        // keep — selection survives reload/refresh
+      } else if (fresh.length) {
+        setParam("sel", keyOf(fresh[0]));
+      } else if (curSel) {
+        setParam("sel", "");
+      }
     } catch (e) { setErr(e.message); }
     finally { setLoading(false); }
   };
 
-  useEffect(() => { load(folder); }, [folder, isFlat]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Fresh content (mount / folder / flat change / explicit refresh) scrolls once
+  // to the selection. Delete-triggered reloads must NOT scroll (plan 014).
+  const refresh = () => { freshLoadRef.current = true; load(folder); };
+  useEffect(() => { freshLoadRef.current = true; load(folder, { clear: true }); }, [folder, isFlat]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (searchParams.get("open")) setParam("open", "");
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const selKey = searchParams.get("sel");
-  const suppressScrollRef = useRef(false);
-  const prevSelKeyRef = useRef(null);
+  // Derived selection: index follows the ?s key (single select, no index state).
+  const selectedIdx = selKey ? filtered.findIndex((it) => rowKey(it) === selKey) : -1;
+  // Key-based viewer: index follows the viewed key across reloads/deletes.
+  const viewerIdx = viewerKey ? viewable.findIndex((v) => rowKey(v) === viewerKey) : null;
+  const viewerOpen = viewerKey != null;
+  const lastViewerIdxRef = useRef(0);
+  // Library help belongs to the no-player context: close it when the player opens
+  // (the player renders its own copy of the guide while open).
+  useEffect(() => { if (viewerOpen) setShowHelp(false); }, [viewerOpen]);
   useEffect(() => {
-    if (loading || !items.length) return;
-    if (selKey) {
-      const fi = filtered.findIndex((it) => rowKey(it) === selKey);
-      if (fi !== -1) {
-        if (prevSelKeyRef.current === selKey && fi !== selectedIdx) {
-          suppressScrollRef.current = true;
-        }
-        setSelectedIdx(fi);
-      } else {
-        setParam("sel", "");
-      }
-    }
-    prevSelKeyRef.current = selKey;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, folder, isFlat, searchParams]);
+    if (viewerIdx != null && viewerIdx !== -1) lastViewerIdxRef.current = viewerIdx;
+  }, [viewerIdx]);
+  // Index actually rendered by the viewer (last position while reloading).
+  const shownViewerIdx = viewerOpen
+    ? (viewerIdx !== null && viewerIdx !== -1 ? viewerIdx : Math.min(lastViewerIdxRef.current, Math.max(0, viewable.length - 1)))
+    : null;
 
-  const syncedSelRef = useRef(null);
-  useEffect(() => {
-    if (viewerIdx == null) return;
-    const it = viewable[viewerIdx];
-    if (!it) return;
-    const k = rowKey(it);
-    if (k !== syncedSelRef.current || searchParams.get("sel") !== k) {
-      syncedSelRef.current = k;
-      setParam("sel", k);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewerIdx, viewable.length]);
-
-  const filteredRef = useRef(null);
-  filteredRef.current = filtered;
-  useEffect(() => {
-    if (viewerIdx != null) return;
-    const f = filteredRef.current;
-    const it = f[selectedIdx];
-    if (!it) return;
-    const key = rowKey(it);
-    const cur = searchParams.get("sel");
-    if (it.dir) {
-      if (cur && !f.some((x) => !x.dir && rowKey(x) === cur)) setParam("sel", "");
-    } else if (key !== cur) {
-      setParam("sel", key);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedIdx, viewerIdx]);
-
-  useEffect(() => {
-    if (viewerIdx != null) return;
-    if (suppressScrollRef.current) { suppressScrollRef.current = false; return; }
+  // Sticky-aware scroll: native scrollIntoView({block:"nearest"}) ignores the
+  // sticky toolbar, leaving the row hidden under it or bottom-flush. Scroll
+  // manually only when the selected row is actually out of view.
+  const scrollSelectionIntoView = () => {
     const el = document.querySelector(`[data-selected="true"]`);
-    if (el) el.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  }, [selectedIdx, viewerIdx]);
+    if (!el) return;
+    const sticky = document.querySelector(`[data-testid="media-sticky"]`);
+    const offset = (sticky ? sticky.offsetHeight : 0) + 12;
+    const rect = el.getBoundingClientRect();
+    if (rect.top < offset || rect.bottom > window.innerHeight) {
+      window.scrollTo({ top: Math.max(0, window.scrollY + rect.top - offset), behavior: "auto" });
+    }
+  };
+
+  // Scroll ONLY on fresh content load (mount / folder change / explicit refresh).
+  // Delete reloads, viewer close, clicks and double-clicks never scroll.
+  useEffect(() => {
+    if (!freshLoadRef.current || loading || !filtered.length || viewerOpen) return;
+    freshLoadRef.current = false;
+    scrollSelectionIntoView();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, loading]);
+  // Arrow-key navigation arms a one-shot scroll so the highlight stays visible.
+  useEffect(() => {
+    if (!keyboardScrollRef.current || viewerOpen) { keyboardScrollRef.current = false; return; }
+    keyboardScrollRef.current = false;
+    scrollSelectionIntoView();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedIdx]);
 
   useEffect(() => {
-    if (viewerIdx != null) return;
+    if (viewerOpen) return;
+    const moveSelection = (delta) => {
+      if (!filtered.length) return;
+      const base = selectedIdx !== -1 ? selectedIdx : (delta > 0 ? -1 : 0);
+      const next = Math.min(filtered.length - 1, Math.max(0, base + delta));
+      keyboardScrollRef.current = true;
+      setSelectedKey(rowKey(filtered[next]));
+    };
     const onKey = (e) => {
       if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable) return;
       const k = e.key;
@@ -241,8 +288,10 @@ export default function Media() {
       const isRight = k === "ArrowRight" || k === "d" || k === "D";
       const isEnter = k === " " || k === "Enter";
       const lowK = k.toLowerCase();
-      if (lowK === "g" && !e.ctrlKey && !e.altKey && !e.metaKey) { e.preventDefault(); setParam("view", isGrid ? "" : "grid"); }
-      else if (lowK === "f" && !e.ctrlKey && !e.altKey && !e.metaKey) { e.preventDefault(); setParam("flat", isFlat ? "" : "1"); }
+      if ((k === "/" || k === "?") && !e.ctrlKey && !e.altKey && !e.metaKey) { e.preventDefault(); setShowHelp((v) => !v); return; }
+      if (k === "Escape" && showHelp) { e.preventDefault(); setShowHelp(false); return; }
+      if (lowK === "g" && !e.ctrlKey && !e.altKey && !e.metaKey) { e.preventDefault(); setParam("view", isGrid ? "list" : ""); }
+      else if (lowK === "j" && !e.ctrlKey && !e.altKey && !e.metaKey) { e.preventDefault(); setParam("flat", isFlat ? "" : "1"); }
       else if (lowK === "t" && !e.ctrlKey && !e.altKey && !e.metaKey) {
         e.preventDefault();
         const order = TYPE_CHIPS.map((c) => c[0]);
@@ -251,10 +300,10 @@ export default function Media() {
         setType(next);
       }
       else if (isLeft) { e.preventDefault(); goUp(); }
-      else if (isUp) { e.preventDefault(); setSelectedIdx((i) => Math.max(0, i - 1)); }
-      else if (isDown) { e.preventDefault(); setSelectedIdx((i) => Math.min(filtered.length - 1, i + 1)); }
+      else if (isUp) { e.preventDefault(); moveSelection(-1); }
+      else if (isDown) { e.preventDefault(); moveSelection(1); }
       else if (isRight || isEnter) {
-        if (!filtered.length) return;
+        if (!filtered.length || selectedIdx === -1) return;
         e.preventDefault();
         const it = filtered[selectedIdx];
         if (it) { if (it.dir) goFolder(it.name); else openViewer(it); }
@@ -263,11 +312,12 @@ export default function Media() {
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewerIdx, filtered, selectedIdx, searchParams]);
+  }, [viewerOpen, filtered, selectedIdx, searchParams, showHelp]);
 
   const goFolder = (name) => {
     const ns = new URLSearchParams(searchParams);
-    ns.set("folder", folder ? `${folder}/${name}` : name);
+    ns.set("f", encB64(folder ? `${folder}/${name}` : name));
+    ns.delete("folder");
     setSearchParams(ns);
   };
   const goUp = () => {
@@ -276,14 +326,16 @@ export default function Media() {
     const cameFrom = parts.pop();
     const nf = parts.join("/");
     const ns = new URLSearchParams(searchParams);
-    if (nf) ns.set("folder", nf); else ns.delete("folder");
-    selectAfterLoadRef.current = cameFrom;
+    if (nf) ns.set("f", encB64(nf)); else ns.delete("f");
+    ns.delete("folder");
+    pendingSelectRef.current = cameFrom;
     setSearchParams(ns);
   };
   const goCrumb = (idx) => {
     const nf = crumbs.slice(0, idx + 1).join("/");
     const ns = new URLSearchParams(searchParams);
-    ns.set("folder", nf);
+    ns.set("f", encB64(nf));
+    ns.delete("folder");
     setSearchParams(ns);
   };
   const delFile = async (it) => {
@@ -295,8 +347,14 @@ export default function Media() {
     else { parent = folder ? `${folder}/${key.slice(0, slash)}` : key.slice(0, slash); base = key.slice(slash + 1); }
     const r = await fetch(`/api/media?folder=${encodeURIComponent(parent)}&name=${encodeURIComponent(base)}`, { method: "DELETE" });
     const j = await r.json().catch(() => ({}));
-    if (!r.ok) alert(j.error || "delete failed");
-    else load(folder);
+    if (!r.ok) { alert(j.error || "delete failed"); return; }
+    // Keep selection on the neighbour (next ?? prev) instead of jumping to the top.
+    const fi = filtered.findIndex((x) => rowKey(x) === key);
+    if (fi !== -1) {
+      const next = filtered[fi + 1] || filtered[fi - 1];
+      pendingSelectRef.current = next ? rowKey(next) : null;
+    }
+    load(folder);
   };
 
   const rows = useMemo(() => {
@@ -311,20 +369,70 @@ export default function Media() {
       return { it, i, h: GRID_TARGET_H, w, isDir: false };
     });
   }, [isGrid, gridW, filtered, ratios]);
+  // 1 click = select only; double-click (or Enter) = open. Touch keeps tap-to-open.
+  const selectOnly = (it) => setSelectedKey(rowKey(it));
+  const openItem = (it) => {
+    if (!it) return;
+    setSelectedKey(rowKey(it));
+    if (it.dir) goFolder(it.name);
+    else openViewer(it);
+  };
+  const tapItem = (it) => {
+    // Coarse pointers (mobile): single tap selects AND opens (previous behaviour).
+    if (isCoarsePointer()) openItem(it);
+    else selectOnly(it);
+  };
   const openViewer = (it) => {
     if (!it || it.dir) return;
-    const idx = viewable.findIndex((v) => rowKey(v) === rowKey(it));
-    if (idx !== -1) { persistHighlightMedia(rowKey(it)); setViewerIdx(idx); setParam("sel", rowKey(it)); }
+    const k = rowKey(it);
+    if (!viewable.some((v) => rowKey(v) === k)) return;
+    setSelectedKey(k);
+    setViewerKey(k);
   };
   const thrumb = (it) => {
     if (!it || it.dir) return null;
     if (it.thumb) return toMediaUrl(folder, it.thumb);
     const cat = fileCategory(it.name);
     if (cat === "photo" || cat === "gif") return toMediaUrl(folder, it.rel || it.name);
+    // Video without a `-poster.*` sibling: serve the cover art embedded in the
+    // file itself (if any). The endpoint only copies an attached-pic stream
+    // (no decode/transcode); 404s fall back to the icon via onError.
+    if (cat === "video") {
+      const qs = new URLSearchParams();
+      if (folder) qs.set("folder", folder);
+      qs.set("key", rowKey(it));
+      return `/api/mediathumb?${qs.toString()}`;
+    }
     return null;
   };
+  // Google-Drive-style folder chip (grid view only): compact fixed-size row
+  // item, not a tall preview box — folders have no thumbnails.
+  const FOLDER_CHIP_W = 220;
+  const FOLDER_CHIP_H = 56;
+  const renderFolderChip = (it, fi) => {
+    const selected = fi === selectedIdx;
+    return (
+      <div
+        key={isFlat ? it.rel || it.name : it.name}
+        id={`media-file-${sanitizeKey(rowKey(it))}`}
+        data-testid="media-tile-folder"
+        data-filename={rowKey(it)}
+        data-selected={selected}
+        onClick={() => tapItem(it)}
+        onDoubleClick={() => openItem(it)}
+        title={`${displayName(it)} — click to select, double-click to open`}
+        style={{ width: FOLDER_CHIP_W, height: FOLDER_CHIP_H, flex: "0 0 auto", display: "flex", alignItems: "center", gap: 10, padding: "0 12px", overflow: "hidden", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)", outline: selected ? "2px solid var(--accent)" : "none", cursor: "pointer" }}
+      >
+        <i className="bi bi-folder-fill" style={{ fontSize: 24, color: "#f59e0b", flex: "0 0 auto" }} />
+        <span style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{displayName(it)}</span>
+      </div>
+    );
+  };
   const renderTile = (it, fi, w, h) => {
-    const src = thrumb(it);
+    const rk = rowKey(it);
+    // A thumbnail URL that 404s (no poster sibling, no embedded cover art)
+    // falls back to the icon placeholder instead of a blank black tile.
+    const src = imgErr[rk] ? null : thrumb(it);
     const selected = fi === selectedIdx;
     const isDir = !!it.dir;
     return (
@@ -334,12 +442,13 @@ export default function Media() {
         data-testid={isDir ? "media-tile-folder" : "media-tile-file"}
         data-filename={rowKey(it)}
         data-selected={selected}
-        onClick={() => { setSelectedIdx(fi); if (it.dir) goFolder(it.name); else openViewer(it); }}
-        title={displayName(it)}
+        onClick={() => tapItem(it)}
+        onDoubleClick={() => openItem(it)}
+        title={`${displayName(it)} — click to select, double-click to open`}
         style={{ position: "relative", flex: isDir ? "0 0 auto" : "0 0 auto", width: w, height: h, overflow: "hidden", borderRadius: 0, background: isDir ? "var(--surface-2)" : "var(--surface-2)", outline: selected ? "2px solid var(--accent)" : "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8 }}
       >
         {src ? (
-          <img src={src} alt="" loading="lazy" decoding="async" draggable={false} onLoad={(e) => onImgLoad(e, rowKey(it))} onError={(e) => { e.currentTarget.style.visibility = "hidden"; }} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", background: "#000", flex: 1 }} />
+          <img src={src} alt="" loading="lazy" decoding="async" draggable={false} onLoad={(e) => onImgLoad(e, rowKey(it))} onError={() => { const k = rowKey(it); setImgErr((prev) => (prev[k] ? prev : { ...prev, [k]: 1 })); }} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", background: "#000", flex: 1 }} />
         ) : isDir ? (
           <i className="bi bi-folder-fill" style={{ fontSize: 44, color: "#f59e0b" }} />
         ) : (
@@ -369,47 +478,74 @@ export default function Media() {
       {label}<span style={{ color: "var(--accent)", minWidth: 10, display: "inline-block" }}>{sort === key ? (sortDir === "desc" ? "▼" : "▲") : ""}</span>
     </button>
   );
-  // reset viewer if folder/filter changes and file disappears - keep on next file after delete
+  // Close the viewer if its file disappears entirely (e.g. externally deleted
+  // with no neighbour to fall back to). Delete flows set viewerKey explicitly.
   useEffect(() => {
-    if (viewerIdx != null && (viewerIdx < 0 || viewerIdx >= viewable.length)) {
-      if (viewable.length) setViewerIdx(Math.min(viewerIdx, viewable.length - 1));
-      else setViewerIdx(null);
-    }
+    if (viewerOpen && viewable.length === 0) setViewerKey(null);
   }, [viewable.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const goViewer = (i) => {
     if (i >= 0 && i < viewable.length) {
       const k = rowKey(viewable[i]);
-      persistHighlightMedia(k);
-      setViewerIdx(i);
-      setParam("sel", k);
+      setSelectedKey(k);
+      setViewerKey(k);
     }
   };
+  // After a delete inside the viewer: stay open on the neighbour (next ?? prev),
+  // keep it selected, reload without jumping to the top. Only item → close.
+  const handleViewerDeleted = (deletedRef) => {
+    // FileViewer passes its filePath (`${folder}/${key}`); recover the rowKey.
+    let deletedKey = viewerKey;
+    if (deletedRef) {
+      const s = String(deletedRef);
+      const prefix = folder ? `${folder}/` : "";
+      deletedKey = prefix && s.startsWith(prefix) ? s.slice(prefix.length) : s;
+    }
+    const di = viewable.findIndex((v) => rowKey(v) === deletedKey);
+    const next = di !== -1 ? (viewable[di + 1] || viewable[di - 1]) : null;
+    if (!next) {
+      pendingSelectRef.current = null;
+      setViewerKey(null);
+    } else {
+      const nk = rowKey(next);
+      pendingSelectRef.current = nk;
+      setSelectedKey(nk);
+      setViewerKey(nk);
+    }
+    load(folder);
+  };
+
+  // Grid view only: folders render as a Drive-style fixed-size row on top,
+  // files render as preview tiles below. List view is untouched.
+  const dirRows = rows.filter((r) => r.isDir);
+  const fileRows = rows.filter((r) => !r.isDir);
 
   return (
     <div data-testid="media-page">
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
         <div data-testid="media-title" style={{ fontWeight: 700, fontSize: 14 }}><i className="bi bi-collection-play" style={{ marginRight: 8 }} /> Media library</div>
         <span data-testid="media-item-count" className="badge text-bg-secondary">{items.length} items</span>
+        {loading && items.length > 0 && <span data-testid="media-updating" className="small text-muted"><i className="bi bi-arrow-clockwise" /> Updating…</span>}
+        <span className="small text-muted" style={{ marginLeft: 2 }}>Click to select · double-click to open</span>
       </div>
-      <div data-testid="media-sticky" style={{ position: "sticky", top: 0, zIndex: 50, background: "var(--bg)", paddingBottom: 10, borderBottom: err ? "none" : "1px solid var(--border)", marginBottom: 12, boxShadow: "0 6px 12px -8px rgba(0,0,0,.4)" }}>
+      <div data-testid="media-sticky" style={{ position: "sticky", top: 0, zIndex: 50, margin: "0 -10px", paddingTop: 6, paddingLeft: 10, paddingRight: 10, paddingBottom: 10, borderRadius: "0 0 10px 10px", background: "color-mix(in srgb, var(--bg) 60%, transparent)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)", borderBottom: err ? "none" : "1px solid var(--border)", marginBottom: 12, boxShadow: "0 6px 12px -8px rgba(0,0,0,.4)" }}>
       <div data-testid="media-toolbar" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <input data-testid="media-filter" className="form-control form-control-sm" style={{ maxWidth: 200, height: 31 }} placeholder="Filter files…" value={filter} onChange={(e) => setFilter(e.target.value)} />
-        <button data-testid="media-refresh" className="btn btn-sm btn-outline-secondary" style={{ height: 31, display: "inline-flex", alignItems: "center" }} onClick={() => load(folder)} disabled={loading}><i className="bi bi-arrow-clockwise" /> Refresh</button>
+        <button data-testid="media-refresh" className="btn btn-sm btn-outline-secondary" style={{ height: 31, display: "inline-flex", alignItems: "center" }} onClick={refresh} disabled={loading}><i className="bi bi-arrow-clockwise" /> Refresh</button>
           <div data-testid="media-type-filter" style={{ display: "inline-flex", alignItems: "center", gap: 2, border: "1px solid var(--border)", borderRadius: 8, padding: 2, background: "var(--surface-2)" }} title="Type filter — press t to cycle">
             {TYPE_CHIPS.map(([v, label]) => (
               <button key={v} data-testid={`media-type-${v}`} type="button" className={`btn btn-sm ${type === v ? "btn-primary" : "btn-outline-secondary"}`} style={{ height: 25, padding: "0 10px", fontSize: 11, display: "inline-flex", alignItems: "center", borderRadius: 6 }} onClick={() => setType(v)}>{label}</button>
             ))}
           </div>
         <div data-testid="media-view-toggle" style={{ display: "inline-flex", alignItems: "center", gap: 2, border: "1px solid var(--border)", borderRadius: 8, padding: 2, background: "var(--surface-2)" }}>
-          <button data-testid="media-view-list" type="button" className={`btn btn-sm ${isGrid ? "btn-outline-secondary" : "btn-primary"}`} style={{ height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6 }} onClick={() => setParam("view", "")} title="List view (g)"><i className="bi bi-list-ul" /></button>
-          <button data-testid="media-view-grid" type="button" className={`btn btn-sm ${isGrid ? "btn-primary" : "btn-outline-secondary"}`} style={{ height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6 }} onClick={() => setParam("view", "grid")} title="Grid view (g)"><i className="bi bi-grid-3x3-gap-fill" /></button>
+          <button data-testid="media-view-list" type="button" className={`btn btn-sm ${isGrid ? "btn-outline-secondary" : "btn-primary"}`} style={{ height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6 }} onClick={() => setParam("view", "list")} title="List view (g)"><i className="bi bi-list-ul" /></button>
+          <button data-testid="media-view-grid" type="button" className={`btn btn-sm ${isGrid ? "btn-primary" : "btn-outline-secondary"}`} style={{ height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6 }} onClick={() => setParam("view", "")} title="Grid view (g)"><i className="bi bi-grid-3x3-gap-fill" /></button>
         </div>
-        <button data-testid="media-flatten" type="button" className={`btn btn-sm ${isFlat ? "btn-primary" : "btn-outline-secondary"}`} onClick={() => setParam("flat", isFlat ? "" : "1")} title="Flatten: list all files recursively under this folder (f)" style={{ height: 31, display: "inline-flex", alignItems: "center", gap: 5 }}><i className="bi bi-layers" /> Flatten</button>
+        <button data-testid="media-flatten" type="button" className={`btn btn-sm ${isFlat ? "btn-primary" : "btn-outline-secondary"}`} onClick={() => setParam("flat", isFlat ? "" : "1")} title="Flatten: list all files recursively under this folder (j)" style={{ height: 31, display: "inline-flex", alignItems: "center", gap: 5 }}><i className="bi bi-layers" /> Flatten</button>
       </div>
 
       <div data-testid="media-breadcrumbs" style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
-        <button data-testid="media-breadcrumb-root" className="btn btn-sm btn-outline-secondary" onClick={() => { const ns = new URLSearchParams(searchParams); ns.delete("folder"); setSearchParams(ns); }} disabled={!folder}><i className="bi bi-house" /> Media</button>
+        <button data-testid="media-breadcrumb-root" className="btn btn-sm btn-outline-secondary" onClick={() => { const ns = new URLSearchParams(searchParams); ns.delete("f"); ns.delete("folder"); setSearchParams(ns); }} disabled={!folder}><i className="bi bi-house" /> Media</button>
         {crumbs.map((c, i) => (
           <span key={i} data-testid={`media-breadcrumb-${c}`} style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ color: "var(--muted)" }}>/</span>
@@ -426,9 +562,21 @@ export default function Media() {
       {isGrid ? (
         <div data-testid="media-grid-card" className="card">
           <div data-testid="media-grid" ref={gridRef} className="card-body" style={{ padding: GRID_GAP }}>
-            {loading ? <div data-testid="media-loading" style={{ padding: 20, color: "var(--muted)" }}>Loading…</div> : filtered.length === 0 ? <div data-testid="media-empty" className="empty" style={{ padding: 20 }}><i className="bi bi-inbox" /> No files — download something!</div> : !gridW ? <div data-testid="media-grid-measuring" style={{ padding: 20, color: "var(--muted)" }}>Measuring…</div> : (
-              <div data-testid="media-grid-tiles" style={{ display: "flex", flexWrap: "wrap", gap: GRID_GAP }}>
-                {rows.map((row) => renderTile(row.it, row.i, row.w, row.h))}
+            {loading && items.length === 0 ? <div data-testid="media-loading" style={{ padding: 20, color: "var(--muted)" }}>Loading…</div> : filtered.length === 0 ? (!loading ? <div data-testid="media-empty" className="empty" style={{ padding: 20 }}><i className="bi bi-inbox" /> No files — download something!</div> : null) : !gridW ? <div data-testid="media-grid-measuring" style={{ padding: 20, color: "var(--muted)" }}>Measuring…</div> : (
+              <div data-testid="media-grid-tiles" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                {dirRows.length > 0 && (
+                  <div data-testid="media-grid-folders">
+                    <div className="small" style={{ color: "var(--muted)", fontWeight: 700, marginBottom: 6 }}>Folders</div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: GRID_GAP }}>
+                      {dirRows.map((row) => renderFolderChip(row.it, row.i))}
+                    </div>
+                  </div>
+                )}
+                {fileRows.length > 0 && (
+                  <div data-testid="media-grid-files" style={{ display: "flex", flexWrap: "wrap", gap: GRID_GAP }}>
+                    {fileRows.map((row) => renderTile(row.it, row.i, row.w, row.h))}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -439,18 +587,18 @@ export default function Media() {
           <div data-testid="media-list-header" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto auto auto", gap: 10, fontSize: 12, fontWeight: 700, color: "var(--muted)", padding: "10px 14px", borderBottom: "1px solid var(--border)", alignItems: "center" }}>
             {sortBtn("name", "Name")}{sortBtn("size", "Size")}{sortBtn("time", "Time")}<span data-testid="media-header-actions">Actions</span>
           </div>
-          {loading ? <div data-testid="media-loading" style={{ padding: 20, color: "var(--muted)" }}>Loading…</div> : filtered.length === 0 ? <div data-testid="media-empty" className="empty" style={{ padding: 20 }}><i className="bi bi-inbox" /> No files — download something!</div> : (
+          {loading && items.length === 0 ? <div data-testid="media-loading" style={{ padding: 20, color: "var(--muted)" }}>Loading…</div> : filtered.length === 0 ? (!loading ? <div data-testid="media-empty" className="empty" style={{ padding: 20 }}><i className="bi bi-inbox" /> No files — download something!</div> : null) : (
             <div data-testid="media-list-rows">
               {filtered.map((it, fi) => {
                 const ky = rowKey(it);
                 return (
-                  <div key={isFlat ? it.rel || it.name : it.name} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={fi === selectedIdx} style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto auto auto", gap: 10, alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: fi === selectedIdx ? "rgba(99,102,241,0.14)" : it.dir ? "var(--surface-2)" : "var(--surface)", cursor: "pointer" }} onClick={() => { setSelectedIdx(fi); if (it.dir) goFolder(it.name); else openViewer(it); }}>
+                  <div key={isFlat ? it.rel || it.name : it.name} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={fi === selectedIdx} style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto auto auto", gap: 10, alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: fi === selectedIdx ? "rgba(99,102,241,0.14)" : it.dir ? "var(--surface-2)" : "var(--surface)", cursor: "pointer", userSelect: "none" }} onClick={() => tapItem(it)} onDoubleClick={() => openItem(it)} title="Click to select, double-click to open">
                     <div data-testid="media-row-name" style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0 }}>
                       <i className={`bi ${it.dir ? "bi-folder-fill" : catIcon[fileCategory(it.name)]}`} style={{ color: it.dir ? "#f59e0b" : "var(--accent)" }} />
                       {it.dir ? (
-                        <button data-testid="media-row-open-folder" onClick={(e) => { e.stopPropagation(); goFolder(it.name); }} title={it.name} style={{ background: "none", border: 0, color: "var(--text)", fontWeight: 600, textAlign: "left", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0, maxWidth: "100%" }}>{it.name}</button>
+                        <button data-testid="media-row-open-folder" onClick={(e) => { e.stopPropagation(); tapItem(it); }} onDoubleClick={(e) => { e.stopPropagation(); openItem(it); }} title={`${it.name} — click to select, double-click to open`} style={{ background: "none", border: 0, color: "var(--text)", fontWeight: 600, textAlign: "left", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0, maxWidth: "100%" }}>{it.name}</button>
                       ) : (
-                        <button data-testid="media-row-open-file" onClick={(e) => { e.stopPropagation(); openViewer(it); }} title={`Open ${displayName(it)}`} style={{ background: "none", border: 0, color: "var(--text)", fontWeight: 500, textAlign: "left", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", padding: 0, minWidth: 0, maxWidth: "100%" }}>{displayName(it)}</button>
+                        <button data-testid="media-row-open-file" onClick={(e) => { e.stopPropagation(); tapItem(it); }} onDoubleClick={(e) => { e.stopPropagation(); openItem(it); }} title={`${displayName(it)} — click to select, double-click to open`} style={{ background: "none", border: 0, color: "var(--text)", fontWeight: 500, textAlign: "left", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", padding: 0, minWidth: 0, maxWidth: "100%" }}>{displayName(it)}</button>
                       )}
                     </div>
                     <span data-testid="media-row-size" className="small" style={{ color: "var(--muted)", whiteSpace: "nowrap" }}>{fmtSize(it.size)}</span>
@@ -471,39 +619,12 @@ export default function Media() {
       </div>
       )}
       {(() => {
-        if (viewerIdx == null || !viewable[viewerIdx]) return null;
-        const it = viewable[viewerIdx];
+        if (!viewerOpen || shownViewerIdx == null || !viewable[shownViewerIdx]) return null;
+        const it = viewable[shownViewerIdx];
         const label = displayName(it);
         const keyName = rowKey(it);
-        const scrollAndHighlight = (el) => {
-          if (!el) return;
-          el.scrollIntoView({ behavior: "smooth", block: "center" });
-          const n = el.id?.startsWith("media-file-") ? el.id.replace("media-file-", "") : el.getAttribute("data-filename")?.replace(/[^a-zA-Z0-9]/g, "-") || "";
-          if (lastHighlightedMediaRef.current && lastHighlightedMediaRef.current !== n) {
-            const prev = document.getElementById(`media-file-${lastHighlightedMediaRef.current}`);
-            if (prev) { prev.style.background = ""; prev.removeAttribute("data-highlighted"); }
-          }
-          el.style.background = "rgba(99,102,241,0.14)";
-          el.setAttribute("data-highlighted", "true");
-          lastHighlightedMediaRef.current = n;
-        };
-        const handleClose = () => {
-          if (keyName) lastViewedNameRef.current = keyName;
-          setParam("sel", keyName);
-          setViewerIdx(null);
-          setTimeout(() => {
-            const curSel = document.querySelector('[data-selected="true"]');
-            if (curSel && curSel.getAttribute("data-filename") !== keyName) return;
-            const n = keyName ? sanitizeKey(keyName) : "";
-            const el = n ? document.getElementById(`media-file-${n}`) : null;
-            if (el) scrollAndHighlight(el);
-            else if (keyName) {
-              const esc = window.CSS?.escape ? window.CSS.escape(keyName) : keyName.replace(/"/g, '\\"');
-              const q = document.querySelector(`[data-filename="${esc}"]`);
-              scrollAndHighlight(q);
-            }
-          }, 80);
-        };
+        // Quit keeps the selection (already synced while browsing) and never scrolls.
+        const handleClose = () => setViewerKey(null);
         return (
           <div data-testid="media-viewer">
             <FileViewer
@@ -512,16 +633,17 @@ export default function Media() {
               filePath={folder ? `${folder}/${keyName}` : keyName}
               url=""
               viewable={viewable}
-              idx={viewerIdx}
+              idx={shownViewerIdx}
               onClose={handleClose}
-              onPrev={() => goViewer(viewerIdx - 1)}
-              onNext={() => goViewer(viewerIdx + 1)}
+              onPrev={() => goViewer(shownViewerIdx - 1)}
+              onNext={() => goViewer(shownViewerIdx + 1)}
               onGoto={goViewer}
-              onDeleted={() => load(folder)}
+              onDeleted={handleViewerDeleted}
             />
           </div>
         );
       })()}
+      {showHelp && !viewerOpen && <ShortcutsHelp active="library" onClose={() => setShowHelp(false)} />}
       </div>
     </div>
   );

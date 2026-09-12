@@ -281,9 +281,28 @@ function sanitizeFileToken(value) {
 
 function prioritizeRedditCandidates(urls, qualityByUrl = new Map()) {
   // Prefer: v.redd.it fallback mp4 > i.redd.it gif mp4 > preview mp4 > redgifs mp4 > redgifs m3u8
+  // Rule: hunt video first; when the post has NO true video (gif-only post),
+  // the raw GIF beats Reddit's mp4 preview transcode (which stays as fallback).
+  const list = [...urls];
+  const lowerOf = (u) => String(u || "").toLowerCase();
+  const isTrueVideo = (u) => {
+    const lower = lowerOf(u);
+    if (/v\.redd\.it.*\.mp4/i.test(lower)) return true;
+    if (/redgifs\.com.*\.mp4/i.test(lower)) return true;
+    if (/redgifs\.com.*\.m3u8/i.test(lower)) return true;
+    if (isDirectFileUrl(u) && !/preview\.redd\.it/i.test(lower)) return true;
+    return false;
+  };
+  const hasTrueVideo = list.some(isTrueVideo);
+  const isRawGif = (u) => {
+    if (!/\.gif(\?|$)/i.test(String(u || ""))) return false;
+    // preview transcode (?format=mp4), not the GIF itself
+    if (/format=mp4/i.test(String(u || ""))) return false;
+    return true;
+  };
   const scored = (url) => {
     let bonus = 0;
-    const lower = String(url || "").toLowerCase();
+    const lower = lowerOf(url);
     if (/v\.redd\.it.*\.mp4/i.test(lower)) bonus += 500_000;
     if (/preview\.redd\.it.*format=mp4/i.test(lower)) bonus += 400_000;
     if (/i\.redd\.it.*\.gif/i.test(lower) && /mp4/i.test(lower)) bonus += 300_000;
@@ -291,6 +310,7 @@ function prioritizeRedditCandidates(urls, qualityByUrl = new Map()) {
     if (/redgifs\.com.*\.mp4/i.test(lower)) bonus += 450_000;
     if (/redgifs\.com.*\.m3u8/i.test(lower)) bonus += 350_000;
     if (/redgifs\.com/i.test(lower)) bonus += 300_000;
+    if (!hasTrueVideo && isRawGif(url)) bonus += 425_000;
     return scoreDownloadCandidate(url, qualityByUrl.get(url)) + bonus;
   };
   return [...urls].sort((a, b) => scored(b) - scored(a));
