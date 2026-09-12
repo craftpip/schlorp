@@ -272,7 +272,9 @@ export default function Dashboard() {
           )}
           {tab === "completed" && (
             <>
-              <button type="button" className="btn btn-sm btn-outline-secondary" onClick={onRetryAll} disabled={!failedCount || retryAllBusy} title="Retry all failed downloads" style={{ height: 30 }}><i className="bi bi-arrow-counterclockwise" /> Retry all{failedCount ? ` (${failedCount})` : ""}</button>
+              {failedCount > 0 && (
+                <button type="button" className="btn btn-sm btn-outline-secondary" onClick={onRetryAll} disabled={retryAllBusy} title="Retry all failed downloads" style={{ height: 30 }}><i className="bi bi-arrow-counterclockwise" /> Retry all{failedCount ? ` (${failedCount})` : ""}</button>
+              )}
               <button type="button" className="btn btn-sm btn-outline-secondary" onClick={clearCompleted} disabled={!completed.length} title="Clear entries only — files stay in /media" style={{ height: 30 }}><i className="bi bi-x-lg" /> Clear</button>
             </>
           )}
@@ -303,7 +305,11 @@ export default function Dashboard() {
                       </div>
                   <div style={{ fontWeight: 600, fontSize: 13, marginTop: 6, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={deriveTitle(it.url, it.filePath)}>{deriveTitle(it.url, it.filePath)}</div>
                   <div className="queue-url" style={{ marginTop: 2, fontSize: 11, color: "var(--faint)" }}>{it.url}</div>
-                  <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}><i className="bi bi-folder2" /> {it.folder || "—"}</div>
+                  <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4, display: "flex", gap: 12, flexWrap: "wrap" }}>
+                    <span><i className="bi bi-folder2" /> {it.folder || "—"}</span>
+                    <span><i className="bi bi-person-circle" /> {it.account || "default"}</span>
+                    <span><i className="bi bi-badge-hd" /> {it.maxQuality ? `${it.maxQuality}p` : "best"}</span>
+                  </div>
                   <div className="progress" style={{ height: 6, marginTop: 8 }}><div className="progress-bar" style={{ width: `${it.pct || 0}%`, background: barBackground(it.stage), transition: "width .4s ease, background .3s ease" }} /></div>
                     </div>
                   ))}

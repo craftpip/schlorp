@@ -228,6 +228,175 @@ function extractInstagramMediaHintsFromJsonText(rawText, shortcode) {
   };
 }
 
+function decodeInstagramHtmlUrl(value) {
+  return String(value || "").replace(/&amp;/g, "&").trim();
+}
+
+function isInstagramPostImageUrl(value) {
+  const cleaned = decodeInstagramHtmlUrl(value);
+  if (!cleaned) return false;
+  try {
+    const u = new URL(cleaned);
+    if (!/cdninstagram\.com$/i.test(u.hostname) && !/\.cdninstagram\.com$/i.test(u.hostname)) {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+  return /\.(jpe?g|png|webp|avif|bmp)(\?|$)/i.test(cleaned);
+}
+
+// Largest src from a display_resources-style list [{src, config_width, ...}]
+function pickLargestDisplayResource(resources) {
+  if (!Array.isArray(resources) || !resources.length) return "";
+  let best = "";
+  let bestWidth = -1;
+  for (const entry of resources) {
+    if (!entry || typeof entry !== "object") continue;
+    const src = decodeInstagramHtmlUrl(entry.src);
+    if (!src) continue;
+    const width = Number(entry.config_width || 0);
+    if (width > bestWidth) {
+      bestWidth = width;
+      best = src;
+    }
+  }
+  return best;
+}
+
+// Collect post images from one shortcode-media-like node, in display order.
+// Only touches post-image keys (display_url / display_resources / sidecar
+// children) so owner profile pics and other chrome never leak in.
+function collectPostImagesFromMediaNode(node, out) {
+  if (!node || typeof node !== "object" || Array.isArray(node)) return;
+
+  const edges =
+    node.edge_sidecar_to_children &&
+    typeof node.edge_sidecar_to_children === "object" &&
+    Array.isArray(node.edge_sidecar_to_children.edges)
+      ? node.edge_sidecar_to_children.edges
+      : [];
+
+  if (edges.length) {
+    for (const edge of edges) {
+      const child = edge && typeof edge === "object" && edge.node ? edge.node : null;
+      if (!child || typeof child !== "object") continue;
+      const direct = decodeInstagramHtmlUrl(child.display_url);
+      if (isInstagramPostImageUrl(direct)) out.push(stripByteRangeParams(direct));
+      const largest = pickLargestDisplayResource(child.display_resources);
+      if (isInstagramPostImageUrl(largest)) {
+        const cleaned = stripByteRangeParams(largest);
+        if (!out.includes(cleaned)) out.push(cleaned);
+      }
+    }
+    return;
+  }
+
+  const direct = decodeInstagramHtmlUrl(node.display_url);
+  if (isInstagramPostImageUrl(direct)) out.push(stripByteRangeParams(direct));
+  const largest = pickLargestDisplayResource(node.display_resources);
+  if (isInstagramPostImageUrl(largest)) {
+    const cleaned = stripByteRangeParams(largest);
+    if (!out.includes(cleaned)) out.push(cleaned);
+  }
+}
+
+function extractInstagramImageHintsFromJsonText(rawText, shortcode) {
+  if (!rawText || !shortcode) return { imageUrls: [] };
+
+  const parsed = parseJsonWithInstagramPrefix(rawText);
+  if (!parsed || typeof parsed !== "object") return { imageUrls: [] };
+
+  const targetNodes = [];
+  const seenNodes = new WeakSet();
+  const maxScan = 80_000;
+  let scanned = 0;
+
+  const findTargetNodes = (node) => {
+    if (scanned >= maxScan) return;
+    scanned += 1;
+
+    if (!node || typeof node !== "object") return;
+    if (seenNodes.has(node)) return;
+    seenNodes.add(node);
+
+    if (Array.isArray(node)) {
+      for (const item of node) findTargetNodes(item);
+      return;
+    }
+
+    if (node.shortcode === shortcode || node.code === shortcode) {
+      targetNodes.push(node);
+    }
+
+    if (node.xdt_shortcode_media && typeof node.xdt_shortcode_media === "object") {
+      const nested = node.xdt_shortcode_media;
+      if (nested.shortcode === shortcode || nested.code === shortcode) {
+        targetNodes.push(nested);
+      }
+    }
+
+    for (const value of Object.values(node)) {
+      findTargetNodes(value);
+    }
+  };
+
+  findTargetNodes(parsed);
+  if (!targetNodes.length) return { imageUrls: [] };
+
+  const ordered = [];
+  for (const node of targetNodes) collectPostImagesFromMediaNode(node, ordered);
+
+  const seen = new Set();
+  const imageUrls = [];
+  for (const url of ordered) {
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    imageUrls.push(url);
+  }
+
+  return { imageUrls };
+}
+
+function instagramPhotoIdentity(value) {
+  try {
+    const u = new URL(String(value || "").trim());
+    return `${u.origin}${u.pathname}`.toLowerCase();
+  } catch {
+    return String(value || "").toLowerCase().split("?")[0];
+  }
+}
+
+function instagramPhotoSizeRank(value) {
+  // same photo ships as full-size (dst-jpg, no s-size) and crops (s640x640);
+  // rank full-size first. Stable sort keeps post order across photos.
+  let stp = "";
+  try {
+    stp = new URL(String(value || "")).searchParams.get("stp") || "";
+  } catch {
+    stp = "";
+  }
+  return /s\d+x\d+/i.test(stp) ? 1 : 0;
+}
+
+function dedupeInstagramPhotos(urls) {
+  const groups = new Map();
+  for (const raw of Array.isArray(urls) ? urls : []) {
+    const url = String(raw || "").trim();
+    if (!url) continue;
+    const key = instagramPhotoIdentity(url);
+    if (!key) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(url);
+  }
+  const out = [];
+  for (const items of groups.values()) {
+    items.sort((a, b) => instagramPhotoSizeRank(a) - instagramPhotoSizeRank(b));
+    out.push(items[0]);
+  }
+  return out;
+}
+
 function filterInstagramCandidatesForTarget(
   urls,
   targetHintUrls = new Set(),
@@ -256,5 +425,7 @@ module.exports = {
   extractInstagramShortcode,
   extractInstagramUsernameFromJsonText,
   extractInstagramMediaHintsFromJsonText,
+  extractInstagramImageHintsFromJsonText,
+  dedupeInstagramPhotos,
   filterInstagramCandidatesForTarget,
 };

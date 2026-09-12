@@ -334,7 +334,7 @@ async function scanRandomList(state, queue, apiBase) {
     new Set((Array.isArray(scanResult.urls) ? scanResult.urls : []).map((x) => String(x || "").trim()).filter(Boolean))
   );
 
-  const firstPostUrl = scannedPageUrls.find((u) => /instagram\.com\/(?:p|reel|tv)\//i.test(u)) || "";
+  const firstPostUrl = scannedPageUrls.find((u) => /instagram\.com\/(?:[A-Za-z0-9._]+\/)?(?:p|reel|tv)\//i.test(u)) || "";
   const added = enqueueUrls(queue, scannedPageUrls, target.folder, scannedUrls);
 
   state.lists[target.url] = {

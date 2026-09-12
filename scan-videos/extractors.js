@@ -597,6 +597,157 @@ async function getInstagramUsernameFromOembed(page, targetUrl) {
   }
 }
 
+async function extractInstagramPhotoData(page) {
+  let domImages = [];
+  try {
+    domImages = await page.evaluate(async () => {
+      const out = [];
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const toAbs = (value) => {
+        if (!value) return "";
+        const normalized = String(value).replace(/&amp;/g, "&").trim();
+        if (!normalized) return "";
+        try {
+          return new URL(normalized, location.href).href;
+        } catch {
+          return "";
+        }
+      };
+      const isPostHost = (url) => {
+        let host = "";
+        try {
+          host = new URL(url).hostname.toLowerCase();
+        } catch {
+          return false;
+        }
+        return /cdninstagram\.com$/i.test(host) || /fbcdn\.net$/i.test(host);
+      };
+      const isStill = (url) => /\.(jpe?g|png|webp|avif|bmp)(\?|$)/i.test(url);
+      // "url1 640w, url2 1080w" or "url1 1x, url2 2x" -> largest
+      const largestFromSrcset = (srcset) => {
+        let best = "";
+        let bestScore = -1;
+        for (const part of String(srcset || "").split(",")) {
+          const tokens = part.trim().split(/\s+/).filter(Boolean);
+          if (!tokens.length) continue;
+          let score = 0;
+          const desc = tokens[1] || "";
+          const m = desc.match(/^([\d.]+)(w|x)$/i);
+          if (m) score = Number(m[1]) * (m[2].toLowerCase() === "x" ? 1000 : 1);
+          if (score >= bestScore) {
+            bestScore = score;
+            best = tokens[0];
+          }
+        }
+        return best;
+      };
+      const isVisible = (el) => {
+        try {
+          const rect = el.getBoundingClientRect();
+          return rect && rect.width >= 0 && rect.height >= 0;
+        } catch {
+          return true;
+        }
+      };
+      const collect = () => {
+        document.querySelectorAll("img[src], img[srcset]").forEach((el) => {
+          // skip tiny chrome (avatars/icons): keep only post-sized renders
+          try {
+            const rect = el.getBoundingClientRect();
+            if (rect && rect.width > 0 && rect.width < 150) return;
+          } catch {}
+          if (el.naturalWidth > 0 && el.naturalWidth < 150) return;
+          const fromSrcset = largestFromSrcset(el.getAttribute("srcset"));
+          if (fromSrcset) {
+            const abs = toAbs(fromSrcset);
+            if (abs && isPostHost(abs) && isStill(abs)) out.push(abs);
+          } else {
+            const abs = toAbs(el.getAttribute("src") || el.src || "");
+            if (abs && isPostHost(abs) && isStill(abs)) out.push(abs);
+          }
+        });
+      };
+      collect();
+      // Carousel walk: later slides only load when advanced. Prefer the
+      // post article's Next button, else scroll the horizontal overflow
+      // container. Bounded so a stuck carousel can't hang the download.
+      for (let step = 0; step < 10; step += 1) {
+        const before = out.length;
+        let advanced = false;
+        const nextBtn =
+          document.querySelector("article button[aria-label=\"Next\"]") ||
+          document.querySelector("main button[aria-label=\"Next\"]");
+        if (nextBtn && isVisible(nextBtn)) {
+          try {
+            nextBtn.click();
+            advanced = true;
+          } catch {}
+        } else {
+          const scroller = Array.from(document.querySelectorAll("article div, main div")).find(
+            (el) => el.scrollWidth > el.clientWidth + 10 && el.querySelector("img[src]")
+          );
+          if (scroller && scroller.scrollLeft + scroller.clientWidth < scroller.scrollWidth - 5) {
+            try {
+              scroller.scrollBy({ left: scroller.clientWidth, behavior: "instant" });
+              advanced = true;
+            } catch {}
+          }
+        }
+        if (!advanced) break;
+        await sleep(900);
+        collect();
+        if (out.length === before) {
+          // one more beat for lazy images, then stop if still nothing new
+          await sleep(900);
+          collect();
+          if (out.length === before) break;
+        }
+      }
+      return out;
+    });
+  } catch {
+    domImages = [];
+  }
+
+  // og:image / twitter:image carry the post cover in static HTML,
+  // even on the logged-out/app-gated view.
+  let metaImages = [];
+  try {
+    const html = await page.content().catch(() => "");
+    if (html) {
+      const patterns = [
+        /<meta[^>]+property=["']og:image["'][^>]*>/gi,
+        /<meta[^>]+name=["']twitter:image["'][^>]*>/gi,
+      ];
+      for (const pattern of patterns) {
+        let m;
+        while ((m = pattern.exec(html))) {
+          const cm = m[0].match(/content=["']([^"']+)/i);
+          if (cm && cm[1]) metaImages.push(cm[1].replace(/&amp;/g, "&").trim());
+        }
+      }
+    }
+  } catch {
+    metaImages = [];
+  }
+
+  const clean = (list) => {
+    const out = [];
+    const seen = new Set();
+    for (const raw of Array.isArray(list) ? list : []) {
+      const cleaned = stripByteRangeParams(String(raw || "").trim());
+      if (!cleaned) continue;
+      if (!/\.(jpe?g|png|webp|avif|bmp)(\?|$)/i.test(cleaned)) continue;
+      if (seen.has(cleaned)) continue;
+      seen.add(cleaned);
+      out.push(cleaned);
+    }
+    return out;
+  };
+
+  return { imageUrls: clean(domImages), metaImages: clean(metaImages) };
+}
+
 async function extractRedditMediaData(page) {
   const entries = await page.evaluate(() => {
     const out = new Set();
@@ -835,6 +986,7 @@ module.exports = {
   extractPornhubMediaData,
   getInstagramUsername,
   getInstagramUsernameFromOembed,
+  extractInstagramPhotoData,
   extractRedditMediaData,
   fetchRedgifsMediaUrls,
 };

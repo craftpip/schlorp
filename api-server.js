@@ -1862,7 +1862,7 @@ app.post("/download", async (req, res) => {
   } catch (error) {
     return res.status(400).json({ ok: false, error: error.message });
   }
-  const account = normalizeAccountName(req.body?.account || req.query?.account || folder === "reddit" ? "elk" : "default");
+  const account = normalizeAccountName(req.body?.account || req.query?.account);
   // check manual browser for that account
   const manualForAccount = manualBrowsersByAccount.get(account);
   if (manualForAccount && manualForAccount.browser && manualForAccount.browser.isConnected && manualForAccount.browser.isConnected()) {
@@ -2066,7 +2066,7 @@ app.post("/scan-saved", async (req, res) => {
         const key = String(targetUrl).trim();
         if (st.lists[key] || (Array.isArray(st.config?.savedLists) && st.config.savedLists.some((l) => String(l.url).trim() === key))) {
           const resultUrls = Array.isArray(result.urls) ? result.urls.map((u) => String(u).trim()) : [];
-          const firstPostUrl = resultUrls.find((u) => /instagram\.com\/(?:p|reel|tv)\//i.test(u) || /reddit\.com\/r\/[^/]+\/comments\//i.test(u)) || resultUrls[0] || "";
+          const firstPostUrl = resultUrls.find((u) => /instagram\.com\/(?:[A-Za-z0-9._]+\/)?(?:p|reel|tv)\//i.test(u) || /reddit\.com\/r\/[^/]+\/comments\//i.test(u)) || resultUrls[0] || "";
           st.lists[key] = { ...(st.lists[key] || {}), ...(firstPostUrl ? { lastSeenUrl: firstPostUrl } : {}), lastRunAt: new Date().toISOString(), lastScannedCount: foundCount, folder: st.lists[key]?.folder || "" };
           if (st.lists[key].paused) { delete st.lists[key].paused; delete st.lists[key].lastError; delete st.lists[key].lastErrorAt; }
           await writeStateFile(st);
@@ -2333,7 +2333,7 @@ async function backgroundSyncTick() {
           continue;
         }
         // filter to only new until lastSeen
-        const firstPostUrl = urls.find((u) => /instagram\.com\/(?:p|reel|tv)\//i.test(u) || /reddit\.com\/r\/[^/]+\/comments\//i.test(u)) || urls[0] || "";
+        const firstPostUrl = urls.find((u) => /instagram\.com\/(?:[A-Za-z0-9._]+\/)?(?:p|reel|tv)\//i.test(u) || /reddit\.com\/r\/[^/]+\/comments\//i.test(u)) || urls[0] || "";
         let newUrls = urls;
         if (lastSeen) {
           const idx = urls.findIndex((u) => normalizeSyncUrl(u) === normalizeSyncUrl(lastSeen));
@@ -2676,7 +2676,14 @@ async function crawlCollectAndQueue(targetUrl, folder, scannedUrls, foundCount, 
   const lastSeen = String(listState.lastSeenUrl || "").trim();
   let newUrls = urls;
   if (lastSeen) {
-    const idx = urls.findIndex((u) => normalizeSyncUrl(u) === normalizeSyncUrl(lastSeen));
+    const lastSeenNorm = normalizeSyncUrl(lastSeen);
+    const lastSeenId = extractSyncPostId(lastSeen);
+    const idx = urls.findIndex((u) => {
+      if (normalizeSyncUrl(u) === lastSeenNorm) return true;
+      // link format changed over time (/<user>/(p|reel|tv)/<code> vs /(p|reel|tv)/<code>)
+      if (lastSeenId && extractSyncPostId(u) === lastSeenId) return true;
+      return false;
+    });
     if (idx !== -1) newUrls = urls.slice(0, idx);
   }
   const queuedResult = await withQueueFile(async () => {
@@ -2719,6 +2726,20 @@ function normalizeSyncUrl(rawUrl) {
     const parsed = new URL(String(rawUrl || "").trim());
     parsed.hash = "";
     return parsed.href.replace(/\/+$/, "");
+  } catch {
+    return "";
+  }
+}
+
+function extractSyncPostId(rawUrl) {
+  try {
+    const parsed = new URL(String(rawUrl || "").trim());
+    if (/(^|\.)reddit\.com$/i.test(parsed.hostname)) {
+      const m = parsed.pathname.match(/\/comments\/([^/?#]+)\/?/i);
+      return m ? String(m[1] || "").trim() : "";
+    }
+    const m = parsed.pathname.match(/^(?:\/[^/]+)?\/(?:reel|p|tv)\/([^/?#]+)\/?$/i);
+    return m ? String(m[1] || "").trim() : "";
   } catch {
     return "";
   }

@@ -22,7 +22,7 @@ function extractIdFromUrl(rawUrl) {
       const m = parsed.pathname.match(/\/comments\/([^/?#]+)\/?/i);
       if (m) return String(m[1] || "").trim();
     }
-    const match = parsed.pathname.match(/^\/(?:reel|p|tv)\/([^/?#]+)\/?/i);
+    const match = parsed.pathname.match(/^(?:\/[^/]+)?\/(?:reel|p|tv)\/([^/?#]+)\/?/i);
     if (match) return String(match[1] || "").trim();
 
     const parts = parsed.pathname
@@ -64,12 +64,21 @@ function sleep(ms) {
 
 async function readItemsOnPage(page) {
   return page.evaluate(() => {
-    const isPostUrl = (href) => /^https:\/\/[^/]*instagram\.com\/(?:p|reel|tv)\/[^/?#]+/i.test(String(href || ""));
-    const rootAnchors = document.querySelectorAll("._ac7v.x1ty9z65.xzboxd6 a[href]");
-    const anchors = rootAnchors.length ? rootAnchors : document.querySelectorAll("a[href]");
-    const urls = Array.from(anchors)
-      .map((anchor) => (anchor && typeof anchor.href === "string" ? anchor.href.trim() : ""))
-      .filter((href) => href && isPostUrl(href));
+    const isClassicPostUrl = (href) => /^https:\/\/[^/]*instagram\.com\/(?:p|reel|tv)\/[^/?#]+/i.test(String(href || ""));
+    // newer share format embeds the author: /<user>/(p|reel|tv)/<code>
+    const isPrefixedPostUrl = (href) => /^https:\/\/[^/]*instagram\.com\/[A-Za-z0-9._]+\/(?:p|reel|tv)\/[^/?#]+/i.test(String(href || ""));
+    const collect = (nodes, test) =>
+      Array.from(nodes)
+        .map((anchor) => (anchor && typeof anchor.href === "string" ? anchor.href.trim() : ""))
+        .filter((href) => href && test(href));
+    const rootNodes = document.querySelectorAll("._ac7v.x1ty9z65.xzboxd6 a[href]");
+    const allNodes = document.querySelectorAll("a[href]");
+    // grid first (classic, then prefixed), then page-wide — so an empty grid
+    // shell never masks real items, and suggestion rails never win over grid.
+    let urls = collect(rootNodes, isClassicPostUrl);
+    if (!urls.length) urls = collect(allNodes, isClassicPostUrl);
+    if (!urls.length) urls = collect(rootNodes, isPrefixedPostUrl);
+    if (!urls.length) urls = collect(allNodes, isPrefixedPostUrl);
 
     return {
       urls,
@@ -238,6 +247,16 @@ async function scanInstagramSavedPage(options = {}) {
     let lastSeenCount = 0;
     let lastIncreaseAt = Date.now();
 
+    // Instagram hydrates the grid after domcontentloaded (especially via CDP);
+    // wait for the first post links before starting the no-increase clock.
+    try {
+      await page.waitForFunction(
+        () => document.querySelectorAll("a[href*='/p/'], a[href*='/reel/'], a[href*='/tv/']").length > 0,
+        { timeout: 30000, polling: 500 }
+      );
+    } catch {}
+    lastIncreaseAt = Date.now();
+
     for (let index = 0; index < maxIterations; index += 1) {
       iterations = index + 1;
 
@@ -303,12 +322,19 @@ async function scanInstagramSavedPage(options = {}) {
     await sleep(exitWaitMs);
 
     const finalUrls = await page.evaluate(() => {
-      const isPostUrl = (href) => /^https:\/\/[^/]*instagram\.com\/(?:p|reel|tv)\//i.test(String(href || ""));
-      const rootAnchors = document.querySelectorAll("._ac7v.x1ty9z65.xzboxd6 a[href]");
-      const anchors = rootAnchors.length ? rootAnchors : document.querySelectorAll("a[href]");
-      return Array.from(anchors)
-        .map((anchor) => (anchor && typeof anchor.href === "string" ? anchor.href.trim() : ""))
-        .filter((href) => href && isPostUrl(href));
+      const isClassicPostUrl = (href) => /^https:\/\/[^/]*instagram\.com\/(?:p|reel|tv)\//i.test(String(href || ""));
+      const isPrefixedPostUrl = (href) => /^https:\/\/[^/]*instagram\.com\/[A-Za-z0-9._]+\/(?:p|reel|tv)\//i.test(String(href || ""));
+      const collect = (nodes, test) =>
+        Array.from(nodes)
+          .map((anchor) => (anchor && typeof anchor.href === "string" ? anchor.href.trim() : ""))
+          .filter((href) => href && test(href));
+      const rootNodes = document.querySelectorAll("._ac7v.x1ty9z65.xzboxd6 a[href]");
+      const allNodes = document.querySelectorAll("a[href]");
+      let urls = collect(rootNodes, isClassicPostUrl);
+      if (!urls.length) urls = collect(allNodes, isClassicPostUrl);
+      if (!urls.length) urls = collect(rootNodes, isPrefixedPostUrl);
+      if (!urls.length) urls = collect(allNodes, isPrefixedPostUrl);
+      return urls;
     });
 
     for (const url of finalUrls) {
