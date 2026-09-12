@@ -1,5 +1,6 @@
 import { NavLink, Outlet } from "react-router-dom";
 import { useEffect, useState } from "react";
+import xdlLogo from "./assets/xdl-logo.svg";
 
 if (typeof window !== "undefined" && !window._xdlFetchPatched) {
   window._xdlFetchPatched = true;
@@ -123,10 +124,9 @@ export default function App() {
     <div className="app-shell" style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", justifyContent: "center", padding: "24px 16px" }}>
       <div className="app-pane" style={{ width: "100%", maxWidth: 860, padding: "0 var(--pane-pad, 18px)", boxSizing: "border-box" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
-          <span className="brand-mark" style={{ width: 36, height: 36, borderRadius: 10, background: "linear-gradient(135deg,#6366f1 0%,#8b5cf6 50%,#ec4899 100%)", display: "grid", placeItems: "center", color: "#fff" }}><i className="bi bi-play-fill" /></span>
           <div>
-            <div style={{ fontWeight: 700, fontSize: 18, color: "var(--text)" }}>xdl</div>
-            <div style={{ fontSize: 11, color: "var(--muted)", letterSpacing: ".06em", textTransform: "uppercase", fontWeight: 600 }}>Video downloader</div>
+            <img src={xdlLogo} alt="xdl" style={{ height: 30, width: "auto", display: "block" }} />
+            <div style={{ fontSize: 10, color: "var(--muted)", letterSpacing: ".2em", textTransform: "uppercase", fontWeight: 600, marginTop: 2 }}>Video downloader</div>
           </div>
           <span style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--muted)" }}>
             <span style={{ width: 8, height: 8, borderRadius: 99, background: health.busy ? "#f59e0b" : health.browserReady ? "#10b981" : "#64748b", display: "inline-block" }} />
