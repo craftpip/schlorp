@@ -68,13 +68,13 @@ export default function Settings() {
             <div key={g.name} className="card" style={{ overflow: "hidden" }}>
               <div style={{ padding: "10px 14px", fontWeight: 700, fontSize: 13, borderBottom: "1px solid var(--border)", background: "var(--surface-2)" }}>{g.name} <span className="badge text-bg-secondary" style={{ marginLeft: 6 }}>{g.vars.length}</span></div>
               <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
+                <table className="settings-table" style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
                   <thead>
                     <tr style={{ color: "var(--muted)", textAlign: "left", borderBottom: "1px solid var(--border)" }}>
                       <th style={{ padding: "8px 10px", whiteSpace: "nowrap" }}>Variable</th>
                       <th style={{ padding: "8px 10px" }}>Value</th>
-                      <th style={{ padding: "8px 10px", whiteSpace: "nowrap" }}>Default</th>
-                      <th style={{ padding: "8px 10px" }}>Description</th>
+                      <th className="sc-def" style={{ padding: "8px 10px", whiteSpace: "nowrap" }}>Default</th>
+                      <th className="sc-desc" style={{ padding: "8px 10px" }}>Description</th>
                       <th style={{ padding: "8px 10px" }}></th>
                     </tr>
                   </thead>
@@ -94,8 +94,8 @@ export default function Settings() {
                             disabled={saving === v.key}
                           />
                         </td>
-                        <td style={{ padding: "8px 10px", fontFamily: "var(--mono)", color: "var(--muted)", whiteSpace: "nowrap" }}>{v.def}</td>
-                        <td style={{ padding: "8px 10px", color: "var(--muted)" }}>{v.desc}</td>
+                        <td className="sc-def" style={{ padding: "8px 10px", fontFamily: "var(--mono)", color: "var(--muted)", whiteSpace: "nowrap" }}>{v.def}</td>
+                        <td className="sc-desc" style={{ padding: "8px 10px", color: "var(--muted)" }}>{v.desc}</td>
                         <td style={{ padding: "8px 10px", whiteSpace: "nowrap" }}>
                           <button className="btn btn-sm btn-primary" style={{ padding: "2px 8px", fontSize: 11 }} onClick={() => save(v.key)} disabled={saving === v.key}>{saving === v.key ? "…" : "Save"}</button>
                         </td>

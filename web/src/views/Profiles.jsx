@@ -304,7 +304,7 @@ export default function Profiles() {
                     </div>
                   )}
                 </div>
-                <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                <div className="profile-actions" style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
                   {isCdp ? (
                     <>
                       <button className="btn btn-sm btn-outline-secondary" onClick={() => onCheckCdp(a.name)} disabled={isChecking} style={{ minWidth: 90, justifyContent: "center", display: "inline-flex", alignItems: "center", gap: 6 }}>

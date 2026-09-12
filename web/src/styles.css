@@ -595,6 +595,10 @@
       .pr-hint.working{color:var(--accent-dark)}
       .pr-actions{display:flex;gap:8px;align-items:center}
 
+      /* Media thumbnails */
+      .xdl-thumb-spinner{width:26px;height:26px;border-radius:50%;border:3px solid rgba(255,255,255,.25);border-top-color:#fff;animation:xdl-spin .8s linear infinite}
+      @keyframes xdl-spin{to{transform:rotate(360deg)}}
+
       /* Mobile */
       @media(max-width:900px){
         .sidenav{position:fixed;inset:0 auto 0 0;z-index:40;transform:translateX(-100%);transition:transform .25s ease;width:280px}
@@ -607,5 +611,49 @@
       }
       @media(max-width:560px){
         .view-title{font-size:24px}
+      }
+      /* Mobile fit — single central place for all small-screen rules */
+      @media(max-width:640px){
+        /* Page shell: comfortable 12px gutters instead of 34px */
+        .app-shell{padding:16px 12px !important}
+        .app-pane{padding-left:0 !important;padding-right:0 !important;max-width:100% !important}
+        .app-nav{gap:6px !important;margin-bottom:12px !important}
+        .app-nav .btn{padding:6px 10px !important;font-size:12px !important}
+        .app-nav-label{display:none !important}
+        /* Dashboard add-form: stack fields vertically */
+        .dash-form-row{display:flex !important;flex-direction:column !important;align-items:stretch !important;gap:10px !important}
+        .dash-form-row .dash-field{min-width:0 !important;flex:1 1 auto !important}
+        .dash-form-row .dash-actions{flex:1 1 auto !important;display:flex !important;gap:8px !important}
+        .dash-form-row .dash-actions .btn{flex:1 !important}
+        /* Dashboard toolbar: let gap controls wrap */
+        .dash-top{row-gap:8px !important}
+        .dash-tools{flex-wrap:wrap !important;row-gap:8px !important}
+        /* Media toolbar: filter takes full row */
+        .media-toolbar{gap:6px !important}
+        .media-filter{flex:1 1 100% !important;max-width:none !important}
+        .media-sticky{margin-left:0 !important;margin-right:0 !important}
+        /* Media list: Name + Actions only, Size/Time hidden */
+        .mrow{grid-template-columns:minmax(0,1fr) auto !important;gap:8px !important}
+        .mrow .mcol-size,.mrow .mcol-time{display:none !important}
+        /* Media grid tiles: folder chips go full-width, no overflow */
+        .media-grid-tiles [data-testid="media-tile-folder"]{width:100% !important}
+        /* Saved + Profiles forms: fields share rows, wrap cleanly */
+        .mform{display:flex !important;flex-wrap:wrap !important;gap:8px !important}
+        .mform > div{flex:1 1 140px !important;min-width:0 !important}
+        .mform > button{flex:1 1 100% !important}
+        .profile-actions{width:100% !important}
+        .profile-actions .btn{flex:1 !important;min-width:0 !important}
+        /* Settings table: hide Default + Description columns */
+        .settings-table .sc-def,.settings-table .sc-desc{display:none !important}
+        /* Mobile uses tap-to-open — desktop select hint does not apply */
+        .media-hint{display:none !important}
+        /* Refresh + Flatten are icon-only on mobile */
+        .media-btn-label{display:none !important}
+        /* Media library: full-bleed on mobile (break out of shell gutters) */
+        .media-page{margin-left:-12px !important;margin-right:-12px !important}
+        .media-page-title{padding-left:12px !important;padding-right:12px !important}
+        .media-full{margin-left:0 !important;margin-right:0 !important;padding-left:0 !important;padding-right:0 !important}
+        .media-sticky{border-radius:0 !important}
+        .media-lib-card{border-radius:0 !important;border-left:0 !important;border-right:0 !important}
       }
     

@@ -133,6 +133,8 @@ export default function Media() {
   const [showHelp, setShowHelp] = useState(false);
   const [ratios, setRatios] = useState({});
   const [imgErr, setImgErr] = useState({});
+  const [thumbLoaded, setThumbLoaded] = useState({});
+  const [gifVideo, setGifVideo] = useState({});
   const [gridW, setGridW] = useState(0);
   const gridRef = useRef(null);
   const clampRatio = (r) => Math.min(2.2, Math.max(0.55, Number(r) || NaN));
@@ -196,6 +198,8 @@ export default function Media() {
       setItems(fresh);
       setRatios({});
       setImgErr({});
+      setThumbLoaded({});
+      setGifVideo({});
       // Key-based restore: explicit pending key wins, then keep ?s if still present,
       // else select the first item (empty folder = no selection).
       const keyOf = (it) => (isFlat ? it.rel || it.name : it.name);
@@ -435,6 +439,30 @@ export default function Media() {
     const src = imgErr[rk] ? null : thrumb(it);
     const selected = fi === selectedIdx;
     const isDir = !!it.dir;
+    // `.gif` files that are actually MP4 bytes (mislabeled at download time,
+    // e.g. reddit saves) fail in <img> — the server sniffs them as video/mp4.
+    // Flip to a muted looping <video> on image error so they still preview.
+    const cat = fileCategory(it.name);
+    const asVideo = cat === "gif" && !!gifVideo[rk];
+    const loaded = !!thumbLoaded[rk];
+    const markLoaded = (e) => {
+      onImgLoad(e, rowKey(it));
+      const k = rowKey(it);
+      setThumbLoaded((prev) => (prev[k] ? prev : { ...prev, [k]: 1 }));
+    };
+    const markVideoLoaded = () => {
+      const k = rowKey(it);
+      setThumbLoaded((prev) => (prev[k] ? prev : { ...prev, [k]: 1 }));
+    };
+    const markErr = () => {
+      const k = rowKey(it);
+      // GIF <img> failure → retry as video before falling back to the icon.
+      if (cat === "gif" && !gifVideo[k]) {
+        setGifVideo((prev) => ({ ...prev, [k]: 1 }));
+        return;
+      }
+      setImgErr((prev) => (prev[k] ? prev : { ...prev, [k]: 1 }));
+    };
     return (
       <div
         key={isFlat ? it.rel || it.name : it.name}
@@ -448,7 +476,18 @@ export default function Media() {
         style={{ position: "relative", flex: isDir ? "0 0 auto" : "0 0 auto", width: w, height: h, overflow: "hidden", borderRadius: 0, background: isDir ? "var(--surface-2)" : "var(--surface-2)", outline: selected ? "2px solid var(--accent)" : "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8 }}
       >
         {src ? (
-          <img src={src} alt="" loading="lazy" decoding="async" draggable={false} onLoad={(e) => onImgLoad(e, rowKey(it))} onError={() => { const k = rowKey(it); setImgErr((prev) => (prev[k] ? prev : { ...prev, [k]: 1 })); }} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", background: "#000", flex: 1 }} />
+          <span style={{ position: "relative", width: "100%", height: "100%", flex: 1, display: "block", background: "#000", minHeight: 0 }}>
+            {!loaded && (
+              <span data-testid="media-thumb-loading" style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", pointerEvents: "none" }}>
+                <span className="xdl-thumb-spinner" />
+              </span>
+            )}
+            {asVideo ? (
+              <video src={src} autoPlay muted loop playsInline preload="metadata" onLoadedData={markVideoLoaded} onError={markErr} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", background: "#000", opacity: loaded ? 1 : 0 }} />
+            ) : (
+              <img src={src} alt="" loading="lazy" decoding="async" draggable={false} onLoad={markLoaded} onError={markErr} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", background: "#000", opacity: loaded ? 1 : 0 }} />
+            )}
+          </span>
         ) : isDir ? (
           <i className="bi bi-folder-fill" style={{ fontSize: 44, color: "#f59e0b" }} />
         ) : (
@@ -457,7 +496,7 @@ export default function Media() {
         {isDir && (
           <span style={{ position: "absolute", left: 0, right: 0, bottom: 0, padding: "4px 6px", fontSize: 11, color: "#fff", background: "linear-gradient(transparent, rgba(0,0,0,.7))", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", pointerEvents: "none" }}>{displayName(it)}</span>
         )}
-        {!isDir && src && (
+        {!isDir && (
           <span style={{ position: "absolute", left: 0, right: 0, bottom: 0, padding: "4px 6px", fontSize: 10, color: "#fff", background: "linear-gradient(transparent, rgba(0,0,0,.65))", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", pointerEvents: "none" }}>{displayName(it)}</span>
         )}
       </div>
@@ -521,17 +560,17 @@ export default function Media() {
   const fileRows = rows.filter((r) => !r.isDir);
 
   return (
-    <div data-testid="media-page">
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+    <div data-testid="media-page" className="media-page">
+      <div className="media-page-title" style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
         <div data-testid="media-title" style={{ fontWeight: 700, fontSize: 14 }}><i className="bi bi-collection-play" style={{ marginRight: 8 }} /> Media library</div>
         <span data-testid="media-item-count" className="badge text-bg-secondary">{items.length} items</span>
         {loading && items.length > 0 && <span data-testid="media-updating" className="small text-muted"><i className="bi bi-arrow-clockwise" /> Updating…</span>}
-        <span className="small text-muted" style={{ marginLeft: 2 }}>Click to select · double-click to open</span>
+        <span className="small text-muted media-hint" style={{ marginLeft: 2 }}>Click to select · double-click to open</span>
       </div>
-      <div data-testid="media-sticky" style={{ position: "sticky", top: 0, zIndex: 50, margin: "0 -10px", paddingTop: 6, paddingLeft: 10, paddingRight: 10, paddingBottom: 10, borderRadius: "0 0 10px 10px", background: "color-mix(in srgb, var(--bg) 60%, transparent)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)", borderBottom: err ? "none" : "1px solid var(--border)", marginBottom: 12, boxShadow: "0 6px 12px -8px rgba(0,0,0,.4)" }}>
-      <div data-testid="media-toolbar" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <input data-testid="media-filter" className="form-control form-control-sm" style={{ maxWidth: 200, height: 31 }} placeholder="Filter files…" value={filter} onChange={(e) => setFilter(e.target.value)} />
-        <button data-testid="media-refresh" className="btn btn-sm btn-outline-secondary" style={{ height: 31, display: "inline-flex", alignItems: "center" }} onClick={refresh} disabled={loading}><i className="bi bi-arrow-clockwise" /> Refresh</button>
+      <div data-testid="media-sticky" className="media-sticky" style={{ position: "sticky", top: 0, zIndex: 50, margin: "0 -10px", paddingTop: 6, paddingLeft: 10, paddingRight: 10, paddingBottom: 10, borderRadius: "0 0 10px 10px", background: "color-mix(in srgb, var(--bg) 60%, transparent)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)", borderBottom: err ? "none" : "1px solid var(--border)", marginBottom: 12, boxShadow: "0 6px 12px -8px rgba(0,0,0,.4)" }}>
+      <div data-testid="media-toolbar" className="media-toolbar" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <input data-testid="media-filter" className="form-control form-control-sm media-filter" style={{ maxWidth: 200, height: 31 }} placeholder="Filter files…" value={filter} onChange={(e) => setFilter(e.target.value)} />
+        <button data-testid="media-refresh" className="btn btn-sm btn-outline-secondary" style={{ height: 31, display: "inline-flex", alignItems: "center" }} onClick={refresh} disabled={loading} title="Refresh"><i className="bi bi-arrow-clockwise" /> <span className="media-btn-label">Refresh</span></button>
           <div data-testid="media-type-filter" style={{ display: "inline-flex", alignItems: "center", gap: 2, border: "1px solid var(--border)", borderRadius: 8, padding: 2, background: "var(--surface-2)" }} title="Type filter — press t to cycle">
             {TYPE_CHIPS.map(([v, label]) => (
               <button key={v} data-testid={`media-type-${v}`} type="button" className={`btn btn-sm ${type === v ? "btn-primary" : "btn-outline-secondary"}`} style={{ height: 25, padding: "0 10px", fontSize: 11, display: "inline-flex", alignItems: "center", borderRadius: 6 }} onClick={() => setType(v)}>{label}</button>
@@ -541,7 +580,7 @@ export default function Media() {
           <button data-testid="media-view-list" type="button" className={`btn btn-sm ${isGrid ? "btn-outline-secondary" : "btn-primary"}`} style={{ height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6 }} onClick={() => setParam("view", "list")} title="List view (g)"><i className="bi bi-list-ul" /></button>
           <button data-testid="media-view-grid" type="button" className={`btn btn-sm ${isGrid ? "btn-primary" : "btn-outline-secondary"}`} style={{ height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6 }} onClick={() => setParam("view", "")} title="Grid view (g)"><i className="bi bi-grid-3x3-gap-fill" /></button>
         </div>
-        <button data-testid="media-flatten" type="button" className={`btn btn-sm ${isFlat ? "btn-primary" : "btn-outline-secondary"}`} onClick={() => setParam("flat", isFlat ? "" : "1")} title="Flatten: list all files recursively under this folder (j)" style={{ height: 31, display: "inline-flex", alignItems: "center", gap: 5 }}><i className="bi bi-layers" /> Flatten</button>
+        <button data-testid="media-flatten" type="button" className={`btn btn-sm ${isFlat ? "btn-primary" : "btn-outline-secondary"}`} onClick={() => setParam("flat", isFlat ? "" : "1")} title="Flatten: list all files recursively under this folder (j)" style={{ height: 31, display: "inline-flex", alignItems: "center", gap: 5 }}><i className="bi bi-layers" /> <span className="media-btn-label">Flatten</span></button>
       </div>
 
       <div data-testid="media-breadcrumbs" style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
@@ -560,10 +599,10 @@ export default function Media() {
       {err && <div data-testid="media-error" className="card" style={{ padding: 12, color: "var(--danger)", marginBottom: 12 }}>{err}</div>}
 
       {isGrid ? (
-        <div data-testid="media-grid-card" className="card">
+        <div data-testid="media-grid-card" className="card media-lib-card">
           <div data-testid="media-grid" ref={gridRef} className="card-body" style={{ padding: GRID_GAP }}>
             {loading && items.length === 0 ? <div data-testid="media-loading" style={{ padding: 20, color: "var(--muted)" }}>Loading…</div> : filtered.length === 0 ? (!loading ? <div data-testid="media-empty" className="empty" style={{ padding: 20 }}><i className="bi bi-inbox" /> No files — download something!</div> : null) : !gridW ? <div data-testid="media-grid-measuring" style={{ padding: 20, color: "var(--muted)" }}>Measuring…</div> : (
-              <div data-testid="media-grid-tiles" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <div data-testid="media-grid-tiles" className="media-grid-tiles" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                 {dirRows.length > 0 && (
                   <div data-testid="media-grid-folders">
                     <div className="small" style={{ color: "var(--muted)", fontWeight: 700, marginBottom: 6 }}>Folders</div>
@@ -582,17 +621,17 @@ export default function Media() {
           </div>
         </div>
       ) : (
-      <div data-testid="media-list-card" className="card">
+      <div data-testid="media-list-card" className="card media-lib-card">
         <div className="card-body" style={{ padding: 0 }}>
-          <div data-testid="media-list-header" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto auto auto", gap: 10, fontSize: 12, fontWeight: 700, color: "var(--muted)", padding: "10px 14px", borderBottom: "1px solid var(--border)", alignItems: "center" }}>
-            {sortBtn("name", "Name")}{sortBtn("size", "Size")}{sortBtn("time", "Time")}<span data-testid="media-header-actions">Actions</span>
+          <div data-testid="media-list-header" className="mrow" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto auto auto", gap: 10, fontSize: 12, fontWeight: 700, color: "var(--muted)", padding: "10px 14px", borderBottom: "1px solid var(--border)", alignItems: "center" }}>
+            {sortBtn("name", "Name")}<span className="mcol-size">{sortBtn("size", "Size")}</span><span className="mcol-time">{sortBtn("time", "Time")}</span><span data-testid="media-header-actions">Actions</span>
           </div>
           {loading && items.length === 0 ? <div data-testid="media-loading" style={{ padding: 20, color: "var(--muted)" }}>Loading…</div> : filtered.length === 0 ? (!loading ? <div data-testid="media-empty" className="empty" style={{ padding: 20 }}><i className="bi bi-inbox" /> No files — download something!</div> : null) : (
             <div data-testid="media-list-rows">
               {filtered.map((it, fi) => {
                 const ky = rowKey(it);
                 return (
-                  <div key={isFlat ? it.rel || it.name : it.name} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={fi === selectedIdx} style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto auto auto", gap: 10, alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: fi === selectedIdx ? "rgba(99,102,241,0.14)" : it.dir ? "var(--surface-2)" : "var(--surface)", cursor: "pointer", userSelect: "none" }} onClick={() => tapItem(it)} onDoubleClick={() => openItem(it)} title="Click to select, double-click to open">
+                  <div key={isFlat ? it.rel || it.name : it.name} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={fi === selectedIdx} className="mrow" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto auto auto", gap: 10, alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: fi === selectedIdx ? "rgba(99,102,241,0.14)" : it.dir ? "var(--surface-2)" : "var(--surface)", cursor: "pointer", userSelect: "none" }} onClick={() => tapItem(it)} onDoubleClick={() => openItem(it)} title="Click to select, double-click to open">
                     <div data-testid="media-row-name" style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0 }}>
                       <i className={`bi ${it.dir ? "bi-folder-fill" : catIcon[fileCategory(it.name)]}`} style={{ color: it.dir ? "#f59e0b" : "var(--accent)" }} />
                       {it.dir ? (
@@ -601,8 +640,8 @@ export default function Media() {
                         <button data-testid="media-row-open-file" onClick={(e) => { e.stopPropagation(); tapItem(it); }} onDoubleClick={(e) => { e.stopPropagation(); openItem(it); }} title={`${displayName(it)} — click to select, double-click to open`} style={{ background: "none", border: 0, color: "var(--text)", fontWeight: 500, textAlign: "left", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", padding: 0, minWidth: 0, maxWidth: "100%" }}>{displayName(it)}</button>
                       )}
                     </div>
-                    <span data-testid="media-row-size" className="small" style={{ color: "var(--muted)", whiteSpace: "nowrap" }}>{fmtSize(it.size)}</span>
-                    <span data-testid="media-row-time" className="small" style={{ color: "var(--muted)", whiteSpace: "nowrap" }} title={it.created ? new Date(it.created).toLocaleString() : ""}>{timeAgo(it.created || it.mtime)}</span>
+                    <span data-testid="media-row-size" className="small mcol-size" style={{ color: "var(--muted)", whiteSpace: "nowrap" }}>{fmtSize(it.size)}</span>
+                    <span data-testid="media-row-time" className="small mcol-time" style={{ color: "var(--muted)", whiteSpace: "nowrap" }} title={it.created ? new Date(it.created).toLocaleString() : ""}>{timeAgo(it.created || it.mtime)}</span>
                     <div data-testid="media-row-actions" style={{ display: "flex", gap: 6 }}>
                       {it.dir ? (
                         <button data-testid="media-row-action-open" className="btn btn-sm btn-outline-secondary" onClick={(e) => { e.stopPropagation(); goFolder(it.name); }}><i className="bi bi-folder2-open" /> Open</button>

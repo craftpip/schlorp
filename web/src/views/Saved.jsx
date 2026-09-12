@@ -220,7 +220,7 @@ export default function Saved() {
       {showAdd && (
         <div style={{ border: "1px solid var(--border)", borderRadius: 12, padding: 16, background: "var(--surface)", marginBottom: 16 }}>
           <div style={{ fontWeight: 600, marginBottom: 12 }}>Add collection</div>
-          <form onSubmit={onAddList} style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
+          <form onSubmit={onAddList} className="mform" style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
             <div style={{ flex: 1, minWidth: 220 }}>
               <label className="form-label">Collection URL</label>
               <input className="form-control" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://www.instagram.com/username/saved/list/123/" required />
@@ -322,7 +322,7 @@ export default function Saved() {
                     {editingIdx === i && (
                       <div style={{ marginTop: 14, padding: 14, background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10 }}>
                         <div style={{ fontWeight: 600, marginBottom: 10, fontSize: 13 }}>Edit collection</div>
-                        <form onSubmit={onAddList} style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
+                        <form onSubmit={onAddList} className="mform" style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
                           <div style={{ flex: 1, minWidth: 200 }}>
                             <label className="form-label">Collection URL</label>
                             <input className="form-control" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://www.instagram.com/username/saved/list/123/" required />

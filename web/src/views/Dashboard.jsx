@@ -188,16 +188,16 @@ export default function Dashboard() {
               <span className="badge text-bg-primary"><i className="bi bi-lightning-charge" /> Auto-queue</span>
             </div>
             <label className="form-label">Video URLs — one per line</label>
-            <textarea className="form-control" rows={3} placeholder={"https://www.instagram.com/reel/XXXX\nhttps://www.xvideos.com/video1234/title"} value={urls} onChange={(e) => setUrls(e.target.value)} />
-            <div className="row g-2" style={{ marginTop: 12, alignItems: "end" }}>
-              <div className="col" style={{ flex: "1 1 0", minWidth: 110 }}>
+            <textarea className="form-control" rows={3} placeholder={"https://www.instagram.com/reel/XXXX"} value={urls} onChange={(e) => setUrls(e.target.value)} />
+            <div className="row g-2 dash-form-row" style={{ marginTop: 12, alignItems: "end" }}>
+              <div className="col dash-field" style={{ flex: "1 1 0", minWidth: 110 }}>
                 <label className="form-label"><i className="bi bi-folder2" /> Folder</label>
                 <input className="form-control" type="text" list="folder-list" placeholder="e.g. instagram / favorites" value={folder} onChange={(e) => setFolder(e.target.value)} />
                 <datalist id="folder-list">
                   {folderOptions.map((n) => <option key={n} value={n} />)}
                 </datalist>
               </div>
-              <div className="col" style={{ flex: "1 1 0", minWidth: 110 }}>
+              <div className="col dash-field" style={{ flex: "1 1 0", minWidth: 110 }}>
                 <label className="form-label"><i className="bi bi-badge-hd" /> Max quality</label>
                 <select className="form-control" value={maxQuality} onChange={(e) => setMaxQuality(e.target.value)}>
                   <option value="">Best (auto)</option>
@@ -208,14 +208,14 @@ export default function Dashboard() {
                   <option value="240">240p</option>
                 </select>
               </div>
-              <div className="col" style={{ flex: "1 1 0", minWidth: 110 }}>
+              <div className="col dash-field" style={{ flex: "1 1 0", minWidth: 110 }}>
                 <label className="form-label"><i className="bi bi-person" /> Profile</label>
                 <select className="form-control" value={account} onChange={(e) => setAccount(e.target.value)}>
                   <option value="">Default</option>
                   {accountOptions.filter((n) => n !== "default").map((n) => <option key={n} value={n}>{n}</option>)}
                 </select>
               </div>
-              <div className="col" style={{ flex: "0 0 auto", display: "flex", gap: 8, alignItems: "stretch" }}>
+              <div className="col dash-actions" style={{ flex: "0 0 auto", display: "flex", gap: 8, alignItems: "stretch" }}>
                 <button type="submit" className="btn btn-primary btn-block btn-lg" disabled={busy}><i className="bi bi-plus-lg" /> Add to queue</button>
                 {queuedCount > 0 && (
                   paused ? (
@@ -251,7 +251,7 @@ export default function Dashboard() {
           <i className="bi bi-check2-all" /> Completed{(() => { const d = completed.filter((i) => i.status === "done").length, e = completed.filter((i) => i.status === "error").length; if (!d && !e) return null; return <span style={{ fontSize: 11, opacity: 0.85 }}>({d}/{e})</span>; })()}
         </button>
         <span style={{ flex: 1, minWidth: 12 }} />
-        <div style={{ display: "inline-flex", alignItems: "center", gap: 4, whiteSpace: "nowrap", flexWrap: "nowrap", flexShrink: 0 }}>
+        <div className="dash-tools" style={{ display: "inline-flex", alignItems: "center", gap: 4, whiteSpace: "nowrap", flexWrap: "nowrap", flexShrink: 0 }}>
           <span className="small" style={{ color: "var(--muted)", display: "inline-flex", alignItems: "center", gap: 4, whiteSpace: "nowrap" }} title="Wait between downloads — same values = fixed, different = random range. Format: 90s or 5m"><i className="bi bi-hourglass-split" /> Gap</span>
         <div style={{ position: "relative", display: "inline-flex", alignItems: "center", flexShrink: 0 }}>
           <input type="text" className={`form-control form-control-sm ${gapErr ? "is-invalid" : ""}`} style={{ width: 56, height: 30, borderTopRightRadius: 0, borderBottomRightRadius: 0, padding: "4px 8px", fontSize: 12 }} value={gapMin} placeholder="5m" onChange={(e) => { if (gapErr) setGapErr(""); setGapMin(e.target.value); }} onKeyDown={(e) => { if (e.key === "Enter") saveGap(); }} />

@@ -120,8 +120,8 @@ export default function App() {
     );
   }
   return (
-    <div style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", justifyContent: "center", padding: "24px 16px" }}>
-      <div style={{ width: "100%", maxWidth: 860, padding: "0 var(--pane-pad, 18px)", boxSizing: "border-box" }}>
+    <div className="app-shell" style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", justifyContent: "center", padding: "24px 16px" }}>
+      <div className="app-pane" style={{ width: "100%", maxWidth: 860, padding: "0 var(--pane-pad, 18px)", boxSizing: "border-box" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
           <span className="brand-mark" style={{ width: 36, height: 36, borderRadius: 10, background: "linear-gradient(135deg,#6366f1 0%,#8b5cf6 50%,#ec4899 100%)", display: "grid", placeItems: "center", color: "#fff" }}><i className="bi bi-play-fill" /></span>
           <div>
@@ -134,12 +134,12 @@ export default function App() {
           </span>
           {auth.protected && auth.authed && <button className="btn btn-sm btn-outline-secondary" style={{ marginLeft: 8 }} onClick={doLogout}><i className="bi bi-box-arrow-right" /> Logout</button>}
         </div>
-        <nav style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
-          <NavLink to="/dashboard" className={({ isActive }) => `btn btn-sm ${isActive ? "btn-primary" : "btn-outline-secondary"}`}><i className="bi bi-download" /> Dashboard</NavLink>
-          <NavLink to="/media" className={({ isActive }) => `btn btn-sm ${isActive ? "btn-primary" : "btn-outline-secondary"}`}><i className="bi bi-collection-play" /> Media</NavLink>
-          <NavLink to="/collections" className={({ isActive }) => `btn btn-sm ${isActive ? "btn-primary" : "btn-outline-secondary"}`}><i className="bi bi-bookmark-star" /> Collections {hasFlagged && <i className="bi bi-exclamation-triangle-fill" style={{ color: "#f59e0b", marginLeft: 2, fontSize: 11 }} title="Login expired — some collections paused" />}</NavLink>
-          <NavLink to="/profiles" className={({ isActive }) => `btn btn-sm ${isActive ? "btn-primary" : "btn-outline-secondary"}`}><i className="bi bi-people" /> Profiles</NavLink>
-          <NavLink to="/settings" className={({ isActive }) => `btn btn-sm ${isActive ? "btn-primary" : "btn-outline-secondary"}`}><i className="bi bi-gear" /> Settings</NavLink>
+        <nav className="app-nav" style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
+          <NavLink to="/dashboard" title="Dashboard" className={({ isActive }) => `btn btn-sm ${isActive ? "btn-primary" : "btn-outline-secondary"}`}><i className="bi bi-download" /> <span className="app-nav-label">Dashboard</span></NavLink>
+          <NavLink to="/media" title="Media" className={({ isActive }) => `btn btn-sm ${isActive ? "btn-primary" : "btn-outline-secondary"}`}><i className="bi bi-collection-play" /> <span className="app-nav-label">Media</span></NavLink>
+          <NavLink to="/collections" title="Collections" className={({ isActive }) => `btn btn-sm ${isActive ? "btn-primary" : "btn-outline-secondary"}`}><i className="bi bi-bookmark-star" /> <span className="app-nav-label">Collections</span>{hasFlagged && <i className="bi bi-exclamation-triangle-fill" style={{ color: "#f59e0b", marginLeft: 2, fontSize: 11 }} title="Login expired — some collections paused" />}</NavLink>
+          <NavLink to="/profiles" title="Profiles" className={({ isActive }) => `btn btn-sm ${isActive ? "btn-primary" : "btn-outline-secondary"}`}><i className="bi bi-people" /> <span className="app-nav-label">Profiles</span></NavLink>
+          <NavLink to="/settings" title="Settings" className={({ isActive }) => `btn btn-sm ${isActive ? "btn-primary" : "btn-outline-secondary"}`}><i className="bi bi-gear" /> <span className="app-nav-label">Settings</span></NavLink>
         </nav>
         <Outlet />
       </div>
