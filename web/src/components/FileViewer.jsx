@@ -87,6 +87,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const navRef = useRef(mediaUrl);
   const [loadedUrl, setLoadedUrl] = useState(mediaUrl);
   const loadTimerRef = useRef(null);
+  const [mediaReady, setMediaReady] = useState(false);
   useEffect(() => {
     navRef.current = mediaUrl;
     if (videoRef.current && !videoRef.current.paused) videoRef.current.pause();
@@ -125,7 +126,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   useEffect(() => { try { localStorage.setItem("xdl_viewer_rate", String(rate)); } catch {} }, [rate]);
   useEffect(() => { try { localStorage.setItem("xdl_viewer_seekFrames", seekFrames ? "1" : "0"); } catch {} }, [seekFrames]);
   useEffect(() => { try { localStorage.setItem("xdl_viewer_endMode", endMode); } catch {} }, [endMode]);
-  useEffect(() => { setZoom(1); setOrigin("50% 50%"); setPan({x:0,y:0}); setCurrent(0); setDuration(0); setGifAsVideo(false); setYConfirm(false); lastYRef.current = 0; if (yConfirmTimerRef.current) { clearTimeout(yConfirmTimerRef.current); yConfirmTimerRef.current = null; } setTimeout(() => videoRef.current?.focus(), 50); }, [loadedUrl]);
+  useEffect(() => { setZoom(1); setOrigin("50% 50%"); setPan({x:0,y:0}); setCurrent(0); setDuration(0); setGifAsVideo(false); setMediaReady(false); setYConfirm(false); lastYRef.current = 0; if (yConfirmTimerRef.current) { clearTimeout(yConfirmTimerRef.current); yConfirmTimerRef.current = null; } setTimeout(() => videoRef.current?.focus(), 50); }, [loadedUrl]);
   useEffect(() => () => { if (yConfirmTimerRef.current) clearTimeout(yConfirmTimerRef.current); if (playlistCloseTimer.current) clearTimeout(playlistCloseTimer.current); }, []);
   const navigatingViaRandomRef = useRef(false);
   useEffect(() => {
@@ -292,6 +293,18 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     setOrigin("50% 50%");
   };
   const resetZoom = () => { setZoom(1); setOrigin("50% 50%"); setPan({x:0,y:0}); };
+  // React registers wheel listeners as passive, so preventDefault() inside
+  // onWheel is ignored and the window scrolls during zoom. Drive zoom through
+  // a native non-passive listener instead.
+  const handleWheelRef = useRef(null);
+  handleWheelRef.current = handleWheel;
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onWheelNative = (e) => { if (handleWheelRef.current) handleWheelRef.current(e); };
+    el.addEventListener("wheel", onWheelNative, { passive: false });
+    return () => el.removeEventListener("wheel", onWheelNative);
+  }, []);
   const handleMouseDown = (e) => {
     if (!showImage && videoRef.current) {
       wasPlayingRef.current = !videoRef.current.paused;
@@ -406,8 +419,9 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       } else if (e.key.toLowerCase() === "e" && !e.ctrlKey && !e.altKey && !e.metaKey) {
         if (e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA" && !e.target.isContentEditable) { e.preventDefault(); setSeekFrames((v) => !v); }
       } else if ((e.code === "Space" || e.key === " " || e.key === "Spacebar") && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        // Always swallow Space while the viewer is open so the window never scrolls.
+        e.preventDefault();
         if ((!showImage) && videoRef.current) {
-          e.preventDefault();
           if (jogRef.current) { clearInterval(jogRef.current); jogRef.current = null; jogWasPlayingRef.current = false; videoRef.current.pause(); }
           else { if (videoRef.current.paused) videoRef.current.play(); else videoRef.current.pause(); }
         }
@@ -693,12 +707,15 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   .fv-header{ flex-wrap: nowrap !important; padding: 6px 8px !important; }
   .fv-header > div:nth-child(2){ display: none !important; }
 }`}</style>
-        <div ref={containerRef} onWheel={handleWheel} onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp} onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd} title={zoom>1 ? "Drag to pan · scroll to zoom" : "Scroll to zoom · drag to pan when zoomed · swipe up/down prev/next, left/right seek"} style={{ position: "relative", flex: "1 1 auto", minHeight: 0, overflow: "hidden", background: "#080a14", display: "flex", alignItems: "center", justifyContent: "center", padding: showImage ? 16 : 0, cursor: "default", touchAction: "none" }}>
+        <div ref={containerRef} onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp} onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd} title={zoom>1 ? "Drag to pan · scroll to zoom" : "Scroll to zoom · drag to pan when zoomed · swipe up/down prev/next, left/right seek"} style={{ position: "relative", flex: "1 1 auto", minHeight: 0, overflow: "hidden", background: "#080a14", display: "flex", alignItems: "center", justifyContent: "center", padding: showImage ? 16 : 0, cursor: "default", touchAction: "none" }}>
           {zoom>1 && <span style={{ position: "absolute", top: 10, right: 10, zIndex: 3, background: "rgba(0,0,0,.6)", color: "#fff", padding: "4px 8px", borderRadius: 6, fontSize: 11, fontFamily: "var(--mono)" }}>{Math.round(zoom*100)}%</span>}
-          {loading ? (
-            <div style={{ color: "var(--muted)", fontSize: 13 }}><i className="bi bi-hourglass-split" /> Loading…</div>
-          ) : showImage ? (
-            <img src={loadedUrl} alt={titleEff} onContextMenu={(e) => e.preventDefault()} draggable={false} onError={isGif ? () => setGifAsVideo(true) : undefined} style={{ width: "100%", height: "100%", objectFit: "contain", background: "#000", borderRadius: 0, transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: origin, transition: zoom===1 ? "transform 0.15s" : "none", WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none" }} />
+          {(loading || (!mediaReady && isFormatKnown)) && (
+            <span data-testid="viewer-loading" style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", pointerEvents: "none", zIndex: 2 }}>
+              <span className="xdl-thumb-spinner" />
+            </span>
+          )}
+          {loading ? null : showImage ? (
+            <img src={loadedUrl} alt={titleEff} onContextMenu={(e) => e.preventDefault()} draggable={false} onLoad={() => setMediaReady(true)} onError={isGif ? () => setGifAsVideo(true) : () => setMediaReady(true)} style={{ width: "100%", height: "100%", objectFit: "contain", background: "#000", borderRadius: 0, opacity: mediaReady ? 1 : 0, transition: zoom===1 ? "opacity .45s ease, transform 0.15s" : "opacity .45s ease", transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: origin, WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none" }} />
           ) : gifAsVideoEff ? (
             <video
               key={loadedUrl}
@@ -711,15 +728,18 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
               autoFocus
               onClick={(e)=> e.stopPropagation()}
               onContextMenu={(e) => e.preventDefault()}
-              style={{ width: "100%", height: "100%", background: "#000", display: "block", objectFit: "contain", transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: origin, transition: zoom===1 ? "transform 0.15s" : "none", WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none", outline: "none" }}
+              style={{ width: "100%", height: "100%", background: "#000", display: "block", objectFit: "contain", opacity: mediaReady ? 1 : 0, transition: zoom===1 ? "opacity .45s ease, transform 0.15s" : "opacity .45s ease", transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: origin, WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none", outline: "none" }}
               onTimeUpdate={(e)=> setCurrent(e.currentTarget.currentTime)}
               onLoadedMetadata={(e)=> setDuration(e.currentTarget.duration)}
+              onLoadedData={() => setMediaReady(true)}
+              onCanPlay={() => setMediaReady(true)}
+              onError={() => setMediaReady(true)}
               onPlay={() => setIsPlaying(true)}
               onPause={() => setIsPlaying(false)}
             />
           ) : isAudio ? (
-            <div style={{ width: "100%", padding: 24, display: "grid", placeItems: "center" }}>
-              <audio key={loadedUrl} ref={videoRef} src={loadedUrl} autoPlay style={{ width: "100%", display: "none" }} onTimeUpdate={(e)=> setCurrent(e.currentTarget.currentTime)} onLoadedMetadata={(e)=> setDuration(e.currentTarget.duration)} onPlay={() => setIsPlaying(true)} onPause={() => setIsPlaying(false)} />
+            <div style={{ width: "100%", padding: 24, display: "grid", placeItems: "center", opacity: mediaReady ? 1 : 0, transition: "opacity .45s ease" }}>
+              <audio key={loadedUrl} ref={videoRef} src={loadedUrl} autoPlay style={{ width: "100%", display: "none" }} onTimeUpdate={(e)=> setCurrent(e.currentTarget.currentTime)} onLoadedMetadata={(e)=> setDuration(e.currentTarget.duration)} onLoadedData={() => setMediaReady(true)} onCanPlay={() => setMediaReady(true)} onError={() => setMediaReady(true)} onPlay={() => setIsPlaying(true)} onPause={() => setIsPlaying(false)} />
               <div style={{ width: "100%", textAlign: "center", color: "var(--muted)", fontSize: 13 }}><i className="bi bi-music-note-beamed" style={{ fontSize: 32, display: "block", marginBottom: 8 }} /> Audio playback — use controls below</div>
             </div>
           ) : isFormatKnown ? (
@@ -733,9 +753,12 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
               tabIndex={0}
               autoFocus
               onClick={(e)=> e.stopPropagation()}
-              style={{ width: "100%", height: "100%", background: "#000", display: "block", objectFit: "contain", transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: origin, transition: zoom===1 ? "transform 0.15s" : "none", WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none", outline: "none" }}
+              style={{ width: "100%", height: "100%", background: "#000", display: "block", objectFit: "contain", opacity: mediaReady ? 1 : 0, transition: zoom===1 ? "opacity .45s ease, transform 0.15s" : "opacity .45s ease", transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: origin, WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none", outline: "none" }}
               onTimeUpdate={(e)=> setCurrent(e.currentTarget.currentTime)}
               onLoadedMetadata={(e)=> setDuration(e.currentTarget.duration)}
+              onLoadedData={() => setMediaReady(true)}
+              onCanPlay={() => setMediaReady(true)}
+              onError={() => setMediaReady(true)}
               onPlay={() => setIsPlaying(true)}
               onPause={() => setIsPlaying(false)}
             />
