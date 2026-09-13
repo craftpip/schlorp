@@ -207,8 +207,10 @@ export default function Media() {
     });
   })();
   const inPlaylistView = !!activePlId;
-  const filtered = (() => {
-    let base = inPlaylistView && playlistItemsForView ? playlistItemsForView : items;
+  // Shared view ordering (filter text + type + sort, dirs first) so the
+  // list render and the default-selection pick in load() agree.
+  const applyViewOrder = (list) => {
+    let base = list;
     const raw = filter.trim();
     if (raw) {
       const isNeg = raw.startsWith("!");
@@ -238,6 +240,10 @@ export default function Media() {
       return [...dirs, ...files];
     }
     return base;
+  };
+  const filtered = (() => {
+    const base = inPlaylistView && playlistItemsForView ? playlistItemsForView : items;
+    return applyViewOrder(base);
   })();
   const viewable = filtered.filter((it) => !it.dir);
   const isEmptyForList = filtered.length === 0 && (!folder ? playlists.length === 0 : true);
@@ -285,8 +291,12 @@ export default function Media() {
         // keep — selection survives reload/refresh
       } else if (allKeys.size) {
         if (isRootForSelect && playlists.length) setParam("sel", `playlist:${playlists[0].id}`);
-        else if (fresh.length) setParam("sel", keyOf(fresh[0]));
-        else if (curSel) setParam("sel", "");
+        else {
+          // Default to the first VISIBLE item (view order), not raw API order.
+          const ordered = applyViewOrder(fresh);
+          if (ordered.length) setParam("sel", keyOf(ordered[0]));
+          else if (curSel) setParam("sel", "");
+        }
       } else if (curSel) {
         setParam("sel", "");
       }
@@ -450,6 +460,14 @@ export default function Media() {
         const i = order.indexOf(type);
         const next = order[(i + 1) % order.length];
         setType(next);
+      }
+      else if (e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && (e.code === "Digit1" || e.code === "Digit2" || e.code === "Digit3")) {
+        // Shift+1/2/3 toggles Name/Size/Time sort (grid + list, viewer closed).
+        // Uses e.code: with Shift held the key reads "!" / "@" / "#" on US layouts.
+        e.preventDefault();
+        if (e.code === "Digit1") toggleSort("name");
+        else if (e.code === "Digit2") toggleSort("size");
+        else toggleSort("time");
       }
       else if (lowK === "y" && !e.ctrlKey && !e.altKey && !e.metaKey) {
         // Same as viewer: y twice deletes the selected file (600ms window).
@@ -882,11 +900,20 @@ export default function Media() {
     else { ns.delete("sort"); ns.delete("dir"); }
     setSearchParams(ns, { replace: true });
   };
-  const sortBtn = (key, label) => (
-    <button data-testid={`media-sort-${key}`} type="button" onClick={() => toggleSort(key)} title={`Sort by ${label}`} style={{ background: "none", border: 0, padding: 0, color: sort === key ? "var(--text)" : "inherit", fontWeight: 700, fontSize: 12, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 4, textAlign: "left" }}>
+  const sortBtn = (key, label, tid) => (
+    <button data-testid={tid || `media-sort-${key}`} type="button" onClick={() => toggleSort(key)} title={`Sort by ${label}`} style={{ background: "none", border: 0, padding: 0, color: sort === key ? "var(--text)" : "inherit", fontWeight: 700, fontSize: 12, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 4, textAlign: "left" }}>
       {label}<span style={{ color: "var(--accent)", minWidth: 10, display: "inline-block" }}>{sort === key ? (sortDir === "desc" ? "▼" : "▲") : ""}</span>
     </button>
   );
+  const sortBarBtn = (key, label, tid) => {
+    const active = sort === key;
+    return (
+      <button data-testid={tid} type="button" className={`btn btn-sm ${active ? "btn-primary" : "btn-outline-secondary"}`} onClick={() => toggleSort(key)} title={`Sort by ${label}`} style={{ height: 25, padding: "0 10px", fontSize: 11, display: "inline-flex", alignItems: "center", gap: 4, borderRadius: 6, fontWeight: 600 }}>
+        {label}
+        {active && <span style={{ color: "#fff", display: "inline-block", fontSize: 10 }}>{sortDir === "desc" ? "▼" : "▲"}</span>}
+      </button>
+    );
+  };
   // Close the viewer if its file disappears entirely (e.g. externally deleted
   // with no neighbour to fall back to). Delete flows set viewerKey explicitly.
   useEffect(() => {
@@ -989,6 +1016,11 @@ export default function Media() {
           </span>
         )}
         {(folder || inPlaylistView) && <button data-testid="media-up" className="btn btn-sm btn-outline-secondary" onClick={goUp} style={{ marginLeft: 8 }}><i className="bi bi-arrow-90deg-up" /> Up</button>}
+        <span data-testid="media-sort-bar" title="Sort (same as list header)" style={{ display: "inline-flex", alignItems: "center", gap: 2, marginLeft: "auto", border: "1px solid var(--border)", borderRadius: 8, padding: 2, background: "var(--surface-2)" }}>
+          {sortBarBtn("name", "Name", "media-sortbar-name")}
+          {sortBarBtn("size", "Size", "media-sortbar-size")}
+          {sortBarBtn("time", "Time", "media-sortbar-time")}
+        </span>
       </div>
       </div>
 

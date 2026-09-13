@@ -65,6 +65,27 @@ export default function App() {
   }, [auth.protected, auth.authed]);
 
   useEffect(() => {
+    if (!auth.protected || !auth.authed) return;
+    const down = new Set();
+    const isEsc = (e) => e.code === "Escape" || e.key === "Escape";
+    const isTilde = (e) => e.code === "Backquote" || e.key === "~" || e.key === "`";
+    const onKeyDown = (e) => {
+      if (isEsc(e)) down.add("Escape");
+      if (isTilde(e)) down.add("Backquote");
+      if (down.has("Escape") && down.has("Backquote")) { e.preventDefault(); down.clear(); doLogout(); }
+    };
+    const onKeyUp = (e) => {
+      if (isEsc(e)) down.delete("Escape");
+      if (isTilde(e)) down.delete("Backquote");
+    };
+    const onBlur = () => down.clear();
+    document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
+    return () => { document.removeEventListener("keydown", onKeyDown); document.removeEventListener("keyup", onKeyUp); window.removeEventListener("blur", onBlur); };
+  }, [auth.protected, auth.authed]);
+
+  useEffect(() => {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(`${proto}//${location.host}/ws`);
     ws.onmessage = (e) => {
