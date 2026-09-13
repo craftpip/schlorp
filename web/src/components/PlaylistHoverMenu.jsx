@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { usePlaylists } from "../store/PlaylistsContext.jsx";
 
-export default function PlaylistHoverMenu({ mediaKey, placement = "right", onCreated }) {
+export default function PlaylistHoverMenu({ mediaKey, placement = "right", onCreated, showIndex = false }) {
   const { playlists, createPlaylist, toggleItem } = usePlaylists();
   const [draft, setDraft] = useState("");
   const [creating, setCreating] = useState(false);
@@ -64,8 +64,9 @@ export default function PlaylistHoverMenu({ mediaKey, placement = "right", onCre
         {playlists.length === 0 ? (
           <div style={{ padding: "10px 8px", color: "var(--muted)", fontSize: 12, textAlign: "center" }}>No playlists yet — create one below.</div>
         ) : (
-          playlists.map((pl) => {
+          playlists.map((pl, idx) => {
             const member = isMember(pl);
+            const num = showIndex && idx < 9 ? idx + 1 : null;
             return (
               <button
                 key={pl.id}
@@ -87,7 +88,12 @@ export default function PlaylistHoverMenu({ mediaKey, placement = "right", onCre
                   width: "100%",
                 }}
               >
-                <i className={`bi ${member ? "bi-check-circle-fill" : "bi-circle"}`} style={{ color: member ? "#6366f1" : "var(--muted)", fontSize: 12, flex: "0 0 auto" }} />
+                {num != null ? (
+                  <span style={{ fontFamily: "var(--mono)", fontSize: 10, fontWeight: 700, color: "var(--muted)", border: "1px solid var(--border)", borderRadius: 4, padding: "0 4px", flex: "0 0 auto", lineHeight: 1.5 }}>{num}</span>
+                ) : (
+                  <i className={`bi ${member ? "bi-check-circle-fill" : "bi-circle"}`} style={{ color: member ? "#6366f1" : "var(--muted)", fontSize: 12, flex: "0 0 auto" }} />
+                )}
+                {num != null && <i className={`bi ${member ? "bi-check-circle-fill" : "bi-circle"}`} style={{ color: member ? "#6366f1" : "var(--muted)", fontSize: 12, flex: "0 0 auto" }} />}
                 <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: member ? 600 : 500, fontSize: 12 }} title={pl.name}>
                   {pl.name}
                 </span>

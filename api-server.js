@@ -899,9 +899,21 @@ app.get("/api/playlists/:id", async (req, res) => {
       if (!stat || !stat.isFile()) { enriched.push({ key: it.key, addedAt: it.addedAt, missing: true }); continue; }
       const ft = fileEntryTimes(stat);
       const name = it.key.split("/").pop() || it.key;
-      const posterKey = it.key.replace(/\.[^.]+$/, "");
-      // thumb lookup not needed here; client can use /api/media or /api/mediathumb on demand
-      enriched.push({ key: it.key, name, dir: false, size: stat.size, mtime: ft.mtime, created: ft.created, addedAt: it.addedAt, missing: false });
+      // Poster sibling lookup (same convention as listMediaDir `thumb`):
+      // `<stem>-poster.jpg` next to the video, key-relative for /media/ URLs.
+      let thumb = null;
+      const ext = String(name.split(".").pop() || "").toLowerCase();
+      if (["mp4", "m4v", "mov", "mkv", "webm", "avi", "mpg", "mpeg", "3gp", "flv", "ts", "m3u8"].includes(ext)) {
+        const stem = name.replace(/\.[^.]+$/, "");
+        const dirPrefix = it.key.includes("/") ? it.key.slice(0, it.key.lastIndexOf("/")) : "";
+        for (const pext of ["jpg", "jpeg", "png", "webp", "avif", "gif"]) {
+          const candKey = (dirPrefix ? `${dirPrefix}/` : "") + `${stem}-poster.${pext}`;
+          const candPath = path.join(mediaDir, ...candKey.split("/").filter(Boolean));
+          const cstat = await fs.stat(candPath).catch(() => null);
+          if (cstat && cstat.isFile()) { thumb = candKey; break; }
+        }
+      }
+      enriched.push({ key: it.key, name, dir: false, size: stat.size, mtime: ft.mtime, created: ft.created, addedAt: it.addedAt, missing: false, thumb });
     }
     return res.json({ ok: true, playlist: { id: pl.id, name: pl.name, createdAt: pl.createdAt, updatedAt: pl.updatedAt, items: enriched } });
   } catch (e) { return res.status(500).json({ ok: false, error: e.message }); }

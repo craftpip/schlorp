@@ -155,7 +155,7 @@ export default function Media() {
     catch { return false; }
   };
   // Playlists (015)
-  const { playlists, createPlaylist, renamePlaylist, deletePlaylist, removeItem: removePlaylistItem, refresh: refreshPlaylists } = usePlaylists();
+  const { playlists, createPlaylist, renamePlaylist, deletePlaylist, removeItem: removePlaylistItem, refresh: refreshPlaylists, toggleItem: togglePlaylistItem } = usePlaylists();
   const activePlId = searchParams.get("pl") || searchParams.get("p") || "";
   const activePlaylist = activePlId ? playlists.find((p) => p.id === activePlId) : null;
   const [playlistDetail, setPlaylistDetail] = useState(null);
@@ -166,6 +166,8 @@ export default function Media() {
   const [editingPlId, setEditingPlId] = useState(null);
   const [editingPlName, setEditingPlName] = useState("");
   const [openMenuKey, setOpenMenuKey] = useState(null);
+  const [fMenuKey, setFMenuKey] = useState(null);
+  const fHeldRef = useRef(false);
   const [hoveredPlId, setHoveredPlId] = useState(null);
   const [promptState, setPromptState] = useState({ open: false, id: null, value: "" });
   const [confirmState, setConfirmState] = useState({ open: false, id: null, name: "" });
@@ -194,7 +196,7 @@ export default function Media() {
         size: it.size || 0,
         mtime: it.mtime || it.addedAt,
         created: it.created || it.mtime || it.addedAt,
-        thumb: null,
+        thumb: it.thumb || null,
         playlistKey: key,
         _isPlaylistItem: true,
       };
@@ -432,6 +434,89 @@ export default function Media() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewerOpen, allSelectable, selectedIdx, searchParams, showHelp, confirmState.open, promptState.open, alertState.open, deleteTarget]);
 
+  // Hold-F: while F is held, keep the save popup open for the selected file;
+  // 1-9 toggles playlists 1-9. Release F closes. Grid + list, viewer closed.
+  useEffect(() => {
+    const isEditable = (t) => t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
+    const selectedFile = () => {
+      if (selectedIdx == null || selectedIdx < 0 || selectedIdx >= allSelectable.length) return null;
+      const it = allSelectable[selectedIdx];
+      if (!it || it._isPlaylist || it.dir) return null;
+      return it;
+    };
+    const onKeyDown = (e) => {
+      if (viewerOpen || confirmState.open || promptState.open || alertState.open || !!deleteTarget) return;
+      if (isEditable(e.target)) return;
+      if (e.ctrlKey || e.altKey || e.metaKey) return;
+      const k = e.key;
+      if (k === "f" || k === "F") {
+        if (e.repeat) { e.preventDefault(); return; }
+        const it = selectedFile();
+        if (!it) return;
+        e.preventDefault();
+        fHeldRef.current = true;
+        setFMenuKey(selectableKey(it));
+        return;
+      }
+      if (fHeldRef.current && /^[1-9]$/.test(k)) {
+        const idx = parseInt(k, 10) - 1;
+        if (idx < playlists.length) {
+          const it = selectedFile();
+          if (!it) return;
+          e.preventDefault();
+          e.stopPropagation();
+          const mediaKey = playlistKey(it);
+          togglePlaylistItem(playlists[idx].id, mediaKey).catch(() => {});
+        }
+      }
+    };
+    const onKeyUp = (e) => {
+      const k = e.key;
+      if (k === "f" || k === "F") {
+        if (fHeldRef.current) {
+          fHeldRef.current = false;
+          setFMenuKey(null);
+        }
+      }
+    };
+    const onBlur = () => {
+      if (fHeldRef.current) {
+        fHeldRef.current = false;
+        setFMenuKey(null);
+      }
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    document.addEventListener("keyup", onKeyUp, true);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown, true);
+      document.removeEventListener("keyup", onKeyUp, true);
+      window.removeEventListener("blur", onBlur);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewerOpen, allSelectable, selectedIdx, playlists, confirmState.open, promptState.open, alertState.open, deleteTarget]);
+
+  // Follow selection while F is held (arrow keys move the popup with it).
+  useEffect(() => {
+    if (!fHeldRef.current) return;
+    if (viewerOpen || confirmState.open || promptState.open || alertState.open || !!deleteTarget) {
+      fHeldRef.current = false;
+      setFMenuKey(null);
+      return;
+    }
+    if (selectedIdx == null || selectedIdx < 0 || selectedIdx >= allSelectable.length) {
+      setFMenuKey(null);
+      return;
+    }
+    const it = allSelectable[selectedIdx];
+    if (!it || it._isPlaylist || it.dir) {
+      setFMenuKey(null);
+      return;
+    }
+    setFMenuKey(selectableKey(it));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedIdx, selKey]);
+
   const goFolder = (name) => {
     const ns = new URLSearchParams(searchParams);
     ns.set("f", encB64(folder ? `${folder}/${name}` : name));
@@ -638,7 +723,8 @@ export default function Media() {
       setImgErr((prev) => (prev[k] ? prev : { ...prev, [k]: 1 }));
     };
     const pk = !isDir ? playlistKey(it) : null;
-    const menuOpen = openMenuKey === rk;
+    const menuOpen = openMenuKey === rk || fMenuKey === rk;
+    const viaF = fMenuKey === rk;
     const isBookmarked = pk ? bookmarkedKeys.has(pk) : false;
     const handleMenuEnter = () => { if (playlistMenuCloseTimer.current) { clearTimeout(playlistMenuCloseTimer.current); playlistMenuCloseTimer.current = null; } setOpenMenuKey(rk); };
     const handleMenuLeave = () => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); playlistMenuCloseTimer.current = setTimeout(() => setOpenMenuKey((cur) => (cur === rk ? null : cur)), 120); };
@@ -697,30 +783,10 @@ export default function Media() {
             </button>
             {menuOpen && pk && (
               <div style={{ position: "absolute", top: 34, left: 0, zIndex: 90 }} onClick={(e) => e.stopPropagation()}>
-                <PlaylistHoverMenu mediaKey={pk} placement="left" />
+                <PlaylistHoverMenu mediaKey={pk} placement="left" showIndex={viaF} />
               </div>
             )}
           </div>
-        )}
-        {inPlaylistView && !isDir && (
-          <button
-            data-testid="media-tile-playlist-remove"
-            type="button"
-            onClick={async (e) => {
-              e.stopPropagation();
-              if (!activePlId || !pk) return;
-              try {
-                await removePlaylistItem(activePlId, pk);
-                const r = await fetch(`/api/playlists/${encodeURIComponent(activePlId)}`);
-                const j = await r.json();
-                if (j.ok) setPlaylistDetail(j.playlist);
-              } catch {}
-            }}
-            title="Remove from playlist"
-            style={{ position: "absolute", top: 6, left: 6, zIndex: 4, width: 22, height: 22, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.2)", background: "rgba(239,68,68,.85)", color: "#fff", display: "grid", placeItems: "center", cursor: "pointer" }}
-          >
-            <i className="bi bi-x-lg" style={{ fontSize: 10 }} />
-          </button>
         )}
       </div>
     );
@@ -895,14 +961,15 @@ export default function Media() {
                     {filtered.map((it) => {
                       const ky = rowKey(it);
                       const pk = playlistKey(it);
-                      const menuOpen = openMenuKey === ky;
+                      const menuOpen = openMenuKey === ky || fMenuKey === ky;
+                      const viaF = fMenuKey === ky;
                       const isSel = selKey === ky;
                       const isBookmarked = bookmarkedKeys.has(pk);
                       return (
                         <div key={ky} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={isSel} className="mrow" style={{ display: "grid", gridTemplateColumns: "subgrid", gridColumn: "1 / -1", gap: "0 10px", alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: isSel ? "rgba(99,102,241,0.14)" : "var(--surface)", cursor: "pointer", userSelect: "none" }} onClick={() => tapItem(it)} onDoubleClick={() => openItem(it)} title={displayName(it)}>
                           <div style={{ position: "relative", display: "grid", placeItems: "center" }} onMouseEnter={() => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); setOpenMenuKey(ky); }} onMouseLeave={() => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); playlistMenuCloseTimer.current = setTimeout(() => setOpenMenuKey((cur) => cur === ky ? null : cur), 120); }}>
                             <button data-testid="media-row-playlist-btn" className="media-row-playlist-btn" type="button" onClick={(e) => { e.stopPropagation(); const coarse = isCoarsePointer(); if (coarse) setOpenMenuKey((cur) => cur === ky ? null : ky); else setOpenMenuKey(ky); }} style={{ width: 28, height: 28, padding: 0, borderRadius: 999, border: isBookmarked ? "1px solid rgba(99,102,241,.35)" : "1px solid var(--border)", background: menuOpen ? "rgba(99,102,241,.15)" : isBookmarked ? "rgba(99,102,241,.12)" : "var(--surface-2)", color: isBookmarked ? "#6366f1" : "var(--muted)", display: "grid", placeItems: "center", cursor: "pointer", opacity: 1 }}><i className={`bi ${isBookmarked ? "bi-bookmark-fill" : "bi-bookmark"}`} /></button>
-                            {menuOpen && <div style={{ position: "absolute", top: 34, left: 0, zIndex: 90 }}><PlaylistHoverMenu mediaKey={pk} /></div>}
+                            {menuOpen && <div style={{ position: "absolute", top: 34, left: 0, zIndex: 90 }}><PlaylistHoverMenu mediaKey={pk} showIndex={viaF} /></div>}
                           </div>
                           <div data-testid="media-row-name" style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0, marginLeft: "5px" }}>
                             <i className={`bi ${catIcon[fileCategory(it.name)]}`} style={{ color: "var(--accent)", display: "grid", placeItems: "center", width: 18, height: 18, fontSize: 14, lineHeight: 1, flex: "0 0 auto", transform: "translateY(1px)" }} />
@@ -949,7 +1016,8 @@ export default function Media() {
                   {filtered.map((it) => {
                     const ky = rowKey(it);
                     const pk = !it.dir ? playlistKey(it) : null;
-                    const menuOpen = openMenuKey === ky;
+                    const menuOpen = openMenuKey === ky || fMenuKey === ky;
+                    const viaF = fMenuKey === ky;
                     const isSel = selKey === ky;
                     const isBookmarked = pk ? bookmarkedKeys.has(pk) : false;
                     return (
@@ -957,7 +1025,7 @@ export default function Media() {
                         {!it.dir && (
                           <div style={{ position: "relative", display: "grid", placeItems: "center" }} onMouseEnter={() => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); setOpenMenuKey(ky); }} onMouseLeave={() => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); playlistMenuCloseTimer.current = setTimeout(() => setOpenMenuKey((cur) => cur === ky ? null : cur), 120); }}>
                             <button data-testid="media-row-playlist-btn" className="media-row-playlist-btn" type="button" onClick={(e) => { e.stopPropagation(); const coarse = isCoarsePointer(); if (coarse) setOpenMenuKey((cur) => cur === ky ? null : ky); else setOpenMenuKey(ky); }} style={{ width: 28, height: 28, padding: 0, borderRadius: 999, border: isBookmarked ? "1px solid rgba(99,102,241,.35)" : "1px solid var(--border)", background: menuOpen ? "rgba(99,102,241,.15)" : isBookmarked ? "rgba(99,102,241,.12)" : "var(--surface-2)", color: isBookmarked ? "#6366f1" : "var(--muted)", display: "grid", placeItems: "center", cursor: "pointer", opacity: 1 }}><i className={`bi ${isBookmarked ? "bi-bookmark-fill" : "bi-bookmark"}`} /></button>
-                            {menuOpen && pk && <div style={{ position: "absolute", top: 34, left: 0, zIndex: 90 }}><PlaylistHoverMenu mediaKey={pk} /></div>}
+                            {menuOpen && pk && <div style={{ position: "absolute", top: 34, left: 0, zIndex: 90 }}><PlaylistHoverMenu mediaKey={pk} showIndex={viaF} /></div>}
                           </div>
                         )}
                         <div data-testid="media-row-name" style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0, marginLeft: "5px", ...(it.dir ? { gridColumn: "1 / span 2" } : {}) }}>

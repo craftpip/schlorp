@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import ShortcutsHelp from "./ShortcutsHelp";
 import PlaylistHoverMenu from "./PlaylistHoverMenu.jsx";
+import { usePlaylists } from "../store/PlaylistsContext.jsx";
 import ConfirmModal from "./ConfirmModal.jsx";
 import AlertModal from "./AlertModal.jsx";
 
@@ -67,6 +68,9 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const [yConfirm, setYConfirm] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [showPlaylist, setShowPlaylist] = useState(false);
+  const [fHeld, setFHeld] = useState(false);
+  const fHeldRef = useRef(false);
+  const { playlists: fvPlaylists, toggleItem: fvToggleItem } = usePlaylists();
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [alertState, setAlertState] = useState({ open: false, title: "", message: "" });
   const playlistHoverRef = useRef(null);
@@ -397,8 +401,6 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
         if (showHelp) { e.preventDefault(); setShowHelp(false); return; }
         if (document.fullscreenElement) { document.exitFullscreen().catch(() => {}); e.preventDefault(); return; }
         e.preventDefault(); onClose();
-      } else if (e.key.toLowerCase() === "f" && !e.ctrlKey && !e.altKey && !e.metaKey) {
-        e.preventDefault(); toggleFullscreen();
       } else if (e.key.toLowerCase() === "q" && !e.ctrlKey && !e.altKey && !e.metaKey) {
         e.preventDefault(); onClose();
       } else if (e.key.toLowerCase() === "e" && !e.ctrlKey && !e.altKey && !e.metaKey) {
@@ -481,6 +483,56 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     document.body.style.overflow = "hidden";
     return () => { document.removeEventListener("keydown", onKey); document.body.style.overflow = prev; };
   }, [onClose, hasPrev, hasNext, onPrev, onNext, showImage, duration, seekFrames, rate, showHelp]);
+  // Hold-F: keep the save popup open while F is held; 1-9 toggles lists.
+  // The F fullscreen keybind is disabled (button still available).
+  useEffect(() => {
+    const isEditable = (t) => t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
+    const onKeyDown = (e) => {
+      if (isEditable(e.target)) return;
+      if (e.ctrlKey || e.altKey || e.metaKey) return;
+      const k = e.key;
+      if (k === "f" || k === "F") {
+        if (e.repeat) { e.preventDefault(); return; }
+        e.preventDefault();
+        e.stopPropagation();
+        fHeldRef.current = true;
+        setFHeld(true);
+        return;
+      }
+      if (fHeldRef.current && /^[1-9]$/.test(k)) {
+        const idx = parseInt(k, 10) - 1;
+        if (idx < fvPlaylists.length && filePathEff) {
+          e.preventDefault();
+          e.stopPropagation();
+          fvToggleItem(fvPlaylists[idx].id, filePathEff).catch(() => {});
+        }
+      }
+    };
+    const onKeyUp = (e) => {
+      const k = e.key;
+      if (k === "f" || k === "F") {
+        if (fHeldRef.current) {
+          fHeldRef.current = false;
+          setFHeld(false);
+        }
+      }
+    };
+    const onBlur = () => {
+      if (fHeldRef.current) {
+        fHeldRef.current = false;
+        setFHeld(false);
+      }
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    document.addEventListener("keyup", onKeyUp, true);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown, true);
+      document.removeEventListener("keyup", onKeyUp, true);
+      window.removeEventListener("blur", onBlur);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fvPlaylists, filePathEff]);
   const onCloseRef = useRef(onClose);
   useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
   useEffect(() => {
@@ -583,26 +635,34 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
                 onMouseLeave={() => { if (playlistCloseTimer.current) clearTimeout(playlistCloseTimer.current); playlistCloseTimer.current = setTimeout(() => setShowPlaylist(false), 120); }}
                 style={{ position: "relative" }}
               >
-                <button
-                  type="button"
-                  tabIndex={-1}
-                  data-testid="viewer-playlist-btn"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    // coarse pointer (mobile) fallback to tap toggle
-                    try { if (window.matchMedia && window.matchMedia("(pointer: coarse)").matches) setShowPlaylist((v) => !v); } catch { setShowPlaylist((v) => !v); }
-                  }}
-                  aria-label="Add to playlist"
-                  title="Add to playlist"
-                  style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: showPlaylist ? "rgba(99,102,241,.85)" : "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}
-                >
-                  <i className="bi bi-collection-play" />
-                </button>
-                {showPlaylist && (
-                  <div style={{ position: "absolute", top: 44, right: 0, zIndex: 95 }} onClick={(e) => e.stopPropagation()}>
-                    <PlaylistHoverMenu mediaKey={filePathEff} />
-                  </div>
-                )}
+                {(() => {
+                  const vBookmarked = !!filePathEff && fvPlaylists.some((pl) => (pl.items || []).includes(filePathEff));
+                  const vOpen = showPlaylist || fHeld;
+                  return (
+                    <>
+                      <button
+                        type="button"
+                        tabIndex={-1}
+                        data-testid="viewer-playlist-btn"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          // coarse pointer (mobile) fallback to tap toggle
+                          try { if (window.matchMedia && window.matchMedia("(pointer: coarse)").matches) setShowPlaylist((v) => !v); } catch { setShowPlaylist((v) => !v); }
+                        }}
+                        aria-label="Add to playlist"
+                        title="Add to playlist"
+                        style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: vOpen ? "rgba(99,102,241,.9)" : vBookmarked ? "rgba(99,102,241,.85)" : "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}
+                      >
+                        <i className={`bi ${vBookmarked ? "bi-bookmark-fill" : "bi-bookmark"}`} />
+                      </button>
+                      {vOpen && (
+                        <div style={{ position: "absolute", top: 44, right: 0, zIndex: 95 }} onClick={(e) => e.stopPropagation()}>
+                          <PlaylistHoverMenu mediaKey={filePathEff} showIndex={fHeld} />
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
               </div>
             </div>
           </div>
@@ -690,7 +750,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
               <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--muted)", minWidth: 32 }}>{fmtTime(current)}</span>
               <input type="range" tabIndex={-1} min={0} max={duration || 0} step={0.1} value={current} onChange={(e)=> { const v=parseFloat(e.target.value); if(videoRef.current){ videoRef.current.currentTime=v; setCurrent(v);} }} onMouseUp={(e)=>e.target.blur()} onTouchEnd={(e)=>e.target.blur()} style={{ flex: 1, accentColor: "#6366f1", height: 4 }} />
               <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--muted)", minWidth: 32 }}>{fmtTime(duration)}</span>
-              <button type="button" tabIndex={-1} className="btn btn-sm btn-outline-secondary" onClick={toggleFullscreen} title="Fullscreen (f)" style={{ padding: "4px 8px", fontSize: 11 }}><i className="bi bi-arrows-fullscreen" /></button>
+              <button type="button" tabIndex={-1} className="btn btn-sm btn-outline-secondary" onClick={toggleFullscreen} title="Fullscreen" style={{ padding: "4px 8px", fontSize: 11 }}><i className="bi bi-arrows-fullscreen" /></button>
             </div>
           )}
           <div className="fv-speed" style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>

@@ -6,6 +6,8 @@ const LIBRARY_SHORTCUTS = [
   { keys: ["↓", "s"], desc: "Move selection down" },
   { keys: ["←", "a"], desc: "Go up one folder" },
   { keys: ["→", "d", "Enter", "Space"], desc: "Open selected folder / file" },
+  { keys: ["hold F"], desc: "Keep save popup open for selected file" },
+  { keys: ["1–9"], desc: "While holding F: add / remove selected file in saved list 1–9" },
   { keys: ["/"], desc: "Show this shortcut guide" },
   { keys: ["Esc"], desc: "Close this guide" },
 ];
@@ -16,7 +18,8 @@ const VIEWER_SHORTCUTS = [
   { keys: ["↑", "w"], desc: "Previous file" },
   { keys: ["↓", "s"], desc: "Next file" },
   { keys: ["Space"], desc: "Play / pause" },
-  { keys: ["f"], desc: "Fullscreen" },
+  { keys: ["hold F"], desc: "Keep save popup open for this file" },
+  { keys: ["1–9"], desc: "While holding F: add / remove file in saved list 1–9" },
   { keys: ["m"], desc: "Mute / unmute" },
   { keys: ["e"], desc: "Toggle frame-seek mode (1s ↔ 1 frame)" },
   { keys: ["r"], desc: "Cycle end mode (End → Next → Loop → Shuffle)" },
