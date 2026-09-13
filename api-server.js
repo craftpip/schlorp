@@ -3099,7 +3099,9 @@ async function crawlCollectAndQueue(targetUrl, folder, scannedUrls, foundCount, 
     let added = 0;
     let skippedPending = 0;
     const acct = normalizeAccountName(account || "default");
-    for (const url of newUrls) {
+    // Scanned lists come back newest-first; queue oldest-first so downloads
+    // follow the collection's sequence.
+    for (const url of [...newUrls].reverse()) {
       const norm = normalizeSyncUrl(url);
       if (!norm) continue;
       if (pendingSet.has(norm)) { skippedPending += 1; continue; }

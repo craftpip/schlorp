@@ -62,7 +62,10 @@ async function saveQueue(queue) {
 function enqueueUrls(queue, urls, folder, existingSeenUrls) {
   const seenSet = new Set(existingSeenUrls.map((u) => normalizeUrl(u)));
   let added = 0;
-  for (const url of urls) {
+  // Scanned lists come back newest-first; queue oldest-first so downloads
+  // follow the collection's sequence.
+  const ordered = [...urls].reverse();
+  for (const url of ordered) {
     const normalized = normalizeUrl(url);
     if (!normalized || seenSet.has(normalized)) continue;
     const alreadyPending = queue.pending.some((item) => normalizeUrl(item.url) === normalized);
