@@ -920,17 +920,17 @@ export default function Media() {
                     const sel = selKey === plKey;
                     return (
                       <div key={pl.id} id={`media-playlist-row-${pl.id}`} data-testid="media-row-playlist" data-filename={plKey} data-selected={sel} className="mrow media-row-playlist" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto auto auto", gap: 10, alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: sel ? "rgba(99,102,241,0.14)" : "var(--surface)", cursor: "pointer", userSelect: "none" }} onClick={() => setSelectedKey(plKey)} onDoubleClick={() => openPlaylist(pl.id)} title={`${pl.name} — click to select, double-click to open`}>
-                        <div style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0 }}>
-                          <i className="bi bi-collection-play-fill" style={{ color: "#6366f1" }} />
-                          <span style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{pl.name}</span>
-                        </div>
-                        <span className="small mcol-size" style={{ color: "var(--muted)" }}>{pl.count ?? (pl.items ? pl.items.length : 0)} items</span>
-                        <span className="small mcol-time" style={{ color: "var(--muted)" }}>{timeAgo(pl.updatedAt || pl.createdAt)}</span>
-                        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                          <span className="playlist-row-actions" style={{ display: "flex", gap: 4, opacity: 0, transition: "opacity .12s" }}>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center", minWidth: 0 }}>
+                          <i className="bi bi-collection-play-fill" style={{ color: "#6366f1", flex: "0 0 auto" }} />
+                          <span style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>{pl.name}</span>
+                          <span className="playlist-row-actions" style={{ display: "inline-flex", gap: 4, opacity: 0, transition: "opacity .12s", marginLeft: 6, flex: "0 0 auto" }}>
                             <button data-testid={`playlist-row-edit-${pl.id}`} title="Rename" onClick={(e) => { e.stopPropagation(); setPromptState({ open: true, id: pl.id, value: pl.name }); }} className="btn btn-sm btn-outline-secondary" style={{ padding: "2px 6px" }}><i className="bi bi-pencil" /></button>
                             <button data-testid={`playlist-row-delete-${pl.id}`} title="Delete" onClick={(e) => { e.stopPropagation(); setConfirmState({ open: true, id: pl.id, name: pl.name }); }} className="btn btn-sm btn-outline-secondary" style={{ padding: "2px 6px", color: "#f87171" }}><i className="bi bi-trash" /></button>
                           </span>
+                        </div>
+                        <span className="small mcol-size" style={{ color: "var(--muted)" }}>{pl.count ?? (pl.items ? pl.items.length : 0)} items</span>
+                        <span className="small mcol-time" style={{ color: "var(--muted)" }}>{timeAgo(pl.updatedAt || pl.createdAt)}</span>
+                        <div style={{ display: "flex", gap: 6, alignItems: "center", justifyContent: "flex-end" }}>
                           <button data-testid={`playlist-row-open-${pl.id}`} className="btn btn-sm btn-outline-secondary" onClick={(e) => { e.stopPropagation(); openPlaylist(pl.id); }}><i className="bi bi-folder2-open" /> Open</button>
                         </div>
                       </div>
