@@ -26,6 +26,7 @@ const {
 } = require("./media-utils");
 const {
   extractInstagramShortcode,
+  isInstagramReelTargetUrl,
   extractInstagramUsernameFromJsonText,
   extractInstagramMediaHintsFromJsonText,
   extractInstagramImageHintsFromJsonText,
@@ -971,6 +972,13 @@ async function run(options = {}) {
             );
           }
           log(`Instagram hints: ${instagramTargetHintUrls.size} video URL(s), ${instagramOrderedImages.length} photo(s)`);
+          if (instagramOrderedImages.length && isInstagramReelTargetUrl(targetUrl)) {
+            // Reels are video-only: any "photo" is the video cover thumbnail
+            // or page chrome (avatars), never the post itself. Fail instead
+            // of saving cover JPEGs as if they were the download.
+            log("Instagram reel — skipping photo fallback (video-only).");
+            instagramOrderedImages = [];
+          }
         }
 
         const allVideos = Array.from(

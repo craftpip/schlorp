@@ -3,7 +3,7 @@ const {
   metadataQualityScore,
   sanitizeFileToken,
 } = require("./media-utils");
-const { isReservedInstagramName } = require("./instagram-utils");
+const { isReservedInstagramName, isInstagramAvatarUrl } = require("./instagram-utils");
 
 async function extractXhamsterMediaData(page) {
   const entries = await page.evaluate(() => {
@@ -738,6 +738,7 @@ async function extractInstagramPhotoData(page) {
       const cleaned = stripByteRangeParams(String(raw || "").trim());
       if (!cleaned) continue;
       if (!/\.(jpe?g|png|webp|avif|bmp)(\?|$)/i.test(cleaned)) continue;
+      if (isInstagramAvatarUrl(cleaned)) continue;
       if (seen.has(cleaned)) continue;
       seen.add(cleaned);
       out.push(cleaned);

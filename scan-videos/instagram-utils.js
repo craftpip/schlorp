@@ -272,8 +272,49 @@ function pickLargestDisplayResource(resources) {
 function isInstagramVideoNode(node) {
   if (!node || typeof node !== "object") return false;
   if (node.is_video === true) return true;
+  if (Number(node.media_type) === 2) return true;
   const typename = String(node.__typename || "").toLowerCase();
-  if (typename === "graphvideo") return true;
+  if (typename.includes("video")) return true;
+  const productType = String(node.product_type || "").toLowerCase();
+  if (productType === "clips" || productType === "igtv") return true;
+  return false;
+}
+
+function isInstagramReelTargetUrl(url) {
+  try {
+    return /\/(reel|tv)\//i.test(new URL(String(url || "")).pathname);
+  } catch {
+    return false;
+  }
+}
+
+function instagramEfgTag(value) {
+  try {
+    const u = new URL(String(value || "").trim());
+    const raw = u.searchParams.get("efg");
+    if (!raw) return "";
+    const normalized = raw.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+    const parsed = JSON.parse(Buffer.from(padded, "base64").toString("utf8"));
+    return String((parsed && (parsed.vencode_tag || parsed.efg_tag)) || "");
+  } catch {
+    return "";
+  }
+}
+
+// Profile avatars (header chrome) ship as cdninstagram jpegs too — they must
+// never be treated as post photos. efg vencode_tag "profile_pic_*" is the
+// primary signal; tiny s100/s150 crops are the secondary one.
+function isInstagramAvatarUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return false;
+  if (instagramEfgTag(raw).toLowerCase().includes("profil")) return true;
+  try {
+    const stp = new URL(raw).searchParams.get("stp") || "";
+    if (/s(100|150)x\1/i.test(stp)) return true;
+  } catch {
+    // ignore URL parse errors
+  }
   return false;
 }
 
@@ -371,9 +412,11 @@ function extractInstagramImageHintsFromJsonText(rawText, shortcode) {
 }
 
 function instagramPhotoIdentity(value) {
+  // Same photo is served from multiple CDN origins (scontent vs fbcdn) with
+  // identical pathnames — identity on pathname merges those duplicates.
   try {
     const u = new URL(String(value || "").trim());
-    return `${u.origin}${u.pathname}`.toLowerCase();
+    return u.pathname.toLowerCase();
   } catch {
     return String(value || "").toLowerCase().split("?")[0];
   }
@@ -396,6 +439,7 @@ function dedupeInstagramPhotos(urls) {
   for (const raw of Array.isArray(urls) ? urls : []) {
     const url = String(raw || "").trim();
     if (!url) continue;
+    if (isInstagramAvatarUrl(url)) continue;
     const key = instagramPhotoIdentity(url);
     if (!key) continue;
     if (!groups.has(key)) groups.set(key, []);
@@ -435,6 +479,8 @@ function filterInstagramCandidatesForTarget(
 module.exports = {
   isReservedInstagramName,
   extractInstagramShortcode,
+  isInstagramReelTargetUrl,
+  isInstagramAvatarUrl,
   extractInstagramUsernameFromJsonText,
   extractInstagramMediaHintsFromJsonText,
   extractInstagramImageHintsFromJsonText,
