@@ -416,14 +416,20 @@ export default function Media() {
   // Sticky-aware scroll: native scrollIntoView({block:"nearest"}) ignores the
   // sticky toolbar, leaving the row hidden under it or bottom-flush. Scroll
   // manually only when the selected row is actually out of view.
+  // Directional minimal scroll: rows leaving through the top pin just below
+  // the sticky toolbar; rows leaving through the bottom only just come into
+  // view at the bottom edge (never yanked up to the top).
   const scrollSelectionIntoView = (smooth = false) => {
     const el = document.querySelector(`[data-selected="true"]`);
     if (!el) return;
     const sticky = document.querySelector(`[data-testid="media-sticky"]`);
     const offset = (sticky ? sticky.offsetHeight : 0) + 12;
     const rect = el.getBoundingClientRect();
-    if (rect.top < offset || rect.bottom > window.innerHeight) {
-      window.scrollTo({ top: Math.max(0, window.scrollY + rect.top - offset), behavior: smooth ? "smooth" : "auto" });
+    const behavior = smooth ? "smooth" : "auto";
+    if (rect.top < offset) {
+      window.scrollTo({ top: Math.max(0, window.scrollY + rect.top - offset), behavior });
+    } else if (rect.bottom > window.innerHeight) {
+      window.scrollTo({ top: window.scrollY + (rect.bottom - window.innerHeight) + 12, behavior });
     }
   };
 
@@ -435,25 +441,28 @@ export default function Media() {
     scrollSelectionIntoView();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, loading]);
-  // Keyboard navigation arms a one-shot smooth scroll so the highlight stays visible.
+  // Keyboard navigation arms a one-shot scroll so the highlight stays visible.
+  // Single presses glide (smooth); held-key repeats snap (instant) so the
+  // view advances one row at a time instead of chasing a smooth animation.
   useEffect(() => {
     if (!keyboardScrollRef.current || viewerOpen) { keyboardScrollRef.current = false; return; }
+    const smooth = keyboardScrollRef.current === "smooth";
     keyboardScrollRef.current = false;
-    scrollSelectionIntoView(true);
+    scrollSelectionIntoView(smooth);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedIdx]);
 
   useEffect(() => {
     if (viewerOpen || confirmState.open || promptState.open || alertState.open || !!deleteTarget) return;
-    const moveSelection = (delta) => {
+    const moveSelection = (delta, smooth = true) => {
       if (!allSelectable.length) return;
       const base = selectedIdx !== -1 ? selectedIdx : (delta > 0 ? -1 : 0);
       const next = Math.min(allSelectable.length - 1, Math.max(0, base + delta));
-      keyboardScrollRef.current = true;
+      keyboardScrollRef.current = smooth ? "smooth" : "instant";
       setSelectedKey(selectableKey(allSelectable[next]));
     };
     // Grid view: move to the nearest tile/chip in a direction (WASD).
-    const moveSelectionSpatial = (dir) => {
+    const moveSelectionSpatial = (dir, smooth = true) => {
       const nodes = [...document.querySelectorAll('[data-testid="media-tile-file"], [data-testid="media-tile-folder"], [data-testid="media-tile-playlist"]')];
       if (!nodes.length) return;
       const keyOf = (el) => el.getAttribute("data-filename");
@@ -480,7 +489,7 @@ export default function Media() {
         if (score < bestScore) { bestScore = score; best = el; }
       }
       if (best) {
-        keyboardScrollRef.current = true;
+        keyboardScrollRef.current = smooth ? "smooth" : "instant";
         setSelectedKey(keyOf(best));
       }
     };
@@ -538,15 +547,16 @@ export default function Media() {
       }
       else if (isGrid && !e.ctrlKey && !e.altKey && !e.metaKey && (lowK === "w" || lowK === "a" || lowK === "s" || lowK === "d" || lowK === "q")) {
         e.preventDefault();
-        if (lowK === "w") moveSelectionSpatial("up");
-        else if (lowK === "a") moveSelectionSpatial("left");
-        else if (lowK === "s") moveSelectionSpatial("down");
-        else if (lowK === "d") moveSelectionSpatial("right");
+        const glide = !e.repeat;
+        if (lowK === "w") moveSelectionSpatial("up", glide);
+        else if (lowK === "a") moveSelectionSpatial("left", glide);
+        else if (lowK === "s") moveSelectionSpatial("down", glide);
+        else if (lowK === "d") moveSelectionSpatial("right", glide);
         else goUp();
       }
       else if (isLeft) { e.preventDefault(); goUp(); }
-      else if (isUp) { e.preventDefault(); moveSelection(-1); }
-      else if (isDown) { e.preventDefault(); moveSelection(1); }
+      else if (isUp) { e.preventDefault(); moveSelection(-1, !e.repeat); }
+      else if (isDown) { e.preventDefault(); moveSelection(1, !e.repeat); }
       else if (isRight || isEnter) {
         if (!allSelectable.length || selectedIdx === -1) return;
         e.preventDefault();
