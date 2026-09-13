@@ -131,8 +131,14 @@ export default function Media() {
     setRatios((prev) => (prev[rk] === r ? prev : { ...prev, [rk]: r }));
   };
   const sanitizeKey = (s) => String(s || "").replace(/[^a-zA-Z0-9]/g, "-");
-  const rowKey = (it) => (isFlat ? it.rel || it.name : it.name);
-  const displayName = (it) => (isFlat ? String(it.rel || it.name).replace(/\//g, " > ") : it.name);
+  const rowKey = (it) => {
+    if (it && it._isPlaylistItem) return it.rel || it.name;
+    return isFlat ? it.rel || it.name : it.name;
+  };
+  const displayName = (it) => {
+    if (it && it._isPlaylistItem) return String(it.rel || it.name).replace(/\//g, " > ");
+    return isFlat ? String(it.rel || it.name).replace(/\//g, " > ") : it.name;
+  };
   // Single-select model (plan 014): `?s=<base64url rowKey>` is the source of truth (single select only).
   // 1 click = select, double-click = open. Derived index follows the key across reloads.
   const selKey = (() => {
@@ -166,7 +172,10 @@ export default function Media() {
   const [alertState, setAlertState] = useState({ open: false, title: "", message: "" });
   const [deleteTarget, setDeleteTarget] = useState(null);
   const playlistMenuCloseTimer = useRef(null);
-  const playlistKey = (it) => playlistKeyForMedia(folder, rowKey(it));
+  const playlistKey = (it) => {
+    if (it && it._isPlaylistItem) return rowKey(it);
+    return playlistKeyForMedia(folder, rowKey(it));
+  };
   const playlistItemsForView = (() => {
     if (!activePlId || !playlistDetail || !Array.isArray(playlistDetail.items)) return null;
     return playlistDetail.items.filter((it) => !it.missing).map((it) => {
