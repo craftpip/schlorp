@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import ShortcutsHelp from "./ShortcutsHelp";
+import PlaylistHoverMenu from "./PlaylistHoverMenu.jsx";
 
 function parseFolderBase(fp) {
   const raw = String(fp || "");
@@ -63,6 +64,9 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const randHistoryRef = useRef([]);
   const [yConfirm, setYConfirm] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  const [showPlaylist, setShowPlaylist] = useState(false);
+  const playlistHoverRef = useRef(null);
+  const playlistCloseTimer = useRef(null);
   // `.gif` files that are actually MP4 bytes (mislabeled at download time)
   // fail in <img> — flip to a <video> element on image error.
   const [gifAsVideo, setGifAsVideo] = useState(false);
@@ -114,7 +118,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   useEffect(() => { try { localStorage.setItem("xdl_viewer_seekFrames", seekFrames ? "1" : "0"); } catch {} }, [seekFrames]);
   useEffect(() => { try { localStorage.setItem("xdl_viewer_endMode", endMode); } catch {} }, [endMode]);
   useEffect(() => { setZoom(1); setOrigin("50% 50%"); setPan({x:0,y:0}); setCurrent(0); setDuration(0); setGifAsVideo(false); setYConfirm(false); lastYRef.current = 0; if (yConfirmTimerRef.current) { clearTimeout(yConfirmTimerRef.current); yConfirmTimerRef.current = null; } setTimeout(() => videoRef.current?.focus(), 50); }, [loadedUrl]);
-  useEffect(() => () => { if (yConfirmTimerRef.current) clearTimeout(yConfirmTimerRef.current); }, []);
+  useEffect(() => () => { if (yConfirmTimerRef.current) clearTimeout(yConfirmTimerRef.current); if (playlistCloseTimer.current) clearTimeout(playlistCloseTimer.current); }, []);
   const navigatingViaRandomRef = useRef(false);
   useEffect(() => {
     if (navigatingViaRandomRef.current) { navigatingViaRandomRef.current = false; return; }
@@ -128,6 +132,8 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     document.addEventListener("fullscreenchange", onFs);
     return () => document.removeEventListener("fullscreenchange", onFs);
   }, []);
+  const showPlaylistRef = useRef(showPlaylist);
+  useEffect(() => { showPlaylistRef.current = showPlaylist; }, [showPlaylist]);
   const endModeRef = useRef(endMode);
   endModeRef.current = endMode;
   const viewableRef = useRef(viewable);
@@ -383,6 +389,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
         e.preventDefault(); setShowHelp((v) => !v); return;
       }
       if (k === "Escape") {
+        if (showPlaylistRef.current) { e.preventDefault(); setShowPlaylist(false); return; }
         if (showHelp) { e.preventDefault(); setShowHelp(false); return; }
         if (document.fullscreenElement) { document.exitFullscreen().catch(() => {}); e.preventDefault(); return; }
         e.preventDefault(); onClose();
@@ -558,10 +565,39 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
             <button type="button" tabIndex={-1} className="btn btn-sm" onClick={(e) => { e.stopPropagation(); dispatchNextRef.current(); }} onTouchStart={(e) => e.stopPropagation()} disabled={endMode !== "random" && !hasNext} title="Next (↓)" style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}><i className="bi bi-chevron-down" /></button>
           </div>
           <span style={{ flex: 1 }} />
-          <div style={{ display: "flex", alignItems: "center", gap: 8, pointerEvents: "auto" }}>
-            {yConfirm && <span style={{ fontSize: 11, fontWeight: 600, color: "#fff", background: "#ef4444", padding: "4px 8px", borderRadius: 999, border: "1px solid rgba(255,255,255,.2)", whiteSpace: "nowrap" }}>Press y again to confirm delete</span>}
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 8, pointerEvents: "auto" }}>
+            {yConfirm && <span style={{ fontSize: 11, fontWeight: 600, color: "#fff", background: "#ef4444", padding: "4px 8px", borderRadius: 999, border: "1px solid rgba(255,255,255,.2)", whiteSpace: "nowrap", alignSelf: "center" }}>Press y again to confirm delete</span>}
             <button type="button" tabIndex={-1} onClick={handleDelete} disabled={deleting} className="btn btn-sm" aria-label="Delete file" title={yConfirm ? "Press y again to confirm — or click to delete" : "Delete file (press y twice)"} style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: yConfirm ? "1px solid #ef4444" : "1px solid rgba(255,255,255,.18)", background: yConfirm ? "#ef4444" : "rgba(0,0,0,.55)", color: yConfirm ? "#fff" : "#ff8080", backdropFilter: "blur(6px)", animation: yConfirm ? "pulse 0.6s ease infinite" : "none" }}><i className="bi bi-trash" /></button>
-            <button type="button" tabIndex={-1} onClick={onClose} className="btn btn-sm" aria-label="Close" style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}><i className="bi bi-x-lg" /></button>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <button type="button" tabIndex={-1} onClick={onClose} className="btn btn-sm" aria-label="Close" style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}><i className="bi bi-x-lg" /></button>
+              <div
+                ref={playlistHoverRef}
+                onMouseEnter={() => { if (playlistCloseTimer.current) { clearTimeout(playlistCloseTimer.current); playlistCloseTimer.current = null; } setShowPlaylist(true); }}
+                onMouseLeave={() => { if (playlistCloseTimer.current) clearTimeout(playlistCloseTimer.current); playlistCloseTimer.current = setTimeout(() => setShowPlaylist(false), 120); }}
+                style={{ position: "relative" }}
+              >
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  data-testid="viewer-playlist-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    // coarse pointer (mobile) fallback to tap toggle
+                    try { if (window.matchMedia && window.matchMedia("(pointer: coarse)").matches) setShowPlaylist((v) => !v); } catch { setShowPlaylist((v) => !v); }
+                  }}
+                  aria-label="Add to playlist"
+                  title="Add to playlist"
+                  style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: showPlaylist ? "rgba(99,102,241,.85)" : "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}
+                >
+                  <i className="bi bi-collection-play" />
+                </button>
+                {showPlaylist && (
+                  <div style={{ position: "absolute", top: 44, right: 0, zIndex: 95 }} onClick={(e) => e.stopPropagation()}>
+                    <PlaylistHoverMenu mediaKey={filePathEff} />
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         </div>
 

@@ -797,9 +797,241 @@ app.delete("/api/media", async (req, res) => {
     if (!stat) return res.status(404).json({ ok: false, error: "not found" });
     if (stat.isDirectory()) return res.status(400).json({ ok: false, error: "use folder delete for dirs" });
     await fs.unlink(fullPath);
+    // Prune from playlists (best-effort)
+    try {
+      const canonical = rel.split(path.sep).join("/");
+      await withPlaylistFile(async () => {
+        const data = await loadPlaylistsRaw();
+        let mutated = false;
+        for (const pl of data.playlists) {
+          const before = pl.items.length;
+          pl.items = pl.items.filter((it) => it.key !== canonical);
+          if (pl.items.length !== before) {
+            mutated = true;
+            pl.updatedAt = new Date().toISOString();
+          }
+        }
+        if (mutated) await savePlaylistsRaw(data);
+      });
+    } catch {}
     return res.json({ ok: true });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+// --- Playlists (.playlists.json) ---
+const playlistsFile = path.join(rootDir, ".playlists.json");
+let playlistsChain = Promise.resolve();
+async function withPlaylistFile(fn) {
+  let result, error;
+  const task = async () => { try { result = await fn(); } catch (e) { error = e; } };
+  playlistsChain = playlistsChain.then(task, task);
+  await playlistsChain;
+  if (error) throw error;
+  return result;
+}
+function normalizePlaylistName(raw) {
+  const s = String(raw || "").trim();
+  if (!s) throw new Error("playlist name required");
+  if (s.length > 60) throw new Error("playlist name too long (max 60)");
+  if (/[\n\r]/.test(s)) throw new Error("invalid playlist name");
+  return s;
+}
+function normalizePlaylistKey(raw) {
+  const s = String(raw || "").trim().replace(/\\/g, "/").replace(/^\/+/, "");
+  if (!s) throw new Error("key required");
+  if (s.includes("..")) throw new Error("invalid key");
+  if (s.startsWith("/")) throw new Error("invalid key");
+  const normalized = path.posix.normalize(s);
+  if (!normalized || normalized === "." || normalized.startsWith("..") || path.isAbsolute(normalized)) throw new Error("invalid key");
+  if (normalized.includes("\\")) throw new Error("invalid key");
+  return normalized;
+}
+async function loadPlaylistsRaw() {
+  try {
+    const raw = await fs.readFile(playlistsFile, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") throw new Error("invalid playlists file");
+    const playlists = Array.isArray(parsed.playlists) ? parsed.playlists : [];
+    // sanitize shape
+    for (const pl of playlists) {
+      if (!pl || typeof pl !== "object") continue;
+      pl.id = String(pl.id || "");
+      pl.name = String(pl.name || "");
+      pl.createdAt = String(pl.createdAt || new Date().toISOString());
+      pl.updatedAt = String(pl.updatedAt || pl.createdAt);
+      if (!Array.isArray(pl.items)) pl.items = [];
+      pl.items = pl.items.filter((it) => it && typeof it.key === "string" && it.key).map((it) => ({ key: normalizePlaylistKey(it.key), addedAt: String(it.addedAt || new Date().toISOString()) }));
+    }
+    return { playlists: playlists.filter((p) => p.id && p.name), updatedAt: String(parsed.updatedAt || new Date().toISOString()) };
+  } catch (e) {
+    if (e && e.code === "ENOENT") return { playlists: [], updatedAt: new Date().toISOString() };
+    throw e;
+  }
+}
+async function savePlaylistsRaw(data) {
+  data.updatedAt = new Date().toISOString();
+  await fs.mkdir(path.dirname(playlistsFile), { recursive: true });
+  await fs.writeFile(playlistsFile, JSON.stringify(data, null, 2), "utf8");
+}
+function playlistSummary(pl) {
+  return { id: pl.id, name: pl.name, createdAt: pl.createdAt, updatedAt: pl.updatedAt, count: pl.items.length, items: pl.items.map((it) => it.key) };
+}
+app.get("/api/playlists", async (_req, res) => {
+  try {
+    const data = await withPlaylistFile(() => loadPlaylistsRaw());
+    return res.json({ ok: true, playlists: data.playlists.map(playlistSummary) });
+  } catch (e) { return res.status(500).json({ ok: false, error: e.message }); }
+});
+app.get("/api/playlists/:id", async (req, res) => {
+  try {
+    const id = String(req.params.id || "").trim();
+    const data = await withPlaylistFile(() => loadPlaylistsRaw());
+    const pl = data.playlists.find((p) => p.id === id);
+    if (!pl) return res.status(404).json({ ok: false, error: "playlist not found" });
+    // Enrich items with file stats for Media playlist view
+    const enriched = [];
+    for (const it of pl.items) {
+      const fullPath = path.join(mediaDir, ...it.key.split("/").filter(Boolean));
+      const rel = path.relative(mediaDir, fullPath);
+      if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) { enriched.push({ key: it.key, addedAt: it.addedAt, missing: true }); continue; }
+      const stat = await fs.stat(fullPath).catch(() => null);
+      if (!stat || !stat.isFile()) { enriched.push({ key: it.key, addedAt: it.addedAt, missing: true }); continue; }
+      const ft = fileEntryTimes(stat);
+      const name = it.key.split("/").pop() || it.key;
+      const posterKey = it.key.replace(/\.[^.]+$/, "");
+      // thumb lookup not needed here; client can use /api/media or /api/mediathumb on demand
+      enriched.push({ key: it.key, name, dir: false, size: stat.size, mtime: ft.mtime, created: ft.created, addedAt: it.addedAt, missing: false });
+    }
+    return res.json({ ok: true, playlist: { id: pl.id, name: pl.name, createdAt: pl.createdAt, updatedAt: pl.updatedAt, items: enriched } });
+  } catch (e) { return res.status(500).json({ ok: false, error: e.message }); }
+});
+app.post("/api/playlists", async (req, res) => {
+  try {
+    const name = normalizePlaylistName(req.body?.name);
+    return await withPlaylistFile(async () => {
+      const data = await loadPlaylistsRaw();
+      if (data.playlists.length >= 100) return res.status(400).json({ ok: false, error: "too many playlists (max 100)" });
+      const exists = data.playlists.some((p) => p.name.toLowerCase() === name.toLowerCase());
+      if (exists) return res.status(409).json({ ok: false, error: "playlist name already exists" });
+      const id = `pl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const now = new Date().toISOString();
+      const pl = { id, name, createdAt: now, updatedAt: now, items: [] };
+      data.playlists.push(pl);
+      await savePlaylistsRaw(data);
+      return res.status(201).json({ ok: true, playlist: playlistSummary(pl) });
+    });
+  } catch (e) {
+    const msg = e.message || String(e);
+    if (/already exists|too many|required|too long|invalid/i.test(msg)) return res.status(/already exists/i.test(msg) ? 409 : 400).json({ ok: false, error: msg });
+    return res.status(500).json({ ok: false, error: msg });
+  }
+});
+app.patch("/api/playlists/:id", async (req, res) => {
+  try {
+    const id = String(req.params.id || "").trim();
+    const name = normalizePlaylistName(req.body?.name);
+    return await withPlaylistFile(async () => {
+      const data = await loadPlaylistsRaw();
+      const pl = data.playlists.find((p) => p.id === id);
+      if (!pl) return res.status(404).json({ ok: false, error: "playlist not found" });
+      const dup = data.playlists.some((p) => p.id !== id && p.name.toLowerCase() === name.toLowerCase());
+      if (dup) return res.status(409).json({ ok: false, error: "playlist name already exists" });
+      pl.name = name;
+      pl.updatedAt = new Date().toISOString();
+      await savePlaylistsRaw(data);
+      return res.json({ ok: true, playlist: playlistSummary(pl) });
+    });
+  } catch (e) {
+    const msg = e.message || String(e);
+    if (/already exists|required|too long|invalid/i.test(msg)) return res.status(/already exists/i.test(msg) ? 409 : 400).json({ ok: false, error: msg });
+    return res.status(500).json({ ok: false, error: msg });
+  }
+});
+app.delete("/api/playlists/:id", async (req, res) => {
+  try {
+    const id = String(req.params.id || "").trim();
+    return await withPlaylistFile(async () => {
+      const data = await loadPlaylistsRaw();
+      const idx = data.playlists.findIndex((p) => p.id === id);
+      if (idx === -1) return res.status(404).json({ ok: false, error: "playlist not found" });
+      data.playlists.splice(idx, 1);
+      await savePlaylistsRaw(data);
+      return res.json({ ok: true });
+    });
+  } catch (e) { return res.status(500).json({ ok: false, error: e.message }); }
+});
+app.post("/api/playlists/:id/items", async (req, res) => {
+  try {
+    const id = String(req.params.id || "").trim();
+    const key = normalizePlaylistKey(req.body?.key || req.query?.key);
+    return await withPlaylistFile(async () => {
+      const data = await loadPlaylistsRaw();
+      const pl = data.playlists.find((p) => p.id === id);
+      if (!pl) return res.status(404).json({ ok: false, error: "playlist not found" });
+      if (pl.items.length >= 5000) return res.status(400).json({ ok: false, error: "playlist full (max 5000)" });
+      const exists = pl.items.some((it) => it.key === key);
+      if (exists) return res.json({ ok: true, playlist: playlistSummary(pl), added: false });
+      pl.items.push({ key, addedAt: new Date().toISOString() });
+      pl.updatedAt = new Date().toISOString();
+      await savePlaylistsRaw(data);
+      return res.json({ ok: true, playlist: playlistSummary(pl), added: true });
+    });
+  } catch (e) {
+    const msg = e.message || String(e);
+    if (/key|invalid|full/i.test(msg)) return res.status(400).json({ ok: false, error: msg });
+    return res.status(500).json({ ok: false, error: msg });
+  }
+});
+app.delete("/api/playlists/:id/items", async (req, res) => {
+  try {
+    const id = String(req.params.id || "").trim();
+    const key = normalizePlaylistKey(req.body?.key || req.query?.key);
+    return await withPlaylistFile(async () => {
+      const data = await loadPlaylistsRaw();
+      const pl = data.playlists.find((p) => p.id === id);
+      if (!pl) return res.status(404).json({ ok: false, error: "playlist not found" });
+      const before = pl.items.length;
+      pl.items = pl.items.filter((it) => it.key !== key);
+      const removed = pl.items.length !== before;
+      if (removed) {
+        pl.updatedAt = new Date().toISOString();
+        await savePlaylistsRaw(data);
+      }
+      return res.json({ ok: true, playlist: playlistSummary(pl), removed });
+    });
+  } catch (e) {
+    const msg = e.message || String(e);
+    if (/key|invalid/i.test(msg)) return res.status(400).json({ ok: false, error: msg });
+    return res.status(500).json({ ok: false, error: msg });
+  }
+});
+app.post("/api/playlists/:id/toggle", async (req, res) => {
+  try {
+    const id = String(req.params.id || "").trim();
+    const key = normalizePlaylistKey(req.body?.key || req.query?.key);
+    return await withPlaylistFile(async () => {
+      const data = await loadPlaylistsRaw();
+      const pl = data.playlists.find((p) => p.id === id);
+      if (!pl) return res.status(404).json({ ok: false, error: "playlist not found" });
+      const idx = pl.items.findIndex((it) => it.key === key);
+      let member;
+      if (idx !== -1) {
+        pl.items.splice(idx, 1);
+        member = false;
+      } else {
+        if (pl.items.length >= 5000) return res.status(400).json({ ok: false, error: "playlist full (max 5000)" });
+        pl.items.push({ key, addedAt: new Date().toISOString() });
+        member = true;
+      }
+      pl.updatedAt = new Date().toISOString();
+      await savePlaylistsRaw(data);
+      return res.json({ ok: true, playlist: playlistSummary(pl), member });
+    });
+  } catch (e) {
+    const msg = e.message || String(e);
+    if (/key|invalid|full/i.test(msg)) return res.status(400).json({ ok: false, error: msg });
+    return res.status(500).json({ ok: false, error: msg });
   }
 });
 // --- GIF → MP4 streaming conversion (cache in tmp, single-flight per key) ---

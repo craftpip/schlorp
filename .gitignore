@@ -3,5 +3,6 @@ node_modules/
 .saved-sync-state.json
 .download-queue.json
 .web-queue.json
+.playlists.json
 .saved-sync-state.json.bak.*
 .env
