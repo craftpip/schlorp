@@ -772,13 +772,161 @@ async function listMediaDir(resolved, flat) {
   return items;
 }
 
+// --- Media dimensions (.mediadims.json) ---
+// Persistent w/h cache so grid tiles size correctly on first paint (no
+// reflow when thumbnails arrive). Keyed by media-relative path, validated
+// by mtimeMs+size. Probes never block listings: requests serve cached
+// ratios inline, misses warm in the background for the next visit.
+const mediadimsFile = path.join(rootDir, ".mediadims.json");
+let mediadimsChain = Promise.resolve();
+async function withMediadimsFile(fn) {
+  let result, error;
+  const task = async () => { try { result = await fn(); } catch (e) { error = e; } };
+  mediadimsChain = mediadimsChain.then(task, task);
+  await mediadimsChain;
+  if (error) throw error;
+  return result;
+}
+let mediadimsCache = null; // { mediaRelKey: { w, h, mtimeMs, size } }
+async function loadMediadims() {
+  if (mediadimsCache) return mediadimsCache;
+  try {
+    const raw = await fs.readFile(mediadimsFile, "utf8");
+    const parsed = JSON.parse(raw);
+    mediadimsCache = parsed && typeof parsed === "object" && parsed.dims && typeof parsed.dims === "object" ? parsed.dims : {};
+  } catch (e) {
+    if (!e || e.code !== "ENOENT") console.error("[mediadims] load failed:", e && e.message);
+    mediadimsCache = {};
+  }
+  return mediadimsCache;
+}
+async function saveMediadims() {
+  await withMediadimsFile(async () => {
+    await fs.mkdir(path.dirname(mediadimsFile), { recursive: true });
+    await fs.writeFile(mediadimsFile, JSON.stringify({ updatedAt: new Date().toISOString(), dims: mediadimsCache || {} }), "utf8");
+  });
+}
+const DIMS_PROBE_TIMEOUT_MS = 15000;
+const DIMS_PROBE_CONCURRENCY = 10;
+const DIMS_PROBEABLE_EXT = /\.(mp4|m4v|mov|mkv|webm|avi|mpg|mpeg|3gp|flv|ts|m3u8|jpg|jpeg|png|webp|bmp|avif|gif)$/i;
+function probeFileDims(fullPath) {
+  return new Promise((resolve) => {
+    if (!ffprobeBin) return resolve(null);
+    try {
+      require("child_process").execFile(
+        ffprobeBin,
+        ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", fullPath],
+        { timeout: DIMS_PROBE_TIMEOUT_MS },
+        (err, stdout) => {
+          if (err) return resolve(null);
+          const nums = String(stdout || "").trim().split(/[\s,]+/).map(Number).filter((n) => Number.isFinite(n) && n > 0);
+          if (nums.length >= 2) return resolve({ w: nums[0], h: nums[1] });
+          return resolve(null);
+        }
+      );
+    } catch {
+      return resolve(null);
+    }
+  });
+}
+let dimsWarmQueue = [];
+let dimsWarmRunning = false;
+function queueDimsWarm(entries) {
+  // Move-to-front: the folder just opened jumps ahead of older backlog,
+  // so the view in front of the user warms first.
+  const incoming = [];
+  const seenNew = new Set();
+  for (const e of entries) {
+    if (!e || !e.key || seenNew.has(e.key)) continue;
+    seenNew.add(e.key);
+    incoming.push(e);
+  }
+  if (!incoming.length) return;
+  if (dimsWarmQueue.length) dimsWarmQueue = dimsWarmQueue.filter((e) => !seenNew.has(e && e.key));
+  dimsWarmQueue.unshift(...incoming);
+  if (!dimsWarmRunning) void runDimsWarmQueue().catch(() => {});
+}
+async function runDimsWarmQueue() {
+  dimsWarmRunning = true;
+  try {
+    while (dimsWarmQueue.length) {
+      const batch = dimsWarmQueue.splice(0, DIMS_PROBE_CONCURRENCY);
+      const results = await Promise.all(batch.map(async (e) => {
+        try {
+          if (!DIMS_PROBEABLE_EXT.test(e.key)) return null;
+          const st = await fs.stat(e.fullPath).catch(() => null);
+          if (!st || !st.isFile()) return null;
+          if (st.mtimeMs !== e.mtimeMs || st.size !== e.size) return null;
+          const d = await probeFileDims(e.fullPath);
+          if (!d) return null;
+          return { key: e.key, w: d.w, h: d.h, mtimeMs: e.mtimeMs, size: e.size };
+        } catch { return null; }
+      }));
+      const dims = await loadMediadims();
+      let mutated = false;
+      for (const r of results) {
+        if (!r) continue;
+        dims[r.key] = { w: r.w, h: r.h, mtimeMs: r.mtimeMs, size: r.size };
+        mutated = true;
+      }
+      if (mutated) await saveMediadims().catch(() => {});
+    }
+  } finally {
+    dimsWarmRunning = false;
+    if (dimsWarmQueue.length) void runDimsWarmQueue().catch(() => {});
+  }
+}
+// Cached ratio for one media-relative key (queues a background probe on miss).
+async function dimsRatioFor(key, fullPath, stat) {
+  const dims = await loadMediadims();
+  const hit = dims[key];
+  if (hit && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size && hit.w > 0 && hit.h > 0) return hit.w / hit.h;
+  queueDimsWarm([{ key, fullPath, mtimeMs: stat.mtimeMs, size: stat.size }]);
+  return undefined;
+}
+// Attach cached `ratio` to listMediaDir items (folder-scoped keys); misses warm in background.
+async function attachCachedRatios(items, folder) {
+  const fk = String(folder || "").replace(/\/$/, "");
+  for (const it of items) {
+    if (it.dir) continue;
+    const rk = it.rel || it.name;
+    const key = fk ? `${fk}/${rk}` : rk;
+    const fullPath = path.join(mediaDir, ...key.split("/").filter(Boolean));
+    const rel = path.relative(mediaDir, fullPath);
+    if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) continue;
+    const stat = await fs.stat(fullPath).catch(() => null);
+    if (!stat || !stat.isFile()) continue;
+    const ratio = await dimsRatioFor(key, fullPath, stat);
+    if (ratio) it.ratio = ratio;
+  }
+}
 app.get("/api/media", async (req, res) => {
   try {
     const folder = String(req.query?.folder || "").trim();
     const flat = String(req.query?.flat || "") === "1";
     const resolved = resolveMediaOutputDir(folder);
     const items = await listMediaDir(resolved, flat);
+    await attachCachedRatios(items, folder);
     return res.json({ ok: true, folder, flat, items });
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error.message });
+  }
+});
+// Ratio map for a folder scope (rowKey -> ratio), for clients to merge in
+// without a full reload. Missing entries are warming in the background.
+app.get("/api/mediadims", async (req, res) => {
+  try {
+    const folder = String(req.query?.folder || "").trim();
+    const flat = String(req.query?.flat || "") === "1";
+    const resolved = resolveMediaOutputDir(folder);
+    const items = await listMediaDir(resolved, flat);
+    await attachCachedRatios(items, folder);
+    const dims = {};
+    for (const it of items) {
+      if (it.dir || !Number.isFinite(it.ratio)) continue;
+      dims[it.rel || it.name] = it.ratio;
+    }
+    return res.json({ ok: true, folder, flat, dims });
   } catch (error) {
     return res.status(400).json({ ok: false, error: error.message });
   }
@@ -813,6 +961,15 @@ app.delete("/api/media", async (req, res) => {
         }
         if (mutated) await savePlaylistsRaw(data);
       });
+    } catch {}
+    // Prune dims cache entry (best-effort)
+    try {
+      const canonical = rel.split(path.sep).join("/");
+      const dims = await loadMediadims();
+      if (dims[canonical]) {
+        delete dims[canonical];
+        await saveMediadims();
+      }
     } catch {}
     return res.json({ ok: true });
   } catch (error) {
@@ -913,7 +1070,10 @@ app.get("/api/playlists/:id", async (req, res) => {
           if (cstat && cstat.isFile()) { thumb = candKey; break; }
         }
       }
-      enriched.push({ key: it.key, name, dir: false, size: stat.size, mtime: ft.mtime, created: ft.created, addedAt: it.addedAt, missing: false, thumb });
+      const ratio = await dimsRatioFor(it.key, fullPath, stat);
+      const entry = { key: it.key, name, dir: false, size: stat.size, mtime: ft.mtime, created: ft.created, addedAt: it.addedAt, missing: false, thumb };
+      if (ratio) entry.ratio = ratio;
+      enriched.push(entry);
     }
     return res.json({ ok: true, playlist: { id: pl.id, name: pl.name, createdAt: pl.createdAt, updatedAt: pl.updatedAt, items: enriched } });
   } catch (e) { return res.status(500).json({ ok: false, error: e.message }); }

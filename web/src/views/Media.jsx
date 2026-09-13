@@ -328,6 +328,50 @@ export default function Media() {
     }
   }, [playlists]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => () => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); if (yTimerRef.current) clearTimeout(yTimerRef.current); }, []);
+  // Merge server-side dimensions without resetting thumbnails
+  // (setItems/load would flash spinners). Retries a few times so entries
+  // still warming on the server land without a reload. Playlist view items
+  // get `ratio` inline from the detail endpoint instead.
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
+  const dimsPollRef = useRef({ scope: "", rounds: 0, timer: null });
+  useEffect(() => {
+    if (inPlaylistView || !items.length) return undefined;
+    const scopeKey = `${folder}\n${isFlat ? 1 : 0}\n${items.length}`;
+    const st = dimsPollRef.current;
+    if (st.scope !== scopeKey) {
+      st.scope = scopeKey;
+      st.rounds = 0;
+      if (st.timer) { clearInterval(st.timer); st.timer = null; }
+    }
+    const qs = new URLSearchParams();
+    if (folder) qs.set("folder", folder);
+    if (isFlat) qs.set("flat", "1");
+    const query = qs.toString();
+    const doFetch = () => {
+      const cur = itemsRef.current;
+      if (!cur.some((it) => !it.dir && !Number.isFinite(it.ratio))) { stopPoll(); return; }
+      if (st.rounds >= 4) { stopPoll(); return; }
+      st.rounds += 1;
+      fetch(`/api/mediadims?${query}`).then((r) => r.json()).then((j) => {
+        if (!j || !j.ok || !j.dims) return;
+        setRatios((prev) => {
+          const next = { ...prev };
+          let changed = false;
+          for (const [k, v] of Object.entries(j.dims)) {
+            if (!Number.isFinite(v) || k in next) continue;
+            next[k] = v;
+            changed = true;
+          }
+          return changed ? next : prev;
+        });
+      }).catch(() => {});
+    };
+    const stopPoll = () => { if (st.timer) { clearInterval(st.timer); st.timer = null; } };
+    doFetch();
+    st.timer = setInterval(doFetch, 4000);
+    return () => { if (st.timer) { clearInterval(st.timer); st.timer = null; } };
+  }, [items, folder, isFlat, inPlaylistView]);
   const handleCreatePlaylist = async () => {
     const name = String(newPlaylistName || "").trim();
     if (!name) return;
@@ -684,7 +728,9 @@ export default function Media() {
     return filtered.map((it, i) => {
       const isDir = !!it.dir;
       if (isDir) return { it, i, h: GRID_TARGET_H, w: Math.min(GRID_TARGET_H * 1.25, 260), isDir: true };
-      const r = clampRatio(parseFloat(ratios[rowKey(it)]) || 1);
+      // Server-provided ratio (from .mediadims.json) sizes tiles on first
+      // paint; measured ratios refine afterwards. No reflow from scratch.
+      const r = clampRatio(parseFloat(ratios[rowKey(it)]) || it.ratio || 1);
       let w = Math.round(GRID_TARGET_H * r);
       const max = Math.max(gridW - GRID_GAP * 2, 80);
       if (w > max) w = max;
@@ -839,7 +885,7 @@ export default function Media() {
         onClick={() => tapItem(it)}
         onDoubleClick={() => openItem(it)}
         title={`${displayName(it)} — click to select, double-click to open`}
-        style={{ position: "relative", flex: isDir ? "0 0 auto" : "0 0 auto", width: w, height: h, overflow: menuOpen ? "visible" : "hidden", zIndex: menuOpen ? 60 : "auto", borderRadius: 0, background: isDir ? "var(--surface-2)" : "var(--surface-2)", outline: selected ? "4px solid var(--accent)" : "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8 }}
+        style={{ position: "relative", flex: isDir ? "0 0 auto" : "0 0 auto", width: w, height: h, overflow: menuOpen ? "visible" : "hidden", zIndex: menuOpen ? 60 : "auto", borderRadius: 0, background: isDir ? "var(--surface-2)" : "var(--surface-2)", outline: selected ? "4px solid var(--accent)" : "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, contentVisibility: "auto", containIntrinsicSize: `${w}px ${h}px` }}
       >
         {src ? (
           <span style={{ position: "relative", width: "100%", height: "100%", flex: 1, display: "block", background: "#000", minHeight: 0 }}>
@@ -849,9 +895,9 @@ export default function Media() {
               </span>
             )}
             {asVideo ? (
-              <video src={src} autoPlay muted loop playsInline preload="metadata" onLoadedData={markVideoLoaded} onError={markErr} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", background: "#000", opacity: loaded ? 1 : 0 }} />
+              <video src={src} autoPlay muted loop playsInline preload="metadata" onLoadedData={markVideoLoaded} onError={markErr} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", background: "#000", opacity: loaded ? 1 : 0, transition: "opacity .45s ease" }} />
             ) : (
-              <img src={src} alt="" loading="lazy" decoding="async" draggable={false} onLoad={markLoaded} onError={markErr} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", background: "#000", opacity: loaded ? 1 : 0 }} />
+              <img src={src} alt="" loading="lazy" decoding="async" draggable={false} onLoad={markLoaded} onError={markErr} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", background: "#000", opacity: loaded ? 1 : 0, transition: "opacity .45s ease" }} />
             )}
           </span>
         ) : isDir ? (
