@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import ShortcutsHelp from "./ShortcutsHelp";
 import PlaylistHoverMenu from "./PlaylistHoverMenu.jsx";
+import ConfirmModal from "./ConfirmModal.jsx";
+import AlertModal from "./AlertModal.jsx";
 
 function parseFolderBase(fp) {
   const raw = String(fp || "");
@@ -65,6 +67,8 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const [yConfirm, setYConfirm] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [showPlaylist, setShowPlaylist] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [alertState, setAlertState] = useState({ open: false, title: "", message: "" });
   const playlistHoverRef = useRef(null);
   const playlistCloseTimer = useRef(null);
   // `.gif` files that are actually MP4 bytes (mislabeled at download time)
@@ -535,13 +539,16 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       if (onDeleted) onDeleted(filePathEff);
       else if (total <= 1) onClose();
       else if (!hasNext && hasPrev) onPrev();
-    } catch (e) { alert(e.message); }
+    } catch (e) { setAlertState({ open: true, title: "Delete failed", message: e.message }); }
     finally { setDeleting(false); }
   };
-  const handleDelete = async () => {
+  const handleDelete = () => {
     const { base } = parseFolderBase(filePathEff);
     if (!base) return;
-    if (!confirm(`Delete "${base}"? This removes the file from /media.`)) return;
+    setConfirmOpen(true);
+  };
+  const handleConfirmDelete = async () => {
+    setConfirmOpen(false);
     await doDeleteFile();
   };
   doDeleteFileRef.current = doDeleteFile;
@@ -720,6 +727,16 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       </div>
     </div>
     {showHelp && <ShortcutsHelp active="viewer" onClose={() => setShowHelp(false)} />}
+    <ConfirmModal
+      open={confirmOpen}
+      title="Delete file"
+      message={`Delete "${parseFolderBase(filePathEff).base}"? This removes the file from /media.`}
+      confirmLabel="Delete"
+      danger
+      onCancel={() => setConfirmOpen(false)}
+      onConfirm={handleConfirmDelete}
+    />
+    <AlertModal open={alertState.open} title={alertState.title || "Error"} message={alertState.message} onClose={() => setAlertState({ open: false, title: "", message: "" })} />
     </>
   );
 }

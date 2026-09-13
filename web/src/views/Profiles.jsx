@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import ConfirmModal from "../components/ConfirmModal.jsx";
 
 export default function Profiles() {
   const [accounts, setAccounts] = useState([]);
@@ -15,6 +16,7 @@ export default function Profiles() {
   const [opening, setOpening] = useState(null);
   const [editingCdp, setEditingCdp] = useState({}); // name -> draft string or undefined
   const [checking, setChecking] = useState({}); // name -> boolean
+  const [confirmState, setConfirmState] = useState({ open: false, type: null, name: "" });
 
   const loadVnc = async () => {
     try { const r = await fetch("/vnc/status"); const j = await r.json(); if (j.ok) setVnc({ enabled: j.enabled, running: j.running }); } catch {}
@@ -41,6 +43,10 @@ export default function Profiles() {
 
   const onCreate = async (e) => {
     e.preventDefault();
+    if (String(name).trim() === "default" && createType === "cdp") {
+      setMsg("default profile is fixed local — cannot be CDP. It can only be reset.");
+      return;
+    }
     setBusy(true); setMsg("");
     try {
       const payload = createType === "cdp"
@@ -57,17 +63,31 @@ export default function Profiles() {
     } catch (ex) { setMsg(ex.message); }
     finally { setBusy(false); }
   };
-  const onDelete = async (n) => {
-    if (!confirm(`Delete account "${n}"?`)) return;
-    await fetch(`/accounts/${encodeURIComponent(n)}`, { method: "DELETE" });
-    load();
+  const onDelete = (n) => {
+    setConfirmState({ open: true, type: "delete", name: n });
   };
-  const onClearCdpDefault = async (n) => {
-    if (!confirm(`Remove CDP link for "${n}"? This will clear its CDP URL and revert to local.`)) return;
-    const r = await fetch(`/accounts/${encodeURIComponent(n)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cdpUrl: "" }) });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) { setInfo(j.error || "failed"); setTimeout(() => setInfo(""), 3000); return; }
-    setInfo("CDP cleared ✓"); setTimeout(() => setInfo(""), 2500); load();
+  const onClearCdpDefault = (n) => {
+    setConfirmState({ open: true, type: "clearCdp", name: n });
+  };
+  const handleConfirm = async () => {
+    const { type, name: n } = confirmState;
+    setConfirmState({ open: false, type: null, name: "" });
+    if (type === "delete") {
+      await fetch(`/accounts/${encodeURIComponent(n)}`, { method: "DELETE" });
+      load();
+    } else if (type === "clearCdp") {
+      const r = await fetch(`/accounts/${encodeURIComponent(n)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cdpUrl: "" }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) { setInfo(j.error || "failed"); setTimeout(() => setInfo(""), 3000); return; }
+      setInfo("CDP cleared ✓"); setTimeout(() => setInfo(""), 2500); load();
+    } else if (type === "reset") {
+      setMsg("Resetting…");
+      const r = await fetch("/accounts/default/reset", { method: "POST" });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) setMsg(j.error || "reset failed");
+      else setMsg("Default reset ✓");
+      load();
+    }
   };
   const onCheckCdp = async (n) => {
     setChecking((s) => ({ ...s, [n]: true }));
@@ -83,6 +103,11 @@ export default function Profiles() {
     finally { setChecking((s) => ({ ...s, [n]: false })); }
   };
   const onSaveCdp = async (n) => {
+    if (n === "default") {
+      setInfo("default profile is fixed local — cannot use CDP");
+      setTimeout(() => setInfo(""), 3000);
+      return;
+    }
     const draft = editingCdp[n];
     if (draft == null) return;
     const raw = String(draft).trim();
@@ -168,14 +193,8 @@ export default function Profiles() {
     await fetch("/close-browser", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ account: n }) });
     load();
   };
-  const onResetDefault = async () => {
-    if (!confirm("Reset default profile? This clears its browser data (cookies/logins) and restarts the browser.")) return;
-    setMsg("Resetting…");
-    const r = await fetch("/accounts/default/reset", { method: "POST" });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) setMsg(j.error || "reset failed");
-    else setMsg("Default reset ✓");
-    load();
+  const onResetDefault = () => {
+    setConfirmState({ open: true, type: "reset", name: "default" });
   };
 
   return (
@@ -263,7 +282,7 @@ export default function Profiles() {
       {accounts.length === 0 ? <div className="empty"><i className="bi bi-person-plus" /> No accounts yet — create one above.</div> : (
         <div style={{ display: "grid", gap: 16 }}>
           {accounts.map((a) => {
-            const isCdp = Boolean(a.cdpUrl);
+            const isCdp = a.name !== "default" && Boolean(a.cdpUrl);
             const cdpStatus = a.cdpStatus || (isCdp ? "checking" : "not_configured");
             const isChecking = Boolean(checking[a.name]);
             return (
@@ -296,7 +315,7 @@ export default function Profiles() {
                       <div style={{ fontSize: 11, color: a.manualOpen ? "#10b981" : "var(--muted)", marginTop: 2 }}>{a.manualOpen ? "● Browser open — remote desktop" : "○ Closed"}</div>
                     </>
                   )}
-                  {editingCdp[a.name] != null && (
+                  {a.name !== "default" && editingCdp[a.name] != null && (
                     <div style={{ marginTop: 10, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
                       <input className="form-control form-control-sm" style={{ minWidth: 220, flex: "1 1 220px" }} value={editingCdp[a.name]} onChange={(e) => setEditingCdp((s) => ({ ...s, [a.name]: e.target.value }))} placeholder="ws://host:9222 or http://host:9222" />
                       <button className="btn btn-sm btn-primary" onClick={() => onSaveCdp(a.name)} disabled={busy}><i className="bi bi-check-lg" /> Save</button>
@@ -333,14 +352,16 @@ export default function Profiles() {
                       ) : (
                         <button className="btn btn-sm btn-primary" onClick={() => onOpen(a.name)} disabled={opening === a.name} style={{ minWidth: 118, justifyContent: "center", display: "inline-flex", alignItems: "center", gap: 6 }}>{opening === a.name ? <><span className="spinner-border spinner-border-sm" style={{ width: 12, height: 12, borderWidth: 2 }} /> Starting…</> : <><i className="bi bi-box-arrow-up-right" /> Open</>}</button>
                       )}
-                      <button
-                        className="btn btn-sm btn-outline-secondary"
-                        onClick={() => setEditingCdp((s) => ({ ...s, [a.name]: s[a.name] != null ? s[a.name] : "" }))}
-                        title="Add CDP URL to this profile"
-                        style={{ minWidth: 90, justifyContent: "center", display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12 }}
-                      >
-                        <i className="bi bi-link-45deg" /> CDP
-                      </button>
+                      {a.name !== "default" && (
+                        <button
+                          className="btn btn-sm btn-outline-secondary"
+                          onClick={() => setEditingCdp((s) => ({ ...s, [a.name]: s[a.name] != null ? s[a.name] : "" }))}
+                          title="Add CDP URL to this profile"
+                          style={{ minWidth: 90, justifyContent: "center", display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12 }}
+                        >
+                          <i className="bi bi-link-45deg" /> CDP
+                        </button>
+                      )}
                       {a.name === "default" ? <button className="btn btn-sm btn-outline-secondary" onClick={onResetDefault} style={{ minWidth: 118, justifyContent: "center", display: "inline-flex", alignItems: "center", color: "var(--muted)", borderColor: "var(--border)" }}><i className="bi bi-arrow-counterclockwise" /> Reset</button> : <button className="btn btn-sm btn-outline-secondary" onClick={() => onDelete(a.name)} style={{ minWidth: 118, justifyContent: "center", display: "inline-flex", alignItems: "center" }}><i className="bi bi-trash" /> Remove</button>}
                     </>
                   )}
@@ -350,6 +371,15 @@ export default function Profiles() {
           })}
         </div>
       )}
+      <ConfirmModal
+        open={confirmState.open}
+        title={confirmState.type === "delete" ? "Delete account" : confirmState.type === "clearCdp" ? "Remove CDP link" : "Reset default profile"}
+        message={confirmState.type === "delete" ? `Delete account "${confirmState.name}"?` : confirmState.type === "clearCdp" ? `Remove CDP link for "${confirmState.name}"? This will clear its CDP URL and revert to local.` : "Reset default profile? This clears its browser data (cookies/logins) and restarts the browser."}
+        confirmLabel={confirmState.type === "delete" ? "Delete" : confirmState.type === "clearCdp" ? "Remove" : "Reset"}
+        danger
+        onCancel={() => setConfirmState({ open: false, type: null, name: "" })}
+        onConfirm={handleConfirm}
+      />
     </div>
   );
 }

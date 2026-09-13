@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import ConfirmModal from "../components/ConfirmModal.jsx";
 
 export default function Saved() {
   const [accounts, setAccounts] = useState([]);
@@ -17,6 +18,7 @@ export default function Saved() {
   const [globalBusy, setGlobalBusy] = useState(null);
   const [msg, setMsg] = useState("");
   const [toast, setToast] = useState(null);
+  const [confirmDeleteIdx, setConfirmDeleteIdx] = useState(null);
   const toastTimer = useRef(null);
   const showToast = (t) => {
     setToast(t);
@@ -182,7 +184,13 @@ export default function Saved() {
     load();
     setTimeout(() => setMsg(""), 3000);
   };
-  const onRemoveList = async (idx) => {
+  const onRemoveList = (idx) => {
+    setConfirmDeleteIdx(idx);
+  };
+  const handleConfirmDelete = async () => {
+    const idx = confirmDeleteIdx;
+    setConfirmDeleteIdx(null);
+    if (idx == null || idx < 0 || idx >= lists.length) return;
     const next = lists.filter((_, i) => i !== idx);
     const cfg = await fetch("/sync-config").then((x) => x.json());
     await fetch("/sync-config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ accounts: cfg.config?.accounts || [], savedLists: next }) });
@@ -399,6 +407,15 @@ export default function Saved() {
           {toast}
         </div>
       )}
+      <ConfirmModal
+        open={confirmDeleteIdx !== null}
+        title="Delete collection"
+        message={confirmDeleteIdx !== null && lists[confirmDeleteIdx] ? `Delete collection "${lists[confirmDeleteIdx].url}"${lists[confirmDeleteIdx].folder ? ` (folder: ${lists[confirmDeleteIdx].folder})` : ""}? This cannot be undone.` : "Delete this collection?"}
+        confirmLabel="Delete"
+        danger
+        onCancel={() => setConfirmDeleteIdx(null)}
+        onConfirm={handleConfirmDelete}
+      />
     </div>
   );
 }

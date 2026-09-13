@@ -221,6 +221,10 @@ export default function Media() {
   })();
   const viewable = filtered.filter((it) => !it.dir);
   const isEmptyForList = filtered.length === 0 && (!folder ? playlists.length === 0 : true);
+  // Playlists as selectable items for keyboard nav (root only, not in playlist view) — shown first like folders
+  const playlistsAsItems = !folder && !inPlaylistView ? playlists.map((pl) => ({ _isPlaylist: true, _pl: pl, name: pl.name, dir: false, plKey: `playlist:${pl.id}` })) : [];
+  const allSelectable = [...playlistsAsItems, ...filtered];
+  const selectableKey = (it) => (it && it._isPlaylist ? it.plKey : rowKey(it));
   const pendingSelectRef = useRef(null); // key to restore after the next load (go-up, delete)
   const freshLoadRef = useRef(false); // next committed items scroll once to the selection
   const keyboardScrollRef = useRef(false); // next selection commit scrolls (arrow-key nav)
@@ -247,16 +251,22 @@ export default function Media() {
       setThumbLoaded({});
       setGifVideo({});
       // Key-based restore: explicit pending key wins, then keep ?s if still present,
-      // else select the first item (empty folder = no selection).
+      // else select the first item (playlists first when in root, per user request).
       const keyOf = (it) => (isFlat ? it.rel || it.name : it.name);
-      const keys = new Set(fresh.map(keyOf));
+      const allKeys = new Set(fresh.map(keyOf));
+      const isRootForSelect = !f && !activePlId;
+      if (isRootForSelect) {
+        for (const pl of playlists) allKeys.add(`playlist:${pl.id}`);
+      }
       const curSel = selKey;
-      if (pending && keys.has(pending)) {
+      if (pending && allKeys.has(pending)) {
         if (pending !== curSel) setParam("sel", pending);
-      } else if (curSel && keys.has(curSel)) {
+      } else if (curSel && allKeys.has(curSel)) {
         // keep — selection survives reload/refresh
-      } else if (fresh.length) {
-        setParam("sel", keyOf(fresh[0]));
+      } else if (allKeys.size) {
+        if (isRootForSelect && playlists.length) setParam("sel", `playlist:${playlists[0].id}`);
+        else if (fresh.length) setParam("sel", keyOf(fresh[0]));
+        else if (curSel) setParam("sel", "");
       } else if (curSel) {
         setParam("sel", "");
       }
@@ -312,8 +322,8 @@ export default function Media() {
     if (searchParams.get("open")) setParam("open", "");
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Derived selection: index follows the ?s key (single select, no index state).
-  const selectedIdx = selKey ? filtered.findIndex((it) => rowKey(it) === selKey) : -1;
+  // Derived selection: index follows the ?s key (single select, now includes playlists when in root)
+  const selectedIdx = selKey ? allSelectable.findIndex((it) => selectableKey(it) === selKey) : -1;
   // Key-based viewer: index follows the viewed key across reloads/deletes.
   const viewerIdx = viewerKey ? viewable.findIndex((v) => rowKey(v) === viewerKey) : null;
   const viewerOpen = viewerKey != null;
@@ -362,11 +372,11 @@ export default function Media() {
   useEffect(() => {
     if (viewerOpen) return;
     const moveSelection = (delta) => {
-      if (!filtered.length) return;
+      if (!allSelectable.length) return;
       const base = selectedIdx !== -1 ? selectedIdx : (delta > 0 ? -1 : 0);
-      const next = Math.min(filtered.length - 1, Math.max(0, base + delta));
+      const next = Math.min(allSelectable.length - 1, Math.max(0, base + delta));
       keyboardScrollRef.current = true;
-      setSelectedKey(rowKey(filtered[next]));
+      setSelectedKey(selectableKey(allSelectable[next]));
     };
     const onKey = (e) => {
       if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable) return;
@@ -392,16 +402,20 @@ export default function Media() {
       else if (isUp) { e.preventDefault(); moveSelection(-1); }
       else if (isDown) { e.preventDefault(); moveSelection(1); }
       else if (isRight || isEnter) {
-        if (!filtered.length || selectedIdx === -1) return;
+        if (!allSelectable.length || selectedIdx === -1) return;
         e.preventDefault();
-        const it = filtered[selectedIdx];
-        if (it) { if (it.dir) goFolder(it.name); else openViewer(it); }
+        const it = allSelectable[selectedIdx];
+        if (it) {
+          if (it._isPlaylist) openPlaylist(it._pl.id);
+          else if (it.dir) goFolder(it.name);
+          else openViewer(it);
+        }
       }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewerOpen, filtered, selectedIdx, searchParams, showHelp]);
+  }, [viewerOpen, allSelectable, selectedIdx, searchParams, showHelp]);
 
   const goFolder = (name) => {
     const ns = new URLSearchParams(searchParams);
@@ -428,9 +442,14 @@ export default function Media() {
     ns.delete("folder");
     setSearchParams(ns);
   };
-  const delFile = async (it) => {
+  const delFile = (it) => {
+    setDeleteTarget(it);
+  };
+  const confirmDeleteFile = async () => {
+    const it = deleteTarget;
+    if (!it) return;
+    setDeleteTarget(null);
     const key = rowKey(it);
-    if (!confirm(`Delete "${displayName(it)}"? This removes the file from /media.`)) return;
     const isPlItem = !!it._isPlaylistItem;
     const slash = key.lastIndexOf("/");
     let parent, base;
@@ -443,7 +462,7 @@ export default function Media() {
     }
     const r = await fetch(`/api/media?folder=${encodeURIComponent(parent)}&name=${encodeURIComponent(base)}`, { method: "DELETE" });
     const j = await r.json().catch(() => ({}));
-    if (!r.ok) { alert(j.error || "delete failed"); return; }
+    if (!r.ok) { setAlertState({ open: true, title: "Delete failed", message: j.error || "delete failed" }); return; }
     // Keep selection on the neighbour (next ?? prev) instead of jumping to the top.
     const fi = filtered.findIndex((x) => rowKey(x) === key);
     if (fi !== -1) {
@@ -522,8 +541,8 @@ export default function Media() {
   // item, not a tall preview box — folders have no thumbnails.
   const FOLDER_CHIP_W = 220;
   const FOLDER_CHIP_H = 56;
-  const renderFolderChip = (it, fi) => {
-    const selected = fi === selectedIdx;
+  const renderFolderChip = (it) => {
+    const selected = selKey === rowKey(it);
     return (
       <div
         key={isFlat ? it.rel || it.name : it.name}
@@ -577,7 +596,7 @@ export default function Media() {
     // A thumbnail URL that 404s (no poster sibling, no embedded cover art)
     // falls back to the icon placeholder instead of a blank black tile.
     const src = imgErr[rk] ? null : thrumb(it);
-    const selected = fi === selectedIdx;
+    const selected = selKey === rk;
     const isDir = !!it.dir;
     // `.gif` files that are actually MP4 bytes (mislabeled at download time,
     // e.g. reddit saves) fail in <img> — the server sniffs them as video/mp4.
@@ -840,7 +859,7 @@ export default function Media() {
                     {playlistErr && <div style={{ color: "#ef4444", fontSize: 11, marginBottom: 6 }}>{playlistErr}</div>}
                     <div style={{ display: "flex", flexWrap: "wrap", gap: GRID_GAP }}>
                       {!folder && playlists.map((pl) => renderPlaylistChip(pl))}
-                      {dirRows.map((row) => renderFolderChip(row.it, row.i))}
+                      {dirRows.map((row) => renderFolderChip(row.it))}
                     </div>
                   </div>
                 )}
@@ -872,12 +891,13 @@ export default function Media() {
                 </div>
                 {filtered.length === 0 ? <div data-testid="media-empty" className="empty" style={{ padding: 20 }}><i className="bi bi-collection-play" /> Empty playlist — add files from Media</div> : (
                   <div data-testid="media-list-rows">
-                    {filtered.map((it, fi) => {
+                    {filtered.map((it) => {
                       const ky = rowKey(it);
                       const pk = playlistKey(it);
                       const menuOpen = openMenuKey === ky;
+                      const isSel = selKey === ky;
                       return (
-                        <div key={ky} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={fi === selectedIdx} className="mrow" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto auto auto", gap: 10, alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: fi === selectedIdx ? "rgba(99,102,241,0.14)" : "var(--surface)", cursor: "pointer", userSelect: "none" }} onClick={() => tapItem(it)} onDoubleClick={() => openItem(it)} title={displayName(it)}>
+                        <div key={ky} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={isSel} className="mrow" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto auto auto", gap: 10, alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: isSel ? "rgba(99,102,241,0.14)" : "var(--surface)", cursor: "pointer", userSelect: "none" }} onClick={() => tapItem(it)} onDoubleClick={() => openItem(it)} title={displayName(it)}>
                           <div data-testid="media-row-name" style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0 }}>
                             <i className={`bi ${catIcon[fileCategory(it.name)]}`} style={{ color: "var(--accent)" }} />
                             <button data-testid="media-row-open-file" onClick={(e) => { e.stopPropagation(); tapItem(it); }} onDoubleClick={(e) => { e.stopPropagation(); openItem(it); }} style={{ background: "none", border: 0, color: "var(--text)", fontWeight: 500, textAlign: "left", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", padding: 0, minWidth: 0, maxWidth: "100%" }}>{displayName(it)}</button>
@@ -936,12 +956,13 @@ export default function Media() {
                       </div>
                     );
                   })}
-                  {filtered.map((it, fi) => {
+                  {filtered.map((it) => {
                     const ky = rowKey(it);
                     const pk = !it.dir ? playlistKey(it) : null;
                     const menuOpen = openMenuKey === ky;
+                    const isSel = selKey === ky;
                     return (
-                      <div key={isFlat ? it.rel || it.name : it.name} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={fi === selectedIdx} className="mrow" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto auto auto", gap: 10, alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: fi === selectedIdx ? "rgba(99,102,241,0.14)" : it.dir ? "var(--surface-2)" : "var(--surface)", cursor: "pointer", userSelect: "none" }} onClick={() => tapItem(it)} onDoubleClick={() => openItem(it)} title="Click to select, double-click to open">
+                      <div key={isFlat ? it.rel || it.name : it.name} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={isSel} className="mrow" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto auto auto", gap: 10, alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: isSel ? "rgba(99,102,241,0.14)" : it.dir ? "var(--surface-2)" : "var(--surface)", cursor: "pointer", userSelect: "none" }} onClick={() => tapItem(it)} onDoubleClick={() => openItem(it)} title="Click to select, double-click to open">
                         <div data-testid="media-row-name" style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0 }}>
                           <i className={`bi ${it.dir ? "bi-folder-fill" : catIcon[fileCategory(it.name)]}`} style={{ color: it.dir ? "#f59e0b" : "var(--accent)" }} />
                           {it.dir ? (
@@ -1037,6 +1058,15 @@ export default function Media() {
         }}
       />
       <AlertModal open={alertState.open} title={alertState.title} message={alertState.message} onClose={() => setAlertState({ open: false, title: "", message: "" })} />
+      <ConfirmModal
+        open={!!deleteTarget}
+        title="Delete file"
+        message={deleteTarget ? `Delete "${displayName(deleteTarget)}"? This removes the file from /media.` : ""}
+        confirmLabel="Delete"
+        danger
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={confirmDeleteFile}
+      />
       </div>
     </div>
   );
