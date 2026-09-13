@@ -8,6 +8,13 @@ export default function PlaylistHoverMenu({ mediaKey, placement = "right", onCre
   const [err, setErr] = useState("");
   const [toggling, setToggling] = useState(null);
 
+  // Extras = lists without a letter hotkey (shared first letter beyond the
+  // first, or non-letter names), numbered 1-9 in list order for hold-F.
+  const extraIds = playlists.filter((p, i) => {
+    const ch = String(p.name || "").trim().charAt(0).toLowerCase();
+    return !(/^[a-z]$/.test(ch) && playlists.findIndex((q) => String(q.name || "").trim().charAt(0).toLowerCase() === ch) === i);
+  }).map((p) => p.id);
+
   const handleToggle = async (pl) => {
     if (!mediaKey) return;
     setToggling(pl.id);
@@ -66,7 +73,13 @@ export default function PlaylistHoverMenu({ mediaKey, placement = "right", onCre
         ) : (
           playlists.map((pl, idx) => {
             const member = isMember(pl);
-            const num = showIndex && idx < 9 ? idx + 1 : null;
+            // Hold-F hotkey badge: first list with a given first letter shows
+            // the letter; extras show their 1-9 extra number.
+            const firstCh = String(pl.name || "").trim().charAt(0).toLowerCase();
+            const hasLetter = /^[a-z]$/.test(firstCh)
+              && playlists.findIndex((p) => String(p.name || "").trim().charAt(0).toLowerCase() === firstCh) === idx;
+            const extraNum = extraIds.indexOf(pl.id); // 0-based among extras
+            const hk = showIndex ? (hasLetter ? firstCh.toUpperCase() : extraNum !== -1 && extraNum < 9 ? String(extraNum + 1) : null) : null;
             return (
               <button
                 key={pl.id}
@@ -88,12 +101,12 @@ export default function PlaylistHoverMenu({ mediaKey, placement = "right", onCre
                   width: "100%",
                 }}
               >
-                {num != null ? (
-                  <span style={{ fontFamily: "var(--mono)", fontSize: 10, fontWeight: 700, color: "var(--muted)", border: "1px solid var(--border)", borderRadius: 4, padding: "0 4px", flex: "0 0 auto", lineHeight: 1.5 }}>{num}</span>
+                {hk != null ? (
+                  <span style={{ fontFamily: "var(--mono)", fontSize: 10, fontWeight: 700, color: "var(--muted)", border: "1px solid var(--border)", borderRadius: 4, padding: "0 4px", flex: "0 0 auto", lineHeight: 1.5 }}>{hk}</span>
                 ) : (
                   <i className={`bi ${member ? "bi-check-circle-fill" : "bi-circle"}`} style={{ color: member ? "#6366f1" : "var(--muted)", fontSize: 12, flex: "0 0 auto" }} />
                 )}
-                {num != null && <i className={`bi ${member ? "bi-check-circle-fill" : "bi-circle"}`} style={{ color: member ? "#6366f1" : "var(--muted)", fontSize: 12, flex: "0 0 auto" }} />}
+                {hk != null && <i className={`bi ${member ? "bi-check-circle-fill" : "bi-circle"}`} style={{ color: member ? "#6366f1" : "var(--muted)", fontSize: 12, flex: "0 0 auto" }} />}
                 <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: member ? 600 : 500, fontSize: 12 }} title={pl.name}>
                   {pl.name}
                 </span>

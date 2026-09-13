@@ -16,7 +16,8 @@ const LIBRARY_SECTIONS = [
   ] },
   { heading: "Saved lists", rows: [
     { keys: ["hold F"], desc: "Keep save popup open for selected file" },
-    { keys: ["1–9"], desc: "While holding F: add / remove file in saved list 1–9" },
+    { keys: ["A–Z"], desc: "While holding F: add / remove file in the first list starting with that letter" },
+    { keys: ["1–9"], desc: "While holding F: add / remove extra list by number (lists sharing a first letter)" },
   ] },
   { heading: "Danger", rows: [
     { keys: ["y", "y"], desc: "Delete selected file (press twice to confirm)" },
@@ -45,7 +46,8 @@ const VIEWER_SECTIONS = [
   ] },
   { heading: "Saved & delete", rows: [
     { keys: ["hold F"], desc: "Keep save popup open for this file" },
-    { keys: ["1–9"], desc: "While holding F: add / remove file in saved list 1–9" },
+    { keys: ["A–Z"], desc: "While holding F: add / remove file in the first list starting with that letter" },
+    { keys: ["1–9"], desc: "While holding F: add / remove extra list by number (lists sharing a first letter)" },
     { keys: ["y", "y"], desc: "Delete file (press twice to confirm)" },
   ] },
   { heading: "Leave", rows: [

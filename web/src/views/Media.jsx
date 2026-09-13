@@ -574,7 +574,8 @@ export default function Media() {
   }, [viewerOpen, allSelectable, selectedIdx, searchParams, showHelp, confirmState.open, promptState.open, alertState.open, deleteTarget]);
 
   // Hold-F: while F is held, keep the save popup open for the selected file;
-  // 1-9 toggles playlists 1-9. Release F closes. Grid + list, viewer closed.
+  // letter toggles the first matching list, 1-9 toggles extras by number.
+  // Release F closes. Grid + list, viewer closed.
   useEffect(() => {
     const isEditable = (t) => t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
     const selectedFile = () => {
@@ -598,15 +599,35 @@ export default function Media() {
         return;
       }
       if (fHeldRef.current && /^[1-9]$/.test(k)) {
-        const idx = parseInt(k, 10) - 1;
-        if (idx < playlists.length) {
+        // Digits toggle extras (lists without a letter hotkey: shared first
+        // letter beyond the first, or non-letter names), numbered 1-9.
+        const extras = playlists.filter((p, i) => {
+          const ch = String(p.name || "").trim().charAt(0).toLowerCase();
+          return !(/^[a-z]$/.test(ch) && playlists.findIndex((q) => String(q.name || "").trim().charAt(0).toLowerCase() === ch) === i);
+        });
+        const hit = extras[parseInt(k, 10) - 1];
+        if (hit) {
           const it = selectedFile();
           if (!it) return;
           e.preventDefault();
           e.stopPropagation();
-          const mediaKey = playlistKey(it);
-          togglePlaylistItem(playlists[idx].id, mediaKey).catch(() => {});
+          togglePlaylistItem(hit.id, playlistKey(it)).catch(() => {});
         }
+        return;
+      }
+      if (fHeldRef.current && /^[a-zA-Z]$/.test(k)) {
+        // Letter hotkey: toggles the first list starting with that letter
+        // (F+O → "orange"). Later lists sharing the letter use 1-9.
+        const hit = playlists.find((p) => String(p.name || "").trim().charAt(0).toLowerCase() === k.toLowerCase());
+        if (hit) {
+          e.preventDefault();
+          e.stopPropagation();
+          const it = selectedFile();
+          if (!it) return;
+          togglePlaylistItem(hit.id, playlistKey(it)).catch(() => {});
+          return;
+        }
+        // No list starts with this letter — fall through to normal navigation.
       }
     };
     const onKeyUp = (e) => {
@@ -895,7 +916,7 @@ export default function Media() {
         onClick={() => tapItem(it)}
         onDoubleClick={() => openItem(it)}
         title={`${displayName(it)} — click to select, double-click to open`}
-        style={{ position: "relative", flex: isDir ? "0 0 auto" : "0 0 auto", width: w, height: h, overflow: menuOpen ? "visible" : "hidden", zIndex: menuOpen ? 60 : "auto", borderRadius: 0, background: isDir ? "var(--surface-2)" : "var(--surface-2)", outline: selected ? "4px solid var(--accent)" : "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, contentVisibility: "auto", containIntrinsicSize: `${w}px ${h}px` }}
+        style={{ position: "relative", flex: isDir ? "0 0 auto" : "0 0 auto", width: w, height: h, overflow: menuOpen ? "visible" : "hidden", zIndex: menuOpen ? 60 : "auto", borderRadius: 0, background: isDir ? "var(--surface-2)" : "var(--surface-2)", outline: selected ? "4px solid var(--accent)" : "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, contentVisibility: menuOpen ? "visible" : "auto", containIntrinsicSize: `${w}px ${h}px` }}
       >
         {src ? (
           <span style={{ position: "relative", width: "100%", height: "100%", flex: 1, display: "block", background: "#000", minHeight: 0 }}>

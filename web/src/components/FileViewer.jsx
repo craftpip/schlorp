@@ -41,6 +41,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const effTitle = title || deriveTitleLocal(effUrl, effFilePath);
   const filePathEff = effFilePath;
   const videoRef = useRef(null);
+  const imgRef = useRef(null);
   const containerRef = useRef(null);
   const viewerRef = useRef(null);
   const [rate, setRate] = useState(() => { try { const v = parseFloat(localStorage.getItem("xdl_viewer_rate")); if (!Number.isNaN(v) && v >= 0.1 && v <= 1) return v; } catch {} return 1; });
@@ -127,6 +128,14 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   useEffect(() => { try { localStorage.setItem("xdl_viewer_seekFrames", seekFrames ? "1" : "0"); } catch {} }, [seekFrames]);
   useEffect(() => { try { localStorage.setItem("xdl_viewer_endMode", endMode); } catch {} }, [endMode]);
   useEffect(() => { setZoom(1); setOrigin("50% 50%"); setPan({x:0,y:0}); setCurrent(0); setDuration(0); setGifAsVideo(false); setMediaReady(false); setYConfirm(false); lastYRef.current = 0; if (yConfirmTimerRef.current) { clearTimeout(yConfirmTimerRef.current); yConfirmTimerRef.current = null; } setTimeout(() => videoRef.current?.focus(), 50); }, [loadedUrl]);
+  // The loading gate above unmounts the <img> while debouncing, then remounts
+  // it — grid thumbnails are the full photo bytes, so the remount is usually
+  // cache-complete before insertion and onLoad never fires. Detect that so a
+  // navigated-to photo never sticks at opacity 0 behind the spinner.
+  useEffect(() => {
+    const el = imgRef.current;
+    if (el && el.complete && el.naturalWidth > 0) setMediaReady(true);
+  }, [loadedUrl]);
   useEffect(() => () => { if (yConfirmTimerRef.current) clearTimeout(yConfirmTimerRef.current); if (playlistCloseTimer.current) clearTimeout(playlistCloseTimer.current); }, []);
   const navigatingViaRandomRef = useRef(false);
   useEffect(() => {
@@ -497,7 +506,8 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     document.body.style.overflow = "hidden";
     return () => { document.removeEventListener("keydown", onKey); document.body.style.overflow = prev; };
   }, [onClose, hasPrev, hasNext, onPrev, onNext, showImage, duration, seekFrames, rate, showHelp]);
-  // Hold-F: keep the save popup open while F is held; 1-9 toggles lists.
+  // Hold-F: keep the save popup open while F is held; letter toggles the
+  // first matching list, 1-9 toggles extras by number.
   // The F fullscreen keybind is disabled (button still available).
   useEffect(() => {
     const isEditable = (t) => t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
@@ -514,12 +524,31 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
         return;
       }
       if (fHeldRef.current && /^[1-9]$/.test(k)) {
-        const idx = parseInt(k, 10) - 1;
-        if (idx < fvPlaylists.length && filePathEff) {
+        // Digits toggle extras (lists without a letter hotkey: shared first
+        // letter beyond the first, or non-letter names), numbered 1-9.
+        const extras = fvPlaylists.filter((p, i) => {
+          const ch = String(p.name || "").trim().charAt(0).toLowerCase();
+          return !(/^[a-z]$/.test(ch) && fvPlaylists.findIndex((q) => String(q.name || "").trim().charAt(0).toLowerCase() === ch) === i);
+        });
+        const hit = extras[parseInt(k, 10) - 1];
+        if (hit && filePathEff) {
           e.preventDefault();
           e.stopPropagation();
-          fvToggleItem(fvPlaylists[idx].id, filePathEff).catch(() => {});
+          fvToggleItem(hit.id, filePathEff).catch(() => {});
         }
+        return;
+      }
+      if (fHeldRef.current && /^[a-zA-Z]$/.test(k)) {
+        // Letter hotkey: toggles the first list starting with that letter
+        // (F+O → "orange"). Later lists sharing the letter use 1-9.
+        const hit = fvPlaylists.find((p) => String(p.name || "").trim().charAt(0).toLowerCase() === k.toLowerCase());
+        if (hit) {
+          e.preventDefault();
+          e.stopPropagation();
+          if (filePathEff) fvToggleItem(hit.id, filePathEff).catch(() => {});
+          return;
+        }
+        // No list starts with this letter — fall through to normal keys.
       }
     };
     const onKeyUp = (e) => {
@@ -707,7 +736,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   .fv-header{ flex-wrap: nowrap !important; padding: 6px 8px !important; }
   .fv-header > div:nth-child(2){ display: none !important; }
 }`}</style>
-        <div ref={containerRef} onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp} onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd} title={zoom>1 ? "Drag to pan · scroll to zoom" : "Scroll to zoom · drag to pan when zoomed · swipe up/down prev/next, left/right seek"} style={{ position: "relative", flex: "1 1 auto", minHeight: 0, overflow: "hidden", background: "#080a14", display: "flex", alignItems: "center", justifyContent: "center", padding: showImage ? 16 : 0, cursor: "default", touchAction: "none" }}>
+        <div ref={containerRef} onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp} onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd} title={zoom>1 ? "Drag to pan · scroll to zoom" : "Scroll to zoom · drag to pan when zoomed · swipe up/down prev/next, left/right seek"} style={{ position: "relative", flex: "1 1 auto", minHeight: 0, overflow: "hidden", background: "#080a14", display: "flex", alignItems: "center", justifyContent: "center", padding: 0, cursor: "default", touchAction: "none" }}>
           {zoom>1 && <span style={{ position: "absolute", top: 10, right: 10, zIndex: 3, background: "rgba(0,0,0,.6)", color: "#fff", padding: "4px 8px", borderRadius: 6, fontSize: 11, fontFamily: "var(--mono)" }}>{Math.round(zoom*100)}%</span>}
           {(loading || (!mediaReady && isFormatKnown)) && (
             <span data-testid="viewer-loading" style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", pointerEvents: "none", zIndex: 2 }}>
@@ -715,7 +744,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
             </span>
           )}
           {loading ? null : showImage ? (
-            <img src={loadedUrl} alt={titleEff} onContextMenu={(e) => e.preventDefault()} draggable={false} onLoad={() => setMediaReady(true)} onError={isGif ? () => setGifAsVideo(true) : () => setMediaReady(true)} style={{ width: "100%", height: "100%", objectFit: "contain", background: "#000", borderRadius: 0, opacity: mediaReady ? 1 : 0, transition: zoom===1 ? "opacity .45s ease, transform 0.15s" : "opacity .45s ease", transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: origin, WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none" }} />
+            <img key={loadedUrl} ref={imgRef} src={loadedUrl} alt={titleEff} onContextMenu={(e) => e.preventDefault()} draggable={false} onLoad={() => setMediaReady(true)} onError={isGif ? () => setGifAsVideo(true) : () => setMediaReady(true)} style={{ width: "100%", height: "100%", objectFit: "contain", background: "#000", borderRadius: 0, opacity: mediaReady ? 1 : 0, transition: zoom===1 ? "opacity .45s ease, transform 0.15s" : "opacity .45s ease", transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: origin, WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none" }} />
           ) : gifAsVideoEff ? (
             <video
               key={loadedUrl}
