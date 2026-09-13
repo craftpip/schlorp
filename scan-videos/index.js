@@ -1157,6 +1157,9 @@ async function run(options = {}) {
         let lastError = null;
         let selectedCandidate = "";
         let selectedAssetId = "";
+        let hasMultipleInstagramVideos = false;
+        let instagramVideoGroups = [];
+        const instagramVideoResults = [];
 
         const primaryCandidates = isInstagramTarget
           ? prioritizeInstagramCandidates(
@@ -1195,21 +1198,52 @@ async function run(options = {}) {
             assetStats.set(assetId, current);
           }
 
-          let preferredAssetId = "";
-          let preferredAssetScore = -Infinity;
-          for (const [assetId, stat] of assetStats.entries()) {
-            const score = stat.bestVideo + (stat.hasAudio ? 10_000_000 : 0);
-            if (score > preferredAssetScore) {
-              preferredAssetScore = score;
-              preferredAssetId = assetId;
+          const distinctVideoAssetCount = assetStats.size;
+          if (distinctVideoAssetCount > 1) {
+            hasMultipleInstagramVideos = true;
+            const groupsMap = new Map();
+            for (const url of primaryCandidates) {
+              const assetId = getInstagramAssetId(url);
+              if (!assetId) continue;
+              if (!groupsMap.has(assetId)) groupsMap.set(assetId, []);
+              groupsMap.get(assetId).push(url);
+            }
+            // also handle any primary candidates without assetId as fallback groups (rare)
+            const noAssetUrls = primaryCandidates.filter((u) => !getInstagramAssetId(u));
+            if (noAssetUrls.length && groupsMap.size === 0) {
+              // single video with no assetId — keep single-video path
+              hasMultipleInstagramVideos = false;
+            } else {
+              for (const [assetId, urls] of groupsMap.entries()) {
+                const sorted = [...urls].sort((a, b) => scoreDownloadCandidate(b) - scoreDownloadCandidate(a));
+                instagramVideoGroups.push({ assetId, urls: sorted });
+              }
+              const orderIndex = new Map();
+              primaryCandidates.forEach((url, idx) => {
+                const aid = getInstagramAssetId(url);
+                if (aid && !orderIndex.has(aid)) orderIndex.set(aid, idx);
+              });
+              instagramVideoGroups.sort((a, b) => (orderIndex.get(a.assetId) ?? 0) - (orderIndex.get(b.assetId) ?? 0));
             }
           }
 
-          if (preferredAssetId) {
-            const preferredVideos = primaryCandidates.filter(
-              (u) => getInstagramAssetId(u) === preferredAssetId
-            );
-            if (preferredVideos.length) candidatesToTry = preferredVideos;
+          if (!hasMultipleInstagramVideos) {
+            let preferredAssetId = "";
+            let preferredAssetScore = -Infinity;
+            for (const [assetId, stat] of assetStats.entries()) {
+              const score = stat.bestVideo + (stat.hasAudio ? 10_000_000 : 0);
+              if (score > preferredAssetScore) {
+                preferredAssetScore = score;
+                preferredAssetId = assetId;
+              }
+            }
+
+            if (preferredAssetId) {
+              const preferredVideos = primaryCandidates.filter(
+                (u) => getInstagramAssetId(u) === preferredAssetId
+              );
+              if (preferredVideos.length) candidatesToTry = preferredVideos;
+            }
           }
         }
 
@@ -1225,8 +1259,91 @@ async function run(options = {}) {
         ) {
           log("Instagram photo post — skipping unscoped video candidates.");
           candidatesToTry = [];
+          hasMultipleInstagramVideos = false;
+          instagramVideoGroups = [];
         }
-        if (candidatesToTry.length) {
+        if (isInstagramTarget && hasMultipleInstagramVideos && instagramVideoGroups.length) {
+          log(`Instagram carousel: ${instagramVideoGroups.length} video(s) detected for ${filePrefix}`);
+          const audioCandidatesAll = qualityCappedUrls.filter((u) => isInstagramAudioOnlyUrl(u));
+          for (let gi = 0; gi < instagramVideoGroups.length; gi += 1) {
+            const group = instagramVideoGroups[gi];
+            const numberedPrefix = `${filePrefix}-${String(gi + 1).padStart(3, "0")}`;
+            let groupResult = null;
+            let groupSelected = "";
+            const matchingAudioCandidates = audioCandidatesAll.filter((u) => getInstagramAssetId(u) === group.assetId);
+            for (const candidate of group.urls) {
+              try {
+                const headers = await buildDownloadHeaders(candidate);
+                try {
+                  groupResult = await downloadMedia(
+                    candidate,
+                    outputDir,
+                    headers,
+                    numberedPrefix,
+                    {
+                      includeTimestamp: false,
+                      onProgress: (p) => onProgress({ ...p, stage: p.stage || "downloading", candidate }),
+                    }
+                  );
+                } catch (err) {
+                  if (isInstagramTarget && isInstagram429Error(err)) {
+                    log(`Instagram media request hit 429 for candidate ${candidate}.`);
+                    await waitForInstagram429Cooldown(log, instagram429CooldownMs);
+                    throw createInstagram429CooldownError("Instagram responded with 429. Suspending this run; retry later.");
+                  }
+                  throw err;
+                }
+                groupSelected = candidate;
+                break;
+              } catch (err) {
+                lastError = err;
+              }
+            }
+            if (groupResult) {
+              const primaryLooksVideo = groupSelected && !isInstagramAudioOnlyUrl(groupSelected);
+              if (primaryLooksVideo && matchingAudioCandidates.length && !(await mediaHasAudio(groupResult.filePath))) {
+                if (await hasFfmpeg()) {
+                  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ig-audio-"));
+                  let audioResult = null;
+                  for (const candidate of matchingAudioCandidates) {
+                    try {
+                      const headers = await buildDownloadHeaders(candidate);
+                      audioResult = await downloadMedia(candidate, tempDir, headers, "audio");
+                      break;
+                    } catch (err) {
+                      if (isInstagram429Error(err)) {
+                        log("Instagram media request hit 429 while fetching companion audio.");
+                        await waitForInstagram429Cooldown(log, instagram429CooldownMs);
+                        throw createInstagram429CooldownError("Instagram responded with 429. Suspending this run; retry later.");
+                      }
+                    }
+                  }
+                  if (audioResult) {
+                    const mergedPath = `${groupResult.filePath}.merged.mp4`;
+                    try {
+                      await muxVideoAndAudio(groupResult.filePath, audioResult.filePath, mergedPath);
+                      await fs.rename(mergedPath, groupResult.filePath);
+                    } finally {
+                      await fs.rm(audioResult.filePath, { force: true }).catch(() => {});
+                      await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+                    }
+                  }
+                } else {
+                  log("\nffmpeg not found; downloaded video-only stream.");
+                }
+              }
+              instagramVideoResults.push({ result: groupResult, candidate: groupSelected, assetId: group.assetId });
+              downloadedFiles.push(groupResult);
+              log(`\nDownloaded media to: ${groupResult.filePath}`);
+              log(`Source URL: ${groupResult.url}`);
+              result = groupResult;
+              selectedCandidate = groupSelected;
+              selectedAssetId = group.assetId;
+            } else {
+              log(`Video ${gi + 1}/${instagramVideoGroups.length} failed: ${lastError ? lastError.message : "unknown"}`);
+            }
+          }
+        } else if (candidatesToTry.length) {
           for (const candidate of candidatesToTry) {
             try {
               const headers = await buildDownloadHeaders(candidate);
@@ -1344,7 +1461,7 @@ async function run(options = {}) {
           );
         }
 
-        if (isInstagramTarget) {
+        if (isInstagramTarget && !hasMultipleInstagramVideos) {
           const audioCandidates = qualityCappedUrls.filter((u) => isInstagramAudioOnlyUrl(u));
           const primaryLooksVideo = selectedCandidate && !isInstagramAudioOnlyUrl(selectedCandidate);
           const matchingAudioCandidates = selectedAssetId
@@ -1396,7 +1513,12 @@ async function run(options = {}) {
         const resultWasPhotoLogged = Boolean(
           photoResults.length && result && photoResults.some((pr) => pr.filePath === result.filePath)
         );
-        if ((isRedditTarget || isInstagramTarget) && photoResults.length && result && !resultWasPhotoLogged) {
+        const alreadyLoggedMultiVideo = Boolean(isInstagramTarget && hasMultipleInstagramVideos && instagramVideoResults.length);
+        if (alreadyLoggedMultiVideo && photoResults.length) {
+          log(`Downloaded ${instagramVideoResults.length} video(s) + ${photoResults.length} photo(s) for ${targetUrl} as ${filePrefix}-001...`);
+        } else if (alreadyLoggedMultiVideo) {
+          log(`Downloaded ${instagramVideoResults.length} video(s) for ${targetUrl} as ${filePrefix}-001...`);
+        } else if ((isRedditTarget || isInstagramTarget) && photoResults.length && result && !resultWasPhotoLogged) {
           // video + photos: video result not logged yet
           log(`\nDownloaded media to: ${result.filePath}`);
           log(`Source URL: ${result.url}`);

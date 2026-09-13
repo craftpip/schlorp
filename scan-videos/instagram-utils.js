@@ -34,7 +34,7 @@ function isReservedInstagramName(value) {
 function extractInstagramShortcode(url) {
   try {
     const u = new URL(url);
-    const match = u.pathname.match(/^\/(?:reel|p|tv)\/([^/?#]+)\/?/i);
+    const match = u.pathname.match(/^(?:\/[^/]+)?\/(?:p|reel|tv)\/([^/?#]+)\/?/i);
     return match ? match[1] : "";
   } catch {
     return "";

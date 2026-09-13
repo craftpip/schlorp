@@ -311,6 +311,9 @@
         overflow:hidden;
       }
       .card-body{padding:20px}
+      .media-lib-card{overflow:visible}
+      .media-lib-card .card-body{overflow:visible}
+      .media-row-playlist-btn{margin-left:-6px}
       .card-title{
         font-size:13px;
         font-weight:700;
@@ -632,8 +635,8 @@
         .media-toolbar{gap:6px !important}
         .media-filter{flex:1 1 100% !important;max-width:none !important}
         .media-sticky{margin-left:0 !important;margin-right:0 !important}
-        /* Media list: Name + Actions only, Size/Time hidden */
-        .mrow{grid-template-columns:minmax(0,1fr) auto !important;gap:8px !important}
+        /* Media list: Name + bookmark + Actions, Size/Time hidden */
+        .media-lib-card .card-body{gap:0 8px !important}
         .mrow .mcol-size,.mrow .mcol-time{display:none !important}
         /* Media grid tiles: folder chips go full-width, no overflow */
         .media-grid-tiles [data-testid="media-tile-folder"]{width:100% !important}

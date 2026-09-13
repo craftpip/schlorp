@@ -176,6 +176,11 @@ export default function Media() {
     if (it && it._isPlaylistItem) return rowKey(it);
     return playlistKeyForMedia(folder, rowKey(it));
   };
+  const bookmarkedKeys = useMemo(() => {
+    const s = new Set();
+    for (const pl of playlists) for (const k of pl.items || []) s.add(k);
+    return s;
+  }, [playlists]);
   const playlistItemsForView = (() => {
     if (!activePlId || !playlistDetail || !Array.isArray(playlistDetail.items)) return null;
     return playlistDetail.items.filter((it) => !it.missing).map((it) => {
@@ -379,7 +384,7 @@ export default function Media() {
   }, [selectedIdx]);
 
   useEffect(() => {
-    if (viewerOpen) return;
+    if (viewerOpen || confirmState.open || promptState.open || alertState.open || !!deleteTarget) return;
     const moveSelection = (delta) => {
       if (!allSelectable.length) return;
       const base = selectedIdx !== -1 ? selectedIdx : (delta > 0 ? -1 : 0);
@@ -388,6 +393,7 @@ export default function Media() {
       setSelectedKey(selectableKey(allSelectable[next]));
     };
     const onKey = (e) => {
+      if (confirmState.open || promptState.open || alertState.open || !!deleteTarget) return;
       if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable) return;
       const k = e.key;
       const isUp = k === "ArrowUp" || k === "w" || k === "W";
@@ -424,7 +430,7 @@ export default function Media() {
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewerOpen, allSelectable, selectedIdx, searchParams, showHelp]);
+  }, [viewerOpen, allSelectable, selectedIdx, searchParams, showHelp, confirmState.open, promptState.open, alertState.open, deleteTarget]);
 
   const goFolder = (name) => {
     const ns = new URLSearchParams(searchParams);
@@ -633,6 +639,7 @@ export default function Media() {
     };
     const pk = !isDir ? playlistKey(it) : null;
     const menuOpen = openMenuKey === rk;
+    const isBookmarked = pk ? bookmarkedKeys.has(pk) : false;
     const handleMenuEnter = () => { if (playlistMenuCloseTimer.current) { clearTimeout(playlistMenuCloseTimer.current); playlistMenuCloseTimer.current = null; } setOpenMenuKey(rk); };
     const handleMenuLeave = () => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); playlistMenuCloseTimer.current = setTimeout(() => setOpenMenuKey((cur) => (cur === rk ? null : cur)), 120); };
     const isCoarse = isCoarsePointer();
@@ -641,12 +648,13 @@ export default function Media() {
         key={isFlat ? it.rel || it.name : it.name}
         id={`media-file-${sanitizeKey(rowKey(it))}`}
         data-testid={isDir ? "media-tile-folder" : "media-tile-file"}
+        className={isDir ? "media-tile-folder" : "media-tile-file"}
         data-filename={rowKey(it)}
         data-selected={selected}
         onClick={() => tapItem(it)}
         onDoubleClick={() => openItem(it)}
         title={`${displayName(it)} — click to select, double-click to open`}
-        style={{ position: "relative", flex: isDir ? "0 0 auto" : "0 0 auto", width: w, height: h, overflow: "hidden", borderRadius: 0, background: isDir ? "var(--surface-2)" : "var(--surface-2)", outline: selected ? "2px solid var(--accent)" : "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8 }}
+        style={{ position: "relative", flex: isDir ? "0 0 auto" : "0 0 auto", width: w, height: h, overflow: menuOpen ? "visible" : "hidden", zIndex: menuOpen ? 60 : "auto", borderRadius: 0, background: isDir ? "var(--surface-2)" : "var(--surface-2)", outline: selected ? "2px solid var(--accent)" : "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8 }}
       >
         {src ? (
           <span style={{ position: "relative", width: "100%", height: "100%", flex: 1, display: "block", background: "#000", minHeight: 0 }}>
@@ -675,7 +683,7 @@ export default function Media() {
         {!isDir && (
           <div
             className="media-tile-playlist-btn-wrap"
-            style={{ position: "absolute", top: 6, right: 6, zIndex: 4, opacity: isCoarse || menuOpen ? 1 : 0, transition: "opacity .12s" }}
+            style={{ position: "absolute", top: 6, left: 6, zIndex: 4, opacity: isCoarse || menuOpen || isBookmarked ? 1 : 0, transition: "opacity .12s" }}
             onMouseEnter={handleMenuEnter}
             onMouseLeave={handleMenuLeave}
           >
@@ -683,14 +691,13 @@ export default function Media() {
               data-testid="media-tile-playlist-btn"
               type="button"
               onClick={(e) => { e.stopPropagation(); if (isCoarse) setOpenMenuKey((cur) => (cur === rk ? null : rk)); else setOpenMenuKey(rk); }}
-              title="Add to playlist"
-              style={{ width: 28, height: 28, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: menuOpen ? "rgba(99,102,241,.9)" : "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)", display: "grid", placeItems: "center", cursor: "pointer" }}
+              style={{ width: 28, height: 28, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: menuOpen ? "rgba(99,102,241,.9)" : isBookmarked ? "rgba(99,102,241,.85)" : "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)", display: "grid", placeItems: "center", cursor: "pointer" }}
             >
-              <i className="bi bi-plus-lg" style={{ fontSize: 12 }} />
+              <i className={`bi ${isBookmarked ? "bi-bookmark-fill" : "bi-bookmark"}`} style={{ fontSize: 12 }} />
             </button>
             {menuOpen && pk && (
-              <div style={{ position: "absolute", top: 34, right: 0, zIndex: 90 }} onClick={(e) => e.stopPropagation()}>
-                <PlaylistHoverMenu mediaKey={pk} placement="right" />
+              <div style={{ position: "absolute", top: 34, left: 0, zIndex: 90 }} onClick={(e) => e.stopPropagation()}>
+                <PlaylistHoverMenu mediaKey={pk} placement="left" />
               </div>
             )}
           </div>
@@ -838,7 +845,7 @@ export default function Media() {
         <div data-testid="media-grid-card" className="card media-lib-card">
           <div data-testid="media-grid" ref={gridRef} className="card-body" style={{ padding: GRID_GAP }}>
             {inPlaylistView ? (
-              playlistLoading ? <div data-testid="media-loading" style={{ padding: 20, color: "var(--muted)" }}>Loading playlist…</div> : !playlistDetail ? <div data-testid="media-error" style={{ padding: 20, color: "var(--danger)" }}>Playlist not found</div> : filtered.length === 0 ? <div data-testid="media-empty" className="empty" style={{ padding: 20 }}><i className="bi bi-collection-play" /> Empty playlist — add files from Media</div> : !gridW ? <div data-testid="media-grid-measuring" style={{ padding: 20, color: "var(--muted)" }}>Measuring…</div> : (
+              playlistLoading ? <div data-testid="media-loading" style={{ padding: 20, gridColumn: "1 / -1", color: "var(--muted)" }}>Loading playlist…</div> : !playlistDetail ? <div data-testid="media-error" style={{ padding: 20, gridColumn: "1 / -1", color: "var(--danger)" }}>Playlist not found</div> : filtered.length === 0 ? <div data-testid="media-empty" className="empty" style={{ padding: 20, gridColumn: "1 / -1" }}><i className="bi bi-collection-play" /> Empty playlist — add files from Media</div> : !gridW ? <div data-testid="media-grid-measuring" style={{ padding: 20, color: "var(--muted)" }}>Measuring…</div> : (
                 <div data-testid="media-grid-tiles" className="media-grid-tiles" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
                     <span className="small" style={{ color: "var(--muted)", fontWeight: 700 }}><i className="bi bi-collection-play-fill" style={{ color: "#6366f1", marginRight: 6 }} />{playlistDetail.name} · {playlistDetail.items.length} items</span>
@@ -850,7 +857,7 @@ export default function Media() {
                   </div>
                 </div>
               )
-            ) : loading && items.length === 0 ? <div data-testid="media-loading" style={{ padding: 20, color: "var(--muted)" }}>Loading…</div> : !gridW ? <div data-testid="media-grid-measuring" style={{ padding: 20, color: "var(--muted)" }}>Measuring…</div> : (
+            ) : loading && items.length === 0 ? <div data-testid="media-loading" style={{ padding: 20, gridColumn: "1 / -1", color: "var(--muted)" }}>Loading…</div> : !gridW ? <div data-testid="media-grid-measuring" style={{ padding: 20, color: "var(--muted)" }}>Measuring…</div> : (
               <div data-testid="media-grid-tiles" className="media-grid-tiles" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                 {(dirRows.length > 0 || (!folder && playlists.length > 0)) && (
                   <div data-testid="media-grid-folders">
@@ -866,7 +873,7 @@ export default function Media() {
                 )}
                 {(fileRows.length > 0 || (!playlists.length && dirRows.length === 0 && filtered.length === 0)) && (
                   <div data-testid="media-grid-files" style={{ display: "flex", flexWrap: "wrap", gap: GRID_GAP }}>
-                    {filtered.length === 0 ? (!loading ? <div data-testid="media-empty" className="empty" style={{ padding: 20 }}><i className="bi bi-inbox" /> No files — download something!</div> : null) : fileRows.map((row) => renderTile(row.it, row.i, row.w, row.h))}
+                    {filtered.length === 0 ? (!loading ? <div data-testid="media-empty" className="empty" style={{ padding: 20, gridColumn: "1 / -1", width: "100%", textAlign: "center" }}><i className="bi bi-inbox" /> No files — download something!</div> : null) : fileRows.map((row) => renderTile(row.it, row.i, row.w, row.h))}
                   </div>
                 )}
                 {filtered.length > 0 && fileRows.length === 0 && !inPlaylistView && <div data-testid="media-empty" className="empty" style={{ padding: 12 }}><i className="bi bi-inbox" /> No files in this folder</div>}
@@ -876,40 +883,34 @@ export default function Media() {
         </div>
       ) : (
       <div data-testid="media-list-card" className="card media-lib-card">
-        <div className="card-body" style={{ padding: 0 }}>
-          <div data-testid="media-list-header" className="mrow" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 28px auto auto auto", gap: 10, fontSize: 12, fontWeight: 700, color: "var(--muted)", padding: "10px 14px", borderBottom: "1px solid var(--border)", alignItems: "center" }}>
-            {sortBtn("name", "Name")}<span style={{ display: "grid", placeItems: "center" }} title="Add to playlist"><i className="bi bi-plus-lg" style={{ fontSize: 11 }} /></span><span className="mcol-size">{sortBtn("size", "Size")}</span><span className="mcol-time">{sortBtn("time", "Time")}</span><span data-testid="media-header-actions">Actions</span>
+        <div className="card-body" style={{ padding: 0, display: "grid", gridTemplateColumns: "28px minmax(0, 1fr) auto auto auto", gap: "0 10px", alignItems: "center" }}>
+          <div data-testid="media-list-header" className="mrow" style={{ display: "grid", gridTemplateColumns: "subgrid", gridColumn: "1 / -1", gap: "0 10px", fontSize: 12, fontWeight: 700, color: "var(--muted)", padding: "10px 14px", borderBottom: "1px solid var(--border)", alignItems: "center" }}>
+            <span />{sortBtn("name", "Name")}<span className="mcol-size" style={{ display: "flex", alignItems: "center", justifyContent: "flex-end" }}>{sortBtn("size", "Size")}</span><span className="mcol-time" style={{ display: "flex", alignItems: "center", justifyContent: "flex-end" }}>{sortBtn("time", "Time")}</span><span data-testid="media-header-actions" style={{ display: "flex", alignItems: "center", justifyContent: "flex-end" }}>Actions</span>
           </div>
           {inPlaylistView ? (
-            playlistLoading ? <div data-testid="media-loading" style={{ padding: 20, color: "var(--muted)" }}>Loading playlist…</div> : !playlistDetail ? <div data-testid="media-error" style={{ padding: 20, color: "var(--danger)" }}>Playlist not found</div> : (
+            playlistLoading ? <div data-testid="media-loading" style={{ padding: 20, gridColumn: "1 / -1", color: "var(--muted)" }}>Loading playlist…</div> : !playlistDetail ? <div data-testid="media-error" style={{ padding: 20, gridColumn: "1 / -1", color: "var(--danger)" }}>Playlist not found</div> : (
               <>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", borderBottom: "1px solid var(--border)", background: "var(--surface-2)" }}>
-                  <i className="bi bi-collection-play-fill" style={{ color: "#6366f1" }} />
-                  <span style={{ fontWeight: 700, fontSize: 13 }}>{playlistDetail.name}</span>
-                  <span className="badge text-bg-secondary">{playlistDetail.items.length}</span>
-                  <span style={{ flex: 1 }} />
-                  <button className="btn btn-sm btn-outline-secondary" onClick={closePlaylist}><i className="bi bi-arrow-90deg-up" /> Back to Media</button>
-                </div>
-                {filtered.length === 0 ? <div data-testid="media-empty" className="empty" style={{ padding: 20 }}><i className="bi bi-collection-play" /> Empty playlist — add files from Media</div> : (
-                  <div data-testid="media-list-rows">
+                {filtered.length === 0 ? <div data-testid="media-empty" className="empty" style={{ padding: 20, gridColumn: "1 / -1" }}><i className="bi bi-collection-play" /> Empty playlist — add files from Media</div> : (
+                  <div data-testid="media-list-rows" style={{ display: "contents" }}>
                     {filtered.map((it) => {
                       const ky = rowKey(it);
                       const pk = playlistKey(it);
                       const menuOpen = openMenuKey === ky;
                       const isSel = selKey === ky;
+                      const isBookmarked = bookmarkedKeys.has(pk);
                       return (
-                        <div key={ky} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={isSel} className="mrow" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 28px auto auto auto", gap: 10, alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: isSel ? "rgba(99,102,241,0.14)" : "var(--surface)", cursor: "pointer", userSelect: "none" }} onClick={() => tapItem(it)} onDoubleClick={() => openItem(it)} title={displayName(it)}>
-                          <div data-testid="media-row-name" style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0 }}>
-                            <i className={`bi ${catIcon[fileCategory(it.name)]}`} style={{ color: "var(--accent)" }} />
+                        <div key={ky} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={isSel} className="mrow" style={{ display: "grid", gridTemplateColumns: "subgrid", gridColumn: "1 / -1", gap: "0 10px", alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: isSel ? "rgba(99,102,241,0.14)" : "var(--surface)", cursor: "pointer", userSelect: "none" }} onClick={() => tapItem(it)} onDoubleClick={() => openItem(it)} title={displayName(it)}>
+                          <div style={{ position: "relative", display: "grid", placeItems: "center" }} onMouseEnter={() => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); setOpenMenuKey(ky); }} onMouseLeave={() => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); playlistMenuCloseTimer.current = setTimeout(() => setOpenMenuKey((cur) => cur === ky ? null : cur), 120); }}>
+                            <button data-testid="media-row-playlist-btn" className="media-row-playlist-btn" type="button" onClick={(e) => { e.stopPropagation(); const coarse = isCoarsePointer(); if (coarse) setOpenMenuKey((cur) => cur === ky ? null : ky); else setOpenMenuKey(ky); }} style={{ width: 28, height: 28, padding: 0, borderRadius: 999, border: isBookmarked ? "1px solid rgba(99,102,241,.35)" : "1px solid var(--border)", background: menuOpen ? "rgba(99,102,241,.15)" : isBookmarked ? "rgba(99,102,241,.12)" : "var(--surface-2)", color: isBookmarked ? "#6366f1" : "var(--muted)", display: "grid", placeItems: "center", cursor: "pointer", opacity: 1 }}><i className={`bi ${isBookmarked ? "bi-bookmark-fill" : "bi-bookmark"}`} /></button>
+                            {menuOpen && <div style={{ position: "absolute", top: 34, left: 0, zIndex: 90 }}><PlaylistHoverMenu mediaKey={pk} /></div>}
+                          </div>
+                          <div data-testid="media-row-name" style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0, marginLeft: "5px" }}>
+                            <i className={`bi ${catIcon[fileCategory(it.name)]}`} style={{ color: "var(--accent)", display: "grid", placeItems: "center", width: 18, height: 18, fontSize: 14, lineHeight: 1, flex: "0 0 auto", transform: "translateY(1px)" }} />
                             <button data-testid="media-row-open-file" onClick={(e) => { e.stopPropagation(); tapItem(it); }} onDoubleClick={(e) => { e.stopPropagation(); openItem(it); }} style={{ background: "none", border: 0, color: "var(--text)", fontWeight: 500, textAlign: "left", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", padding: 0, minWidth: 0, maxWidth: "100%" }}>{displayName(it)}</button>
                           </div>
-                          <div style={{ position: "relative", display: "grid", placeItems: "center" }} onMouseEnter={() => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); setOpenMenuKey(ky); }} onMouseLeave={() => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); playlistMenuCloseTimer.current = setTimeout(() => setOpenMenuKey((cur) => cur === ky ? null : cur), 120); }}>
-                            <button data-testid="media-row-playlist-btn" className="media-row-playlist-btn" type="button" onClick={(e) => { e.stopPropagation(); const coarse = isCoarsePointer(); if (coarse) setOpenMenuKey((cur) => cur === ky ? null : ky); else setOpenMenuKey(ky); }} title="Add to playlist" style={{ width: 28, height: 28, padding: 0, borderRadius: 999, border: "1px solid var(--border)", background: menuOpen ? "rgba(99,102,241,.15)" : "var(--surface-2)", color: "var(--muted)", display: "grid", placeItems: "center", cursor: "pointer", opacity: 1 }}><i className="bi bi-plus-lg" /></button>
-                            {menuOpen && <div style={{ position: "absolute", top: 34, right: 0, zIndex: 90 }}><PlaylistHoverMenu mediaKey={pk} /></div>}
-                          </div>
-                          <span data-testid="media-row-size" className="small mcol-size" style={{ color: "var(--muted)", whiteSpace: "nowrap" }}>{fmtSize(it.size)}</span>
-                          <span data-testid="media-row-time" className="small mcol-time" style={{ color: "var(--muted)", whiteSpace: "nowrap" }} title={it.created ? new Date(it.created).toLocaleString() : ""}>{timeAgo(it.created || it.mtime)}</span>
-                          <div data-testid="media-row-actions" style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                          <span data-testid="media-row-size" className="small mcol-size" style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", color: "var(--muted)", whiteSpace: "nowrap" }}>{fmtSize(it.size)}</span>
+                          <span data-testid="media-row-time" className="small mcol-time" style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", color: "var(--muted)", whiteSpace: "nowrap" }} title={it.created ? new Date(it.created).toLocaleString() : ""}>{timeAgo(it.created || it.mtime)}</span>
+                          <div data-testid="media-row-actions" style={{ display: "flex", gap: 6, alignItems: "center", justifyContent: "flex-end" }}>
                             <button data-testid="media-row-playlist-remove" className="btn btn-sm btn-outline-secondary" onClick={async (e) => { e.stopPropagation(); try { await removePlaylistItem(activePlId, pk); const r = await fetch(`/api/playlists/${encodeURIComponent(activePlId)}`); const j = await r.json(); if (j.ok) setPlaylistDetail(j.playlist); } catch {} }} title="Remove from playlist" style={{ color: "#f87171" }}><i className="bi bi-x-lg" /></button>
                             <button data-testid="media-row-action-delete" className="btn btn-sm btn-outline-secondary" onClick={(e) => { e.stopPropagation(); delFile(it); }}><i className="bi bi-trash" style={{ color: "#f87171" }} /></button>
                           </div>
@@ -922,26 +923,25 @@ export default function Media() {
             )
           ) : (
             <>
-              {loading && items.length === 0 ? <div data-testid="media-loading" style={{ padding: 20, color: "var(--muted)" }}>Loading…</div> : (isEmptyForList ? (!loading ? <div data-testid="media-empty" className="empty" style={{ padding: 20 }}><i className="bi bi-inbox" /> No files — download something!</div> : null) : (
-                <div data-testid="media-list-rows">
+              {loading && items.length === 0 ? <div data-testid="media-loading" style={{ padding: 20, gridColumn: "1 / -1", color: "var(--muted)" }}>Loading…</div> : (isEmptyForList ? (!loading ? <div data-testid="media-empty" className="empty" style={{ padding: 20, gridColumn: "1 / -1" }}><i className="bi bi-inbox" /> No files — download something!</div> : null) : (
+                <div data-testid="media-list-rows" style={{ display: "contents" }}>
                   {!folder && playlists.map((pl) => {
                     const plKey = `playlist:${pl.id}`;
                     const sel = selKey === plKey;
                     return (
-                      <div key={pl.id} id={`media-playlist-row-${pl.id}`} data-testid="media-row-playlist" data-filename={plKey} data-selected={sel} className="mrow media-row-playlist" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 28px auto auto auto", gap: 10, alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: sel ? "rgba(99,102,241,0.14)" : "var(--surface)", cursor: "pointer", userSelect: "none" }} onClick={() => setSelectedKey(plKey)} onDoubleClick={() => openPlaylist(pl.id)} title={`${pl.name} — click to select, double-click to open`}>
-                        <div style={{ display: "flex", gap: 8, alignItems: "center", minWidth: 0 }}>
-                          <i className="bi bi-collection-play-fill" style={{ color: "#6366f1", flex: "0 0 auto" }} />
-                          <span style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>{pl.name}</span>
+                      <div key={pl.id} id={`media-playlist-row-${pl.id}`} data-testid="media-row-playlist" data-filename={plKey} data-selected={sel} className="mrow mrow-dir media-row-playlist" style={{ display: "grid", gridTemplateColumns: "subgrid", gridColumn: "1 / -1", gap: "0 10px", alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: sel ? "rgba(99,102,241,0.14)" : "var(--surface-2)", cursor: "pointer", userSelect: "none" }} onClick={() => setSelectedKey(plKey)} onDoubleClick={() => openPlaylist(pl.id)} title={`${pl.name} — click to select, double-click to open`}>
+                        <div data-testid="media-row-name" style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0, marginLeft: "5px", gridColumn: "1 / span 2" }}>
+                          <i className="bi bi-collection-play-fill" style={{ color: "#6366f1", display: "grid", placeItems: "center", width: 18, height: 18, fontSize: 14, lineHeight: 1, flex: "0 0 auto", transform: "translateY(1px)" }} />
+                          <button data-testid="media-row-open-playlist" onClick={(e) => { e.stopPropagation(); setSelectedKey(plKey); }} onDoubleClick={(e) => { e.stopPropagation(); openPlaylist(pl.id); }} title={`${pl.name} — click to select, double-click to open`} style={{ background: "none", border: 0, color: "var(--text)", fontWeight: 600, textAlign: "left", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0, maxWidth: "100%", flex: 1, padding: 0, marginLeft: "5px" }}>{pl.name}</button>
                           <span className="playlist-row-actions" style={{ display: "inline-flex", gap: 4, opacity: sel ? 1 : 0, transition: "opacity .12s", marginLeft: 6, flex: "0 0 auto" }}>
                             <button data-testid={`playlist-row-edit-${pl.id}`} title="Rename" onClick={(e) => { e.stopPropagation(); setPromptState({ open: true, id: pl.id, value: pl.name }); }} className="btn btn-sm btn-outline-secondary" style={{ padding: "2px 6px" }}><i className="bi bi-pencil" /></button>
                             <button data-testid={`playlist-row-delete-${pl.id}`} title="Delete" onClick={(e) => { e.stopPropagation(); setConfirmState({ open: true, id: pl.id, name: pl.name }); }} className="btn btn-sm btn-outline-secondary" style={{ padding: "2px 6px", color: "#f87171" }}><i className="bi bi-trash" /></button>
                           </span>
                         </div>
-                        <span />
-                        <span className="small mcol-size" style={{ color: "var(--muted)" }}>{pl.count ?? (pl.items ? pl.items.length : 0)} items</span>
-                        <span className="small mcol-time" style={{ color: "var(--muted)" }}>{timeAgo(pl.updatedAt || pl.createdAt)}</span>
+                        <span className="small mcol-size" style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", color: "var(--muted)" }}>{pl.count ?? (pl.items ? pl.items.length : 0)} items</span>
+                        <span className="small mcol-time" style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", color: "var(--muted)" }}>{timeAgo(pl.updatedAt || pl.createdAt)}</span>
                         <div style={{ display: "flex", gap: 6, alignItems: "center", justifyContent: "flex-end" }}>
-                          <button data-testid={`playlist-row-open-${pl.id}`} className="btn btn-sm btn-outline-secondary" onClick={(e) => { e.stopPropagation(); openPlaylist(pl.id); }}><i className="bi bi-folder2-open" /> Open</button>
+                          <button data-testid={`playlist-row-open-${pl.id}`} className="btn btn-sm btn-outline-secondary" onClick={(e) => { e.stopPropagation(); openPlaylist(pl.id); }}><i className="bi bi-folder2-open" /></button>
                         </div>
                       </div>
                     );
@@ -951,31 +951,30 @@ export default function Media() {
                     const pk = !it.dir ? playlistKey(it) : null;
                     const menuOpen = openMenuKey === ky;
                     const isSel = selKey === ky;
+                    const isBookmarked = pk ? bookmarkedKeys.has(pk) : false;
                     return (
-                      <div key={isFlat ? it.rel || it.name : it.name} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={isSel} className="mrow" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 28px auto auto auto", gap: 10, alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: isSel ? "rgba(99,102,241,0.14)" : it.dir ? "var(--surface-2)" : "var(--surface)", cursor: "pointer", userSelect: "none" }} onClick={() => tapItem(it)} onDoubleClick={() => openItem(it)} title="Click to select, double-click to open">
-                        <div data-testid="media-row-name" style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0 }}>
-                          <i className={`bi ${it.dir ? "bi-folder-fill" : catIcon[fileCategory(it.name)]}`} style={{ color: it.dir ? "#f59e0b" : "var(--accent)" }} />
+                      <div key={isFlat ? it.rel || it.name : it.name} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={isSel} className={it.dir ? "mrow mrow-dir" : "mrow mrow-file"} style={{ display: "grid", gridTemplateColumns: "subgrid", gridColumn: "1 / -1", gap: "0 10px", alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: isSel ? "rgba(99,102,241,0.14)" : it.dir ? "var(--surface-2)" : "var(--surface)", cursor: "pointer", userSelect: "none" }} onClick={() => tapItem(it)} onDoubleClick={() => openItem(it)} title="Click to select, double-click to open">
+                        {!it.dir && (
+                          <div style={{ position: "relative", display: "grid", placeItems: "center" }} onMouseEnter={() => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); setOpenMenuKey(ky); }} onMouseLeave={() => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); playlistMenuCloseTimer.current = setTimeout(() => setOpenMenuKey((cur) => cur === ky ? null : cur), 120); }}>
+                            <button data-testid="media-row-playlist-btn" className="media-row-playlist-btn" type="button" onClick={(e) => { e.stopPropagation(); const coarse = isCoarsePointer(); if (coarse) setOpenMenuKey((cur) => cur === ky ? null : ky); else setOpenMenuKey(ky); }} style={{ width: 28, height: 28, padding: 0, borderRadius: 999, border: isBookmarked ? "1px solid rgba(99,102,241,.35)" : "1px solid var(--border)", background: menuOpen ? "rgba(99,102,241,.15)" : isBookmarked ? "rgba(99,102,241,.12)" : "var(--surface-2)", color: isBookmarked ? "#6366f1" : "var(--muted)", display: "grid", placeItems: "center", cursor: "pointer", opacity: 1 }}><i className={`bi ${isBookmarked ? "bi-bookmark-fill" : "bi-bookmark"}`} /></button>
+                            {menuOpen && pk && <div style={{ position: "absolute", top: 34, left: 0, zIndex: 90 }}><PlaylistHoverMenu mediaKey={pk} /></div>}
+                          </div>
+                        )}
+                        <div data-testid="media-row-name" style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0, marginLeft: "5px", ...(it.dir ? { gridColumn: "1 / span 2" } : {}) }}>
+                          <i className={`bi ${it.dir ? "bi-folder-fill" : catIcon[fileCategory(it.name)]}`} style={{ color: it.dir ? "#f59e0b" : "var(--accent)", display: "grid", placeItems: "center", width: 18, height: 18, fontSize: 14, lineHeight: 1, flex: "0 0 auto", transform: "translateY(1px)" }} />
                           {it.dir ? (
                             <button data-testid="media-row-open-folder" onClick={(e) => { e.stopPropagation(); tapItem(it); }} onDoubleClick={(e) => { e.stopPropagation(); openItem(it); }} title={`${it.name} — click to select, double-click to open`} style={{ background: "none", border: 0, color: "var(--text)", fontWeight: 600, textAlign: "left", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0, maxWidth: "100%" }}>{it.name}</button>
                           ) : (
                             <button data-testid="media-row-open-file" onClick={(e) => { e.stopPropagation(); tapItem(it); }} onDoubleClick={(e) => { e.stopPropagation(); openItem(it); }} title={`${displayName(it)} — click to select, double-click to open`} style={{ background: "none", border: 0, color: "var(--text)", fontWeight: 500, textAlign: "left", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", padding: 0, minWidth: 0, maxWidth: "100%" }}>{displayName(it)}</button>
                           )}
                         </div>
-                        {it.dir ? (
-                          <span />
-                        ) : (
-                          <div style={{ position: "relative", display: "grid", placeItems: "center" }} onMouseEnter={() => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); setOpenMenuKey(ky); }} onMouseLeave={() => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); playlistMenuCloseTimer.current = setTimeout(() => setOpenMenuKey((cur) => cur === ky ? null : cur), 120); }}>
-                            <button data-testid="media-row-playlist-btn" className="media-row-playlist-btn" type="button" onClick={(e) => { e.stopPropagation(); const coarse = isCoarsePointer(); if (coarse) setOpenMenuKey((cur) => cur === ky ? null : ky); else setOpenMenuKey(ky); }} title="Add to playlist" style={{ width: 28, height: 28, padding: 0, borderRadius: 999, border: "1px solid var(--border)", background: menuOpen ? "rgba(99,102,241,.15)" : "var(--surface-2)", color: "var(--muted)", display: "grid", placeItems: "center", cursor: "pointer", opacity: 1 }}><i className="bi bi-plus-lg" /></button>
-                            {menuOpen && pk && <div style={{ position: "absolute", top: 34, right: 0, zIndex: 90 }}><PlaylistHoverMenu mediaKey={pk} /></div>}
-                          </div>
-                        )}
-                        <span data-testid="media-row-size" className="small mcol-size" style={{ color: "var(--muted)", whiteSpace: "nowrap" }}>{fmtSize(it.size)}</span>
-                        <span data-testid="media-row-time" className="small mcol-time" style={{ color: "var(--muted)", whiteSpace: "nowrap" }} title={it.created ? new Date(it.created).toLocaleString() : ""}>{timeAgo(it.created || it.mtime)}</span>
-                        <div data-testid="media-row-actions" style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        <span data-testid="media-row-size" className="small mcol-size" style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", color: "var(--muted)", whiteSpace: "nowrap" }}>{fmtSize(it.size)}</span>
+                        <span data-testid="media-row-time" className="small mcol-time" style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", color: "var(--muted)", whiteSpace: "nowrap" }} title={it.created ? new Date(it.created).toLocaleString() : ""}>{timeAgo(it.created || it.mtime)}</span>
+                        <div data-testid="media-row-actions" style={{ display: "flex", gap: 6, alignItems: "center", justifyContent: "flex-end" }}>
                           {it.dir ? (
-                            <button data-testid="media-row-action-open" className="btn btn-sm btn-outline-secondary" onClick={(e) => { e.stopPropagation(); goFolder(it.name); }}><i className="bi bi-folder2-open" /> Open</button>
+                            <button data-testid="media-row-action-open" className="btn btn-sm btn-outline-secondary" onClick={(e) => { e.stopPropagation(); goFolder(it.name); }}><i className="bi bi-folder2-open" /></button>
                           ) : (
-                            <button data-testid="media-row-action-delete" className="btn btn-sm btn-outline-secondary" onClick={(e) => { e.stopPropagation(); delFile(it); }} style={{ color: "var(--muted)", borderColor: "var(--border)" }}><i className="bi bi-trash" style={{ color: "#f87171" }} /> Delete</button>
+                            <button data-testid="media-row-action-delete" className="btn btn-sm btn-outline-secondary" onClick={(e) => { e.stopPropagation(); delFile(it); }} style={{ color: "var(--muted)", borderColor: "var(--border)" }}><i className="bi bi-trash" style={{ color: "#f87171" }} /></button>
                           )}
                         </div>
                       </div>
