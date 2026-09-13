@@ -85,67 +85,7 @@ export default function Media() {
   const filter = searchParams.get("q") || "";
 
   const crumbs = folder ? folder.split("/").filter(Boolean) : [];
-  const playlistItemsForView = (() => {
-    if (!activePlId || !playlistDetail || !Array.isArray(playlistDetail.items)) return null;
-    // Map enriched playlist items to media-like objects (flat labels like "folder > name")
-    return playlistDetail.items.filter((it) => !it.missing).map((it) => {
-      const key = it.key;
-      const name = it.name || key.split("/").pop() || key;
-      const rel = key; // absolute key used as rel for flat display
-      return {
-        name,
-        rel,
-        dir: false,
-        size: it.size || 0,
-        mtime: it.mtime || it.addedAt,
-        created: it.created || it.mtime || it.addedAt,
-        thumb: null,
-        playlistKey: key,
-        _isPlaylistItem: true,
-      };
-    });
-  })();
-  const inPlaylistView = !!activePlId;
-  const filtered = (() => {
-    let base = inPlaylistView && playlistItemsForView ? playlistItemsForView : items;
-    // When in playlist view, don't show dirs/playlists chips as items — base is already just playlist files.
-    // In normal view, playlists chips are rendered separately above folders, not via filtered.
-    if (inPlaylistView && playlistItemsForView) {
-      // still apply text/type filters below
-    } else {
-      // normal: playlists are separate section, not part of base
-    }
-    const raw = filter.trim();
-    if (raw) {
-      const isNeg = raw.startsWith("!");
-      const term = (isNeg ? raw.slice(1).trim() : raw).toLowerCase();
-      if (term) {
-        base = base.filter((it) => {
-          const hay = (isFlat ? it.rel || it.name : it.name).toLowerCase();
-          const hit = hay.includes(term);
-          return isNeg ? !hit : hit;
-        });
-      }
-    }
-    if (type !== "all") base = base.filter((it) => !it.dir && fileCategory(it.name) === type);
-    if (sort) {
-      const dirs = [];
-      const files = [];
-      for (const it of base) (it.dir ? dirs : files).push(it);
-      const col = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
-      const by = (a, b) => {
-        if (sort === "name") return col.compare(a.name, b.name);
-        if (sort === "size") return (a.size || 0) - (b.size || 0);
-        if (sort === "time") return new Date(a.created || a.mtime || 0) - new Date(b.created || b.mtime || 0);
-        return 0;
-      };
-      files.sort((a, b) => (sortDir === "desc" ? -by(a, b) : by(a, b)));
-      dirs.sort((a, b) => col.compare(a.name, b.name));
-      return [...dirs, ...files];
-    }
-    return base;
-  })();
-  const viewable = filtered.filter((it) => !it.dir);
+  // filtered/viewable and playlistItemsForView are assigned after playlist state (which defines activePlId etc.) to avoid TDZ
 
   const setParam = (k, v) => {
     const ns = new URLSearchParams(searchParams);
@@ -219,6 +159,59 @@ export default function Media() {
   const [openMenuKey, setOpenMenuKey] = useState(null);
   const playlistMenuCloseTimer = useRef(null);
   const playlistKey = (it) => playlistKeyForMedia(folder, rowKey(it));
+  const playlistItemsForView = (() => {
+    if (!activePlId || !playlistDetail || !Array.isArray(playlistDetail.items)) return null;
+    return playlistDetail.items.filter((it) => !it.missing).map((it) => {
+      const key = it.key;
+      const name = it.name || key.split("/").pop() || key;
+      const rel = key;
+      return {
+        name,
+        rel,
+        dir: false,
+        size: it.size || 0,
+        mtime: it.mtime || it.addedAt,
+        created: it.created || it.mtime || it.addedAt,
+        thumb: null,
+        playlistKey: key,
+        _isPlaylistItem: true,
+      };
+    });
+  })();
+  const inPlaylistView = !!activePlId;
+  const filtered = (() => {
+    let base = inPlaylistView && playlistItemsForView ? playlistItemsForView : items;
+    const raw = filter.trim();
+    if (raw) {
+      const isNeg = raw.startsWith("!");
+      const term = (isNeg ? raw.slice(1).trim() : raw).toLowerCase();
+      if (term) {
+        base = base.filter((it) => {
+          const hay = (isFlat ? it.rel || it.name : it.name).toLowerCase();
+          const hit = hay.includes(term);
+          return isNeg ? !hit : hit;
+        });
+      }
+    }
+    if (type !== "all") base = base.filter((it) => !it.dir && fileCategory(it.name) === type);
+    if (sort) {
+      const dirs = [];
+      const files = [];
+      for (const it of base) (it.dir ? dirs : files).push(it);
+      const col = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+      const by = (a, b) => {
+        if (sort === "name") return col.compare(a.name, b.name);
+        if (sort === "size") return (a.size || 0) - (b.size || 0);
+        if (sort === "time") return new Date(a.created || a.mtime || 0) - new Date(b.created || b.mtime || 0);
+        return 0;
+      };
+      files.sort((a, b) => (sortDir === "desc" ? -by(a, b) : by(a, b)));
+      dirs.sort((a, b) => col.compare(a.name, b.name));
+      return [...dirs, ...files];
+    }
+    return base;
+  })();
+  const viewable = filtered.filter((it) => !it.dir);
   const pendingSelectRef = useRef(null); // key to restore after the next load (go-up, delete)
   const freshLoadRef = useRef(false); // next committed items scroll once to the selection
   const keyboardScrollRef = useRef(false); // next selection commit scrolls (arrow-key nav)

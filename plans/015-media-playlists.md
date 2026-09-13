@@ -1,8 +1,8 @@
 # Plan 015 — Media Playlists: Create & Hover-Add (Player + Listing)
 
 **Date:** 2026-09-13
-**Status:** Draft (plan only — no code yet)
-**Scope:** `api-server.js` (playlist API + storage), `web/src/views/Media.jsx` (tile/row hover button + playlist folder-like listing), `web/src/components/FileViewer.jsx` (player button below Close), new `web/src/components/PlaylistHoverMenu.jsx` + `web/src/store/PlaylistsContext.jsx` (or lib). No download/queue/scan change. No separate route/view — playlists are listed **inside the Media page** like folders (updated per 2026-09-13 user request).
+**Status:** Implemented 2026-09-13 (plan 015 code landed in `403ee9c`), update 2026-09-13 to add inode-based move tracking (method 2, not yet implemented — see §3 update)
+**Scope:** `api-server.js` (playlist API + storage, now with inode `ino/dev` for move tracking), `web/src/views/Media.jsx` (tile/row hover button + playlist folder-like listing), `web/src/components/FileViewer.jsx` (player button below Close), new `web/src/components/PlaylistHoverMenu.jsx` + `web/src/store/PlaylistsContext.jsx` (or lib). No download/queue/scan change. No separate route/view — playlists are listed **inside the Media page** like folders (updated per 2026-09-13 user request).
 **Owner:** xdl web panel (`/media`)
 **Depends on:** Plan 011 (flat/thumb), Plan 012 (grid tiles), Plan 014 (single-select key-based). Backward compatible — no existing API changed.
 **User request:** In the media page create playlists, add items to them. Playlist adding UI: (1) in the video player a button **below the close button** — lowest in the header stack — on **hover** it opens the playlists I created and shows options, click toggles add/remove; (2) in the media listing, when **hover on an item** it shows that button; hovering the button shows the playlist menu with which playlists the item can be put in and which it is already in. **Everything opens on hover (mouse over), not click.** Updated: playlists themselves are **listed in the Media page only, like folders** — no separate `/playlists` page/nav.
@@ -52,7 +52,7 @@ Out of scope v1: drag-reorder inside playlist, auto-play playlist queue, sharing
       "createdAt": "2026-09-13T10:00:00.000Z",
       "updatedAt": "2026-09-13T10:05:00.000Z",
       "items": [
-        { "key": "reddit/abc-123.mp4", "addedAt": "2026-09-13T10:05:00.000Z" }
+        { "key": "reddit/abc-123.mp4", "addedAt": "2026-09-13T10:05:00.000Z", "ino": 123456, "dev": 45 }
       ]
     }
   ],
@@ -63,6 +63,7 @@ Out of scope v1: drag-reorder inside playlist, auto-play playlist queue, sharing
 - `id`: `pl_<ms>_<rand4>` unique.
 - `name`: trimmed 1-60 chars, unique case-insensitive (409 on duplicate on create; rename collision also 409).
 - `key`: **canonical absolute media path** — `path.posix.join(folder, relOrName)` without leading slash, `/`-separated, e.g. `boobs/file.mp4`, `reddit/sub/file.mp4`, or `file-at-root.mp4`. Derived in frontend as `playlistKey(folder, rowKey)` and on server normalized with `path.posix.normalize`. No `..` or absolute.
+- `ino`/`dev`: **inode identity** (method 2) — `stat.ino` + `stat.dev` captured at add time (see §4 inode handling). Used to heal moves: if file moved within same filesystem, `ino/dev` stays same, so backend can find new `key` via inode scan and auto-rewrite. Legacy items without `ino/dev` keep path-only behavior (backfilled on next access if file still at old key).
 - `items` max 5000 per playlist (400 on overflow).
 - `playlists` max 100 total (400 on overflow).
 - File I/O serialized via `queueFileChain`-style promise chain (same as `withQueueFile` in `api-server.js:178`).
@@ -73,9 +74,12 @@ Out of scope v1: drag-reorder inside playlist, auto-play playlist queue, sharing
 function normalizePlaylistKey(raw) // trim, posix normalize, reject "..", "/", "\\", empty
 function playlistKeyForMedia(folder, rowKey) // folder ? `${folder}/${rowKey}` : rowKey
 function loadPlaylists() / savePlaylists()
+function getFileInoForKey(key) // stat key → {ino,dev} or null
+function buildInoMap() // flat walk mediaDir → Map<dev:ino, rel>
+function resolveMovedItem(item) // if item.key missing and item.ino, scan by ino and rewrite key
 ```
 
-**Cleanup on delete:** `DELETE /api/media` already deletes the file; after unlink, also prune that key from every playlist's `items` (best-effort) and `savePlaylists()` if mutated. Prevents stale dead entries from accumulating. `GET /api/playlists` may optionally filter out keys whose file no longer exists (or annotate `missing:true` — v1 just prune on delete, not on every GET to avoid scan cost).
+**Cleanup on delete:** `DELETE /api/media` already deletes the file; after unlink, also prune that key from every playlist's `items` (best-effort) and `savePlaylists()` if mutated. Prevents stale dead entries from accumulating. `GET /api/playlists/:id` now also auto-heals moved files via inode: if `key` missing but `ino/dev` found elsewhere, key is rewritten to new location and `missing:false` is returned (see §4). Legacy items without `ino` keep previous `missing:true` path-only behavior.
 
 ---
 
@@ -89,16 +93,17 @@ All behind existing auth middleware. `Content-Type: application/json`.
 | `POST` | `/api/playlists` | `{ name: string }` | `{ ok, playlist }` 201 | Trim, 1-60 chars, unique ci. Auto `id`. |
 | `PATCH` | `/api/playlists/:id` | `{ name: string }` | `{ ok, playlist }` | Rename. |
 | `DELETE` | `/api/playlists/:id` | — | `{ ok }` | |
-| `POST` | `/api/playlists/:id/items` | `{ key: string }` | `{ ok, playlist, added: boolean }` | Add key to playlist (idempotent; `added:false` if already present). Validate key via `normalizePlaylistKey`, 400 on bad. 404 if playlist not found. |
+| `POST` | `/api/playlists/:id/items` | `{ key: string }` | `{ ok, playlist, added: boolean }` | Add key to playlist (idempotent; `added:false` if already present). Validate key via `normalizePlaylistKey`, 400 on bad. 404 if playlist not found. Also captures `ino/dev` via `stat` and persists for move tracking. |
 | `DELETE` | `/api/playlists/:id/items` | `{ key: string }` (or `?key=`) | `{ ok, playlist, removed: boolean }` | Remove. Idempotent. |
-| `POST` | `/api/playlists/:id/toggle` | `{ key: string }` | `{ ok, playlist, member: boolean }` | Convenience: toggles, returns new membership. Used by hover menu single click. |
-| `GET` | `/api/playlists/:id` | — | `{ ok, playlist: { id, name, items:[{key,addedAt}] } }` | Detail for manage page; optionally enrich with `exists` by stat check (lazy, not blocking). |
+| `POST` | `/api/playlists/:id/toggle` | `{ key: string }` | `{ ok, playlist, member: boolean }` | Convenience: toggles, returns new membership. Used by hover menu single click. Captures `ino/dev` on add path. |
+| `GET` | `/api/playlists/:id` | — | `{ ok, playlist: { id, name, items:[{key,addedAt,ino,dev}] } }` | Detail for playlist view; enriches with `size/mtime/created` and `missing` flag. If `key` missing but `ino/dev` found elsewhere via `buildInoMap`, auto-rewrites `key` to new location and persists. |
 
 Implementation notes:
 - Reuse `withPlaylistFile(fn)` serializer like `withQueueFile`.
 - On `GET /api/playlists` no file → `{ playlists: [] }` (not error).
 - Errors: 400 bad name/key, 404 id, 409 duplicate name.
 - After any mutation, set `updatedAt` on playlist + root.
+- **Inode (method 2):** `POST /api/playlists/:id/items` and `POST /.../toggle` stat the target file at `key` and persist `ino/dev` alongside `key` (if file exists at add time; if not, store `ino:null` and rely on path-only until next heal). `loadPlaylistsRaw` migrates legacy items: if `item.ino` missing but file at `key` exists, backfill `ino/dev` on read and save. `GET /api/playlists/:id` does move-heal: for each item where `fs.stat(key)` missing or `ino` mismatched, build `inoMap` via `walkMediaFlat` + `stat` and if `dev:ino` found, rewrite `item.key` to new `rel`, persist, and return enriched `missing:false`; otherwise `missing:true`.
 - No websocket needed v1: client polls `GET /api/playlists` on mount + after any mutation; optionally `wsBroadcast({ type:"playlists:update" })` for multi-tab live (thin, optional).
 
 Update `.gitignore`: add `.playlists.json`.
@@ -321,7 +326,7 @@ No separate route or nav. Playlists are rendered **inside the Media page**, visu
 ## 7. Edge cases
 
 - **Folders:** no playlist button (only files have keys). `isDir` check guards.
-- **Stale keys:** file deleted/moved → `DELETE /api/media` prunes key from all playlists (api-server). `GET /api/playlists` still returns remaining keys; playlist view may show missing files as dimmed with `File not found` and offer `Remove` (client checks `fetch` HEAD or `GET /api/media` existence optionally).
+- **Stale keys / moves:** file deleted via `DELETE /api/media` prunes key from all playlists (api-server). External `mv`/rename (same filesystem) → `GET /api/playlists/:id` heals via `ino/dev`: builds `inoMap` flat walk, finds new `rel` for stored `ino/dev`, rewrites `key`, persists, and returns `missing:false`. Copy (`cp`) creates new `ino` → not healed (treated as new file, old key stays `missing:true`). Legacy items without `ino` keep path-only `missing:true` behavior until backfilled. `GET /api/playlists` still returns keys; playlist view shows moved files at new location after heal, deleted files as dimmed `File not found` with `Remove`.
 - **Duplicate names:** case-insensitive unique — server 409, UI shows inline error, input stays.
 - **Long names:** truncate in menu (`textOverflow ellipsis`, `maxWidth 180`), tooltip shows full `title`.
 - **Many playlists (50+):** menu scrolls (`maxHeight 220`, `overflowY auto`, custom scrollbar). Search not needed v1.
@@ -394,7 +399,7 @@ cd web && npm run build
 - **Hover on touch devices unusable** → coarse-pointer fallback to tap toggle, button always visible on touch.
 - **Menu overflow near viewport edge** → menu is `right:0` below button; if near bottom, flip to `bottom:44px top:auto` (detect via `getBoundingClientRect` in menu, simple flip).
 - **Many playlists → tall menu** → scroll container + max-height.
-- **Stale keys after external file moves outside app** → prune only on app-initiated delete; orphaned keys remain until manually removed — acceptable v1, playlist view shows missing indicator.
+- **Stale keys after external file moves outside app** → same-filesystem `mv`/`rename` auto-healed via `ino/dev` on next `GET /api/playlists/:id` (build `inoMap` flat walk, rewrite `key`). Cross-filesystem `mv` or `cp` (new `ino`) not healed → stays `missing:true` until manually re-added — acceptable v1, playlist view shows missing indicator. Walk cost is one `walkMediaFlat` per detail request with misses (typically < few ms for thousands of files; cached per request).
 - **Z-index clash (viewer 80, menu 90/95)** → set menu `zIndex:95` inside viewer, `90` in listing.
 
 ---
@@ -403,3 +408,4 @@ cd web && npm run build
 
 - 2026-09-13: Initial draft — playlists as `.playlists.json` sets of canonical media keys; 7 REST endpoints; hover menu (`PlaylistHoverMenu`) used in both player (button below Close, lowest) and listing (item-hover button), all on hover; manage page `/playlists`.
 - 2026-09-13: Update per user — playlists listed **in Media page only like folders** (grid chips `media-grid-playlists` + list rows `media-row-playlist` at top, `#6366f1` icon, double-click opens `?pl=<id>` filtered view). Removed separate `Playlists.jsx`/`/playlists` route/nav; inline create/rename/delete in Media page.
+- 2026-09-13: Update to method 2 (inode) — store `ino/dev` per item, `GET /api/playlists/:id` heals moves via `buildInoMap` → rewrite `key`; legacy items backfilled on next access. Implemented 2026-09-13 (`403ee9c` core), inode patch pending implementation.
