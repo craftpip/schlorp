@@ -164,6 +164,7 @@ export default function Media() {
   const [promptState, setPromptState] = useState({ open: false, id: null, value: "" });
   const [confirmState, setConfirmState] = useState({ open: false, id: null, name: "" });
   const [alertState, setAlertState] = useState({ open: false, title: "", message: "" });
+  const [deleteTarget, setDeleteTarget] = useState(null);
   const playlistMenuCloseTimer = useRef(null);
   const playlistKey = (it) => playlistKeyForMedia(folder, rowKey(it));
   const playlistItemsForView = (() => {
@@ -219,6 +220,7 @@ export default function Media() {
     return base;
   })();
   const viewable = filtered.filter((it) => !it.dir);
+  const isEmptyForList = filtered.length === 0 && (!folder ? playlists.length === 0 : true);
   const pendingSelectRef = useRef(null); // key to restore after the next load (go-up, delete)
   const freshLoadRef = useRef(false); // next committed items scroll once to the selection
   const keyboardScrollRef = useRef(false); // next selection commit scrolls (arrow-key nav)
@@ -822,25 +824,22 @@ export default function Media() {
               )
             ) : loading && items.length === 0 ? <div data-testid="media-loading" style={{ padding: 20, color: "var(--muted)" }}>Loading…</div> : !gridW ? <div data-testid="media-grid-measuring" style={{ padding: 20, color: "var(--muted)" }}>Measuring…</div> : (
               <div data-testid="media-grid-tiles" className="media-grid-tiles" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                <div data-testid="media-grid-playlists">
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
-                    <span className="small" style={{ color: "var(--muted)", fontWeight: 700 }}><i className="bi bi-collection-play-fill" style={{ color: "#6366f1", marginRight: 4 }} />Playlists</span>
-                    <span className="badge text-bg-secondary">{playlists.length}</span>
-                    <span style={{ flex: 1 }} />
-                    <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-                      <input data-testid="media-playlist-new-input" value={newPlaylistName} onChange={(e) => setNewPlaylistName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleCreatePlaylist(); } }} placeholder="New playlist…" maxLength={60} style={{ padding: "4px 8px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)", fontSize: 12, width: 160 }} />
-                      <button data-testid="media-playlist-create-btn" className="btn btn-sm btn-primary" onClick={handleCreatePlaylist} disabled={creatingPlaylist || !String(newPlaylistName || "").trim()} style={{ padding: "4px 10px", fontSize: 12 }}><i className="bi bi-plus-lg" /> Create</button>
-                    </span>
-                  </div>
-                  {playlistErr && <div style={{ color: "#ef4444", fontSize: 11, marginBottom: 6 }}>{playlistErr}</div>}
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: GRID_GAP, minHeight: playlists.length === 0 ? 0 : undefined }}>
-                    {playlists.length === 0 ? <span className="small" style={{ color: "var(--muted)" }}>No playlists yet — create one.</span> : playlists.map((pl) => renderPlaylistChip(pl))}
-                  </div>
-                </div>
-                {dirRows.length > 0 && (
+                {(dirRows.length > 0 || (!folder && (playlists.length > 0 || true))) && (
                   <div data-testid="media-grid-folders">
-                    <div className="small" style={{ color: "var(--muted)", fontWeight: 700, marginBottom: 6 }}>Folders</div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
+                      <span className="small" style={{ color: "var(--muted)", fontWeight: 700 }}><i className="bi bi-folder-fill" style={{ color: "#f59e0b", marginRight: 4 }} />Folders</span>
+                      <span className="badge text-bg-secondary">{!folder ? dirRows.length + playlists.length : dirRows.length}</span>
+                      <span style={{ flex: 1 }} />
+                      {!folder && (
+                      <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                        <input data-testid="media-playlist-new-input" value={newPlaylistName} onChange={(e) => setNewPlaylistName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleCreatePlaylist(); } }} placeholder="New playlist…" maxLength={60} style={{ padding: "4px 8px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)", fontSize: 12, width: 160 }} />
+                        <button data-testid="media-playlist-create-btn" className="btn btn-sm btn-primary" onClick={handleCreatePlaylist} disabled={creatingPlaylist || !String(newPlaylistName || "").trim()} style={{ padding: "4px 10px", fontSize: 12 }}><i className="bi bi-plus-lg" /> Create</button>
+                      </span>
+                      )}
+                    </div>
+                    {playlistErr && <div style={{ color: "#ef4444", fontSize: 11, marginBottom: 6 }}>{playlistErr}</div>}
                     <div style={{ display: "flex", flexWrap: "wrap", gap: GRID_GAP }}>
+                      {!folder && playlists.map((pl) => renderPlaylistChip(pl))}
                       {dirRows.map((row) => renderFolderChip(row.it, row.i))}
                     </div>
                   </div>
@@ -902,20 +901,21 @@ export default function Media() {
             )
           ) : (
             <>
+              {!folder && (
               <div data-testid="media-playlists-header" style={{ display: "flex", gap: 8, alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: "var(--surface-2)", flexWrap: "wrap" }}>
                 <i className="bi bi-collection-play-fill" style={{ color: "#6366f1" }} />
-                <span style={{ fontWeight: 700, fontSize: 12, color: "var(--muted)" }}>Playlists</span>
-                <span className="badge text-bg-secondary">{playlists.length}</span>
+                <span style={{ fontWeight: 700, fontSize: 12, color: "var(--muted)" }}>New playlist</span>
                 <span style={{ flex: 1 }} />
                 <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
                   <input data-testid="media-playlist-new-input" value={newPlaylistName} onChange={(e) => setNewPlaylistName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleCreatePlaylist(); } }} placeholder="New playlist…" maxLength={60} style={{ padding: "4px 8px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)", fontSize: 12, width: 160 }} />
                   <button data-testid="media-playlist-create-btn" className="btn btn-sm btn-primary" onClick={handleCreatePlaylist} disabled={creatingPlaylist || !String(newPlaylistName || "").trim()} style={{ padding: "4px 10px", fontSize: 12 }}><i className="bi bi-plus-lg" /> Create</button>
                 </span>
               </div>
-              {playlistErr && <div style={{ padding: "6px 14px", color: "#ef4444", fontSize: 11, borderBottom: "1px solid var(--border)" }}>{playlistErr}</div>}
-              {playlists.length > 0 && (
-                <div data-testid="media-playlist-rows">
-                  {playlists.map((pl) => {
+              )}
+              {playlistErr && !folder && <div style={{ padding: "6px 14px", color: "#ef4444", fontSize: 11, borderBottom: "1px solid var(--border)" }}>{playlistErr}</div>}
+              {loading && items.length === 0 ? <div data-testid="media-loading" style={{ padding: 20, color: "var(--muted)" }}>Loading…</div> : (isEmptyForList ? (!loading ? <div data-testid="media-empty" className="empty" style={{ padding: 20 }}><i className="bi bi-inbox" /> No files — download something!</div> : null) : (
+                <div data-testid="media-list-rows">
+                  {!folder && playlists.map((pl) => {
                     const plKey = `playlist:${pl.id}`;
                     const sel = selKey === plKey;
                     return (
@@ -936,10 +936,6 @@ export default function Media() {
                       </div>
                     );
                   })}
-                </div>
-              )}
-              {loading && items.length === 0 ? <div data-testid="media-loading" style={{ padding: 20, color: "var(--muted)" }}>Loading…</div> : filtered.length === 0 ? (!loading ? <div data-testid="media-empty" className="empty" style={{ padding: 20 }}><i className="bi bi-inbox" /> No files — download something!</div> : null) : (
-                <div data-testid="media-list-rows">
                   {filtered.map((it, fi) => {
                     const ky = rowKey(it);
                     const pk = !it.dir ? playlistKey(it) : null;
@@ -973,7 +969,7 @@ export default function Media() {
                     );
                   })}
                 </div>
-              )}
+              ))}
             </>
           )}
         </div>
