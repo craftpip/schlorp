@@ -173,6 +173,10 @@ export default function Media() {
   const [confirmState, setConfirmState] = useState({ open: false, id: null, name: "" });
   const [alertState, setAlertState] = useState({ open: false, title: "", message: "" });
   const [deleteTarget, setDeleteTarget] = useState(null);
+  const [yArmKey, setYArmKey] = useState(null);
+  const lastYRef = useRef(0);
+  const yArmRef = useRef(null);
+  const yTimerRef = useRef(null);
   const playlistMenuCloseTimer = useRef(null);
   const playlistKey = (it) => {
     if (it && it._isPlaylistItem) return rowKey(it);
@@ -313,7 +317,7 @@ export default function Media() {
       fetch(`/api/playlists/${encodeURIComponent(activePlId)}`).then((r) => r.json()).then((j) => { if (j.ok) setPlaylistDetail(j.playlist); }).catch(() => {});
     }
   }, [playlists]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => () => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); }, []);
+  useEffect(() => () => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); if (yTimerRef.current) clearTimeout(yTimerRef.current); }, []);
   const handleCreatePlaylist = async () => {
     const name = String(newPlaylistName || "").trim();
     if (!name) return;
@@ -358,14 +362,14 @@ export default function Media() {
   // Sticky-aware scroll: native scrollIntoView({block:"nearest"}) ignores the
   // sticky toolbar, leaving the row hidden under it or bottom-flush. Scroll
   // manually only when the selected row is actually out of view.
-  const scrollSelectionIntoView = () => {
+  const scrollSelectionIntoView = (smooth = false) => {
     const el = document.querySelector(`[data-selected="true"]`);
     if (!el) return;
     const sticky = document.querySelector(`[data-testid="media-sticky"]`);
     const offset = (sticky ? sticky.offsetHeight : 0) + 12;
     const rect = el.getBoundingClientRect();
     if (rect.top < offset || rect.bottom > window.innerHeight) {
-      window.scrollTo({ top: Math.max(0, window.scrollY + rect.top - offset), behavior: "auto" });
+      window.scrollTo({ top: Math.max(0, window.scrollY + rect.top - offset), behavior: smooth ? "smooth" : "auto" });
     }
   };
 
@@ -377,11 +381,11 @@ export default function Media() {
     scrollSelectionIntoView();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, loading]);
-  // Arrow-key navigation arms a one-shot scroll so the highlight stays visible.
+  // Keyboard navigation arms a one-shot smooth scroll so the highlight stays visible.
   useEffect(() => {
     if (!keyboardScrollRef.current || viewerOpen) { keyboardScrollRef.current = false; return; }
     keyboardScrollRef.current = false;
-    scrollSelectionIntoView();
+    scrollSelectionIntoView(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedIdx]);
 
@@ -393,6 +397,38 @@ export default function Media() {
       const next = Math.min(allSelectable.length - 1, Math.max(0, base + delta));
       keyboardScrollRef.current = true;
       setSelectedKey(selectableKey(allSelectable[next]));
+    };
+    // Grid view: move to the nearest tile/chip in a direction (WASD).
+    const moveSelectionSpatial = (dir) => {
+      const nodes = [...document.querySelectorAll('[data-testid="media-tile-file"], [data-testid="media-tile-folder"], [data-testid="media-tile-playlist"]')];
+      if (!nodes.length) return;
+      const keyOf = (el) => el.getAttribute("data-filename");
+      const current = document.querySelector('[data-selected="true"]');
+      if (!current) {
+        keyboardScrollRef.current = true;
+        setSelectedKey(keyOf(nodes[0]));
+        return;
+      }
+      const cr = current.getBoundingClientRect();
+      const cx = cr.left + cr.width / 2, cy = cr.top + cr.height / 2;
+      let best = null, bestScore = Infinity;
+      for (const el of nodes) {
+        if (el === current) continue;
+        const r = el.getBoundingClientRect();
+        const x = r.left + r.width / 2, y = r.top + r.height / 2;
+        const dx = x - cx, dy = y - cy;
+        let primary, secondary;
+        if (dir === "left") { if (dx >= -4) continue; primary = -dx; secondary = Math.abs(dy); }
+        else if (dir === "right") { if (dx <= 4) continue; primary = dx; secondary = Math.abs(dy); }
+        else if (dir === "up") { if (dy >= -4) continue; primary = -dy; secondary = Math.abs(dx); }
+        else { if (dy <= 4) continue; primary = dy; secondary = Math.abs(dx); }
+        const score = primary + secondary * 2.5;
+        if (score < bestScore) { bestScore = score; best = el; }
+      }
+      if (best) {
+        keyboardScrollRef.current = true;
+        setSelectedKey(keyOf(best));
+      }
     };
     const onKey = (e) => {
       if (confirmState.open || promptState.open || alertState.open || !!deleteTarget) return;
@@ -414,6 +450,37 @@ export default function Media() {
         const i = order.indexOf(type);
         const next = order[(i + 1) % order.length];
         setType(next);
+      }
+      else if (lowK === "y" && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        // Same as viewer: y twice deletes the selected file (600ms window).
+        if (e.repeat) return;
+        e.preventDefault();
+        if (selectedIdx === -1) return;
+        const it = allSelectable[selectedIdx];
+        if (!it || it._isPlaylist || it.dir) return;
+        const now = Date.now();
+        const k = selectableKey(it);
+        if (now - lastYRef.current < 600 && yArmRef.current === k) {
+          lastYRef.current = 0;
+          yArmRef.current = null;
+          setYArmKey(null);
+          if (yTimerRef.current) { clearTimeout(yTimerRef.current); yTimerRef.current = null; }
+          if (runDeleteItemRef.current) runDeleteItemRef.current(it);
+        } else {
+          lastYRef.current = now;
+          yArmRef.current = k;
+          setYArmKey(k);
+          if (yTimerRef.current) clearTimeout(yTimerRef.current);
+          yTimerRef.current = setTimeout(() => { setYArmKey(null); yArmRef.current = null; lastYRef.current = 0; yTimerRef.current = null; }, 600);
+        }
+      }
+      else if (isGrid && !e.ctrlKey && !e.altKey && !e.metaKey && (lowK === "w" || lowK === "a" || lowK === "s" || lowK === "d" || lowK === "q")) {
+        e.preventDefault();
+        if (lowK === "w") moveSelectionSpatial("up");
+        else if (lowK === "a") moveSelectionSpatial("left");
+        else if (lowK === "s") moveSelectionSpatial("down");
+        else if (lowK === "d") moveSelectionSpatial("right");
+        else goUp();
       }
       else if (isLeft) { e.preventDefault(); goUp(); }
       else if (isUp) { e.preventDefault(); moveSelection(-1); }
@@ -549,6 +616,10 @@ export default function Media() {
     const it = deleteTarget;
     if (!it) return;
     setDeleteTarget(null);
+    await runDeleteItem(it);
+  };
+  const runDeleteItem = async (it) => {
+    if (!it) return;
     const key = rowKey(it);
     const isPlItem = !!it._isPlaylistItem;
     const slash = key.lastIndexOf("/");
@@ -577,8 +648,18 @@ export default function Media() {
       } catch {}
       refreshPlaylists();
     }
-    load(folder);
+    // Optimistic UI: drop just the deleted row locally instead of a full
+    // reload — keeps scroll position and loaded thumbnails intact.
+    setItems((prev) => prev.filter((x) => {
+      const rk = rowKey(x);
+      return rk !== key && playlistKeyForMedia(folder, rk) !== key;
+    }));
+    const pending = pendingSelectRef.current;
+    pendingSelectRef.current = null;
+    if (pending) setSelectedKey(pending);
   };
+  const runDeleteItemRef = useRef(null);
+  runDeleteItemRef.current = runDeleteItem;
 
   const rows = useMemo(() => {
     if (!isGrid || !gridW) return [];
@@ -653,7 +734,7 @@ export default function Media() {
         onClick={() => tapItem(it)}
         onDoubleClick={() => openItem(it)}
         title={`${displayName(it)} — click to select, double-click to open`}
-        style={{ width: FOLDER_CHIP_W, height: FOLDER_CHIP_H, flex: "0 0 auto", display: "flex", alignItems: "center", gap: 10, padding: "0 12px", overflow: "hidden", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)", outline: selected ? "2px solid var(--accent)" : "none", cursor: "pointer" }}
+        style={{ width: FOLDER_CHIP_W, height: FOLDER_CHIP_H, flex: "0 0 auto", display: "flex", alignItems: "center", gap: 10, padding: "0 12px", overflow: "hidden", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)", outline: selected ? "4px solid var(--accent)" : "none", cursor: "pointer" }}
       >
         <i className="bi bi-folder-fill" style={{ fontSize: 24, color: "#f59e0b", flex: "0 0 auto" }} />
         <span style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{displayName(it)}</span>
@@ -677,7 +758,7 @@ export default function Media() {
         onMouseEnter={() => setHoveredPlId(pl.id)}
         onMouseLeave={() => setHoveredPlId((cur) => (cur === pl.id ? null : cur))}
         title={`${pl.name} · ${count} items — click to select, double-click to open`}
-        style={{ width: FOLDER_CHIP_W, height: FOLDER_CHIP_H, flex: "0 0 auto", display: "flex", alignItems: "center", gap: 10, padding: "0 8px 0 12px", overflow: "hidden", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)", outline: selected ? "2px solid #6366f1" : "none", cursor: "pointer", position: "relative" }}
+        style={{ width: FOLDER_CHIP_W, height: FOLDER_CHIP_H, flex: "0 0 auto", display: "flex", alignItems: "center", gap: 10, padding: "0 8px 0 12px", overflow: "hidden", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)", outline: selected ? "4px solid #6366f1" : "none", cursor: "pointer", position: "relative" }}
       >
         <i className="bi bi-collection-play-fill" style={{ fontSize: 22, color: "#6366f1", flex: "0 0 auto" }} />
         <span style={{ flex: 1, fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{pl.name}</span>
@@ -740,7 +821,7 @@ export default function Media() {
         onClick={() => tapItem(it)}
         onDoubleClick={() => openItem(it)}
         title={`${displayName(it)} — click to select, double-click to open`}
-        style={{ position: "relative", flex: isDir ? "0 0 auto" : "0 0 auto", width: w, height: h, overflow: menuOpen ? "visible" : "hidden", zIndex: menuOpen ? 60 : "auto", borderRadius: 0, background: isDir ? "var(--surface-2)" : "var(--surface-2)", outline: selected ? "2px solid var(--accent)" : "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8 }}
+        style={{ position: "relative", flex: isDir ? "0 0 auto" : "0 0 auto", width: w, height: h, overflow: menuOpen ? "visible" : "hidden", zIndex: menuOpen ? 60 : "auto", borderRadius: 0, background: isDir ? "var(--surface-2)" : "var(--surface-2)", outline: selected ? "4px solid var(--accent)" : "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8 }}
       >
         {src ? (
           <span style={{ position: "relative", width: "100%", height: "100%", flex: 1, display: "block", background: "#000", minHeight: 0 }}>
@@ -839,7 +920,7 @@ export default function Media() {
       setViewerKey(null);
     } else {
       const nk = rowKey(next);
-      pendingSelectRef.current = nk;
+      pendingSelectRef.current = null;
       setSelectedKey(nk);
       setViewerKey(nk);
     }
@@ -847,7 +928,15 @@ export default function Media() {
       fetch(`/api/playlists/${encodeURIComponent(activePlId)}`).then((r) => r.json()).then((j) => { if (j.ok) setPlaylistDetail(j.playlist); }).catch(() => {});
       refreshPlaylists();
     }
-    load(folder);
+    // Optimistic UI: drop just the deleted file locally instead of a full
+    // reload — keeps loaded thumbnails intact when quitting the viewer.
+    const dk = deletedKey;
+    if (dk != null) {
+      setItems((prev) => prev.filter((x) => {
+        const rk = rowKey(x);
+        return rk !== dk && playlistKeyForMedia(folder, rk) !== dk;
+      }));
+    }
   };
 
   // Grid view only: folders render as a Drive-style fixed-size row on top,
@@ -1116,6 +1205,15 @@ export default function Media() {
           }
         }}
       />
+      {yArmKey && !viewerOpen && (
+        <div
+          data-testid="media-y-confirm"
+          onClick={() => { setYArmKey(null); yArmRef.current = null; lastYRef.current = 0; }}
+          style={{ position: "fixed", bottom: 18, left: "50%", transform: "translateX(-50%)", zIndex: 120, fontSize: 12, fontWeight: 600, color: "#fff", background: "#ef4444", padding: "6px 12px", borderRadius: 999, border: "1px solid rgba(255,255,255,.2)", whiteSpace: "nowrap", cursor: "pointer" }}
+        >
+          Press y again to confirm delete
+        </div>
+      )}
       <AlertModal open={alertState.open} title={alertState.title} message={alertState.message} onClose={() => setAlertState({ open: false, title: "", message: "" })} />
       <ConfirmModal
         open={!!deleteTarget}
