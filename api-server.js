@@ -938,6 +938,80 @@ app.get("/api/mediadims", async (req, res) => {
     return res.status(400).json({ ok: false, error: error.message });
   }
 });
+
+// --- Media custom order (.mediaorder.json) ---
+// Per-folder manual tile ordering for grid `sort=custom`. Scoped by folder
+// + flat flag; stores rowKeys (flat: rel, else: name) in user order.
+const mediaorderFile = path.join(rootDir, ".mediaorder.json");
+let mediaorderChain = Promise.resolve();
+async function withMediaorderFile(fn) {
+  let result, error;
+  const task = async () => { try { result = await fn(); } catch (e) { error = e; } };
+  mediaorderChain = mediaorderChain.then(task, task);
+  await mediaorderChain;
+  if (error) throw error;
+  return result;
+}
+let mediaorderCache = null; // { scopes: { scopeKey: [rowKey] } }
+function mediaorderScope(folder, flat) {
+  const f = String(folder || "").trim().replace(/\/+$/, "");
+  return `${flat ? "flat:" : "folder:"}${f}`;
+}
+async function loadMediaorder() {
+  if (mediaorderCache) return mediaorderCache;
+  try {
+    const raw = await fs.readFile(mediaorderFile, "utf8");
+    const parsed = JSON.parse(raw);
+    mediaorderCache = parsed && typeof parsed === "object" && parsed.scopes && typeof parsed.scopes === "object" ? parsed.scopes : {};
+  } catch (e) {
+    if (!e || e.code !== "ENOENT") console.error("[mediaorder] load failed:", e && e.message);
+    mediaorderCache = {};
+  }
+  return mediaorderCache;
+}
+async function saveMediaorder() {
+  await withMediaorderFile(async () => {
+    await fs.mkdir(path.dirname(mediaorderFile), { recursive: true });
+    await fs.writeFile(mediaorderFile, JSON.stringify({ updatedAt: new Date().toISOString(), scopes: mediaorderCache || {} }), "utf8");
+  });
+}
+app.get("/api/mediaorder", async (req, res) => {
+  try {
+    const folder = String(req.query?.folder || "").trim();
+    const flat = String(req.query?.flat || "") === "1";
+    const scope = mediaorderScope(folder, flat);
+    const scopes = await loadMediaorder();
+    return res.json({ ok: true, scope, folder, flat, order: Array.isArray(scopes[scope]) ? scopes[scope] : [] });
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error.message });
+  }
+});
+app.put("/api/mediaorder", async (req, res) => {
+  try {
+    const folder = String(req.body?.folder ?? req.query?.folder ?? "").trim();
+    const flatRaw = req.body?.flat ?? req.query?.flat ?? "";
+    const flat = flatRaw === true || String(flatRaw) === "1";
+    const order = req.body?.order;
+    if (!Array.isArray(order)) return res.status(400).json({ ok: false, error: "order array required" });
+    const clean = [];
+    const seen = new Set();
+    for (const k of order) {
+      const s = String(k ?? "").trim();
+      if (!s || s.includes("\\") || s === "." || s.startsWith("/") || s.includes("..")) continue;
+      if (seen.has(s)) continue;
+      seen.add(s);
+      clean.push(s);
+      if (clean.length >= 20000) break;
+    }
+    const scope = mediaorderScope(folder, flat);
+    const scopes = await loadMediaorder();
+    scopes[scope] = clean;
+    await saveMediaorder();
+    return res.json({ ok: true, scope, folder, flat, order: clean });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
 app.delete("/api/media", async (req, res) => {
   try {
     const folder = String(req.query?.folder || req.body?.folder || "").trim();
@@ -977,6 +1051,26 @@ app.delete("/api/media", async (req, res) => {
         delete dims[canonical];
         await saveMediadims();
       }
+    } catch {}
+    // Prune custom-order scopes (best-effort): the parent folder's scope
+    // loses the basename, flat scopes lose the media-relative key.
+    try {
+      const canonical = rel.split(path.sep).join("/");
+      const parent = path.posix.dirname(canonical);
+      const parentFolder = parent === "." ? "" : parent;
+      const scopes = await loadMediaorder();
+      let mutated = false;
+      const folderScope = mediaorderScope(parentFolder, false);
+      if (Array.isArray(scopes[folderScope]) && scopes[folderScope].includes(name)) {
+        scopes[folderScope] = scopes[folderScope].filter((k) => k !== name);
+        mutated = true;
+      }
+      for (const [scope, arr] of Object.entries(scopes)) {
+        if (!scope.startsWith("flat:") || !Array.isArray(arr) || !arr.includes(canonical)) continue;
+        scopes[scope] = arr.filter((k) => k !== canonical);
+        mutated = true;
+      }
+      if (mutated) await saveMediaorder();
     } catch {}
     return res.json({ ok: true });
   } catch (error) {

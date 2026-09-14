@@ -52,6 +52,8 @@
 | POST | `/sync-queue/pending/remove` | JSON: `url` (req) | `{ ok, removed }` | Removes matching pending item(s) from the sync queue |
 | POST | `/download` | JSON/query: `link` (req), `folder` (opt), `maxQuality` (opt) | `text/plain` streaming | Downloads media. Busy → 429. |
 | POST | `/scan-saved` | JSON/query: `url` (req), `endUrls` (opt), `account` (opt, default "default") | `{ ok, urls, ids, ... }` | Scans IG saved page using account's profile. |
+| GET | `/api/mediaorder` | query: `folder` (opt), `flat` (opt "1") | `{ ok, scope, order }` | Custom grid order per folder+flat scope (`.mediaorder.json`) |
+| PUT | `/api/mediaorder` | JSON: `folder` (opt), `flat` (opt), `order` (array, req) | `{ ok, scope, order }` | Saves custom grid order (deduped, sanitized, max 20000) |
 
 ## Environment Variables (all optional, defaults in parens)
 

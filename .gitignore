@@ -5,6 +5,7 @@ node_modules/
 .web-queue.json
 .playlists.json
 .mediadims.json
+.mediaorder.json
 .saved-sync-state.json.bak.*
 .env
 .docker-volumes.backup

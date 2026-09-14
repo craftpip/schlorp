@@ -86,6 +86,19 @@ export default function Media() {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
   const filter = searchParams.get("q") || "";
+  // Custom manual order (sort=custom): server-persisted per folder+flat scope.
+  // Loaded on demand when custom sort is active; files missing from the
+  // stored order append after ordered ones in listing order.
+  const [customOrder, setCustomOrder] = useState([]);
+  const [dropInfo, setDropInfo] = useState(null);
+  const dragKeyRef = useRef(null);
+  const customOrderMap = useMemo(() => {
+    const m = new Map();
+    for (let i = 0; i < customOrder.length; i++) {
+      if (!m.has(customOrder[i])) m.set(customOrder[i], i);
+    }
+    return m;
+  }, [customOrder]);
 
   const crumbs = folder ? folder.split("/").filter(Boolean) : [];
   // filtered/viewable and playlistItemsForView are assigned after playlist state (which defines activePlId etc.) to avoid TDZ
@@ -224,6 +237,25 @@ export default function Media() {
       if (type !== "all" && fileCategory(it.name) !== type) return false;
       return true;
     });
+    if (sort === "custom") {
+      // Manual order: dirs stay name-sorted on top; playlist views keep
+      // their own order (custom drag-drop is a media-folder feature).
+      if (inPlaylistView) return base;
+      const dirs = [];
+      const files = [];
+      for (const it of base) (it.dir ? dirs : files).push(it);
+      const col = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+      dirs.sort((a, b) => col.compare(a.name, b.name));
+      if (customOrderMap.size) {
+        const keyOf = (it) => (isFlat ? it.rel || it.name : it.name);
+        files.sort((a, b) => {
+          const ai = customOrderMap.has(keyOf(a)) ? customOrderMap.get(keyOf(a)) : Infinity;
+          const bi = customOrderMap.has(keyOf(b)) ? customOrderMap.get(keyOf(b)) : Infinity;
+          return ai - bi;
+        });
+      }
+      return [...dirs, ...files];
+    }
     if (sort) {
       const dirs = [];
       const files = [];
@@ -345,6 +377,77 @@ export default function Media() {
       fetch(`/api/playlists/${encodeURIComponent(activePlId)}`).then((r) => r.json()).then((j) => { if (j.ok) setPlaylistDetail(j.playlist); }).catch(() => {});
     }
   }, [playlists]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Custom order: fetch the stored sequence for this folder+flat scope when
+  // custom sort becomes active (or the scope changes while active).
+  useEffect(() => {
+    if (sort !== "custom" || inPlaylistView) return;
+    const qs = new URLSearchParams();
+    if (folder) qs.set("folder", folder);
+    if (isFlat) qs.set("flat", "1");
+    fetch(`/api/mediaorder?${qs.toString()}`).then((r) => r.json()).then((j) => {
+      if (j && j.ok && Array.isArray(j.order)) setCustomOrder(j.order);
+    }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sort, folder, isFlat, inPlaylistView]);
+  // Persist a reordered visible sequence (optimistic: state first, PUT after).
+  const saveCustomOrder = (order) => {
+    setCustomOrder(order);
+    fetch("/api/mediaorder", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ folder, flat: isFlat ? "1" : "", order }),
+    }).catch(() => {});
+  };
+  // Reorder helpers operate on the visible file sequence (drag-drop is
+  // disabled while search/type filters are active, so visible === all).
+  const moveCustomKey = (dragKey, targetKey, after = false) => {
+    if (!dragKey || !targetKey || dragKey === targetKey) return;
+    const vis = filtered.filter((it) => !it.dir).map((it) => rowKey(it));
+    if (!vis.includes(dragKey) || !vis.includes(targetKey)) return;
+    const next = vis.filter((k) => k !== dragKey);
+    const idx = next.indexOf(targetKey) + (after ? 1 : 0);
+    next.splice(idx, 0, dragKey);
+    setSelectedKey(dragKey);
+    saveCustomOrder(next);
+  };
+  // For a given mouse point inside the tile container, find the nearest file
+  // tile and where on it the drop should land: its closest edge/side, which
+  // tells us both the insertion point (before/after the tile) and the visual
+  // line position (left/right/top/bottom of the tile).
+  const nearestDropInfo = (container, px, py, dragKey) => {
+    const vis = filtered.filter((it) => !it.dir).map((it) => rowKey(it));
+    const els = container.querySelectorAll("[data-filename]");
+    let best = null;
+    let bestDist = Infinity;
+    for (const el of els) {
+      if (el.dataset.filename === dragKey) continue;
+      if (el.classList.contains("media-tile-folder")) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 && r.height === 0) continue;
+      const dx = px < r.left ? r.left - px : px > r.right ? px - r.right : 0;
+      const dy = py < r.top ? r.top - py : py > r.bottom ? py - r.bottom : 0;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d < bestDist) { bestDist = d; best = el; }
+    }
+    if (!best) return null;
+    const r = best.getBoundingClientRect();
+    let side, align;
+    if (px < r.left) { side = "before"; align = "left"; }
+    else if (px > r.right) { side = "after"; align = "right"; }
+    else if (py < r.top) { side = "before"; align = "top"; }
+    else if (py > r.bottom) { side = "after"; align = "bottom"; }
+    else {
+      // Hovering ON the item: it is the destination, so the dragged file
+      // takes its slot. If the target sits after the source, that slot is
+      // one position ahead (after the target); otherwise it is before it.
+      const si = vis.indexOf(dragKey);
+      const ti = vis.indexOf(best.dataset.filename);
+      if (si > -1 && ti > -1 && si < ti) { side = "after"; align = "right"; }
+      else { side = "before"; align = "left"; }
+    }
+    return { key: best.dataset.filename, side, align };
+  };
+  const sameDropInfo = (a, b) => !!a && !!b && a.key === b.key && a.side === b.side && a.align === b.align;
   useEffect(() => () => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); if (yTimerRef.current) clearTimeout(yTimerRef.current); }, []);
   // Merge server-side dimensions without resetting thumbnails
   // (setItems/load would flash spinners). Retries a few times so entries
@@ -505,12 +608,35 @@ export default function Media() {
         const x = r.left + r.width / 2, y = r.top + r.height / 2;
         const dx = x - cx, dy = y - cy;
         let primary, secondary;
-        if (dir === "left") { if (dx >= -4) continue; primary = -dx; secondary = Math.abs(dy); }
-        else if (dir === "right") { if (dx <= 4) continue; primary = dx; secondary = Math.abs(dy); }
+        // Left/right stay on the same visual row: candidates on other rows
+        // are ignored so row-end Right falls through to array order below
+        // instead of jumping to the far-right tile elsewhere on the page.
+        if (dir === "left") { if (dx >= -4) continue; if (Math.abs(r.top - cr.top) >= 4) continue; primary = -dx; secondary = Math.abs(dy); }
+        else if (dir === "right") { if (dx <= 4) continue; if (Math.abs(r.top - cr.top) >= 4) continue; primary = dx; secondary = Math.abs(dy); }
         else if (dir === "up") { if (dy >= -4) continue; primary = -dy; secondary = Math.abs(dx); }
         else { if (dy <= 4) continue; primary = dy; secondary = Math.abs(dx); }
         const score = primary + secondary * 2.5;
         if (score < bestScore) { bestScore = score; best = el; }
+      }
+      if (!best && (dir === "left" || dir === "right")) {
+        // Row edge (or row grouping miss): move to the next/prev item in
+        // array order instead of the nearest tile elsewhere on the page.
+        const delta = dir === "right" ? 1 : -1;
+        if (selectedIdx !== -1 && allSelectable.length) {
+          const ni = selectedIdx + delta;
+          if (ni >= 0 && ni < allSelectable.length) {
+            keyboardScrollRef.current = smooth ? "smooth" : "instant";
+            setSelectedKey(selectableKey(allSelectable[ni]));
+          }
+          return;
+        }
+        const ci = nodes.indexOf(current);
+        const ni = ci + delta;
+        if (ci !== -1 && ni >= 0 && ni < nodes.length) {
+          keyboardScrollRef.current = smooth ? "smooth" : "instant";
+          setSelectedKey(keyOf(nodes[ni]));
+        }
+        return;
       }
       if (best) {
         keyboardScrollRef.current = smooth ? "smooth" : "instant";
@@ -965,6 +1091,12 @@ export default function Media() {
     const handleMenuEnter = () => { if (playlistMenuCloseTimer.current) { clearTimeout(playlistMenuCloseTimer.current); playlistMenuCloseTimer.current = null; } setOpenMenuKey(rk); };
     const handleMenuLeave = () => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); playlistMenuCloseTimer.current = setTimeout(() => setOpenMenuKey((cur) => (cur === rk ? null : cur)), 120); };
     const isCoarse = isCoarsePointer();
+    // Custom manual order: file tiles are draggable in grid view only (list
+    // view just displays the order). Disabled for folders, playlist views,
+    // and while search/type filters hide files (visible !== all there).
+    const dragEnabled = sort === "custom" && !inPlaylistView && !isDir && !filtersActive;
+    const isDropTarget = dropInfo && dropInfo.key === rk;
+    const dropAlign = isDropTarget ? dropInfo.align : null;
     return (
       <div
         key={isFlat ? it.rel || it.name : it.name}
@@ -975,8 +1107,16 @@ export default function Media() {
         data-selected={selected}
         onClick={() => tapItem(it)}
         onDoubleClick={() => openItem(it)}
-        title={`${displayName(it)} — click to select, double-click to open`}
-        style={{ position: "relative", flex: isDir ? "0 0 auto" : "0 0 auto", width: w, height: h, overflow: menuOpen ? "visible" : "hidden", zIndex: menuOpen ? 60 : "auto", borderRadius: 0, background: isDir ? "var(--surface-2)" : "var(--surface-2)", outline: selected ? "4px solid var(--accent)" : "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, contentVisibility: menuOpen ? "visible" : "auto", containIntrinsicSize: `${w}px ${h}px` }}
+        title={dragEnabled ? `${displayName(it)} — drag to reorder` : `${displayName(it)} — click to select, double-click to open`}
+        draggable={dragEnabled}
+        onDragStart={(e) => {
+          if (!dragEnabled) return;
+          dragKeyRef.current = rk;
+          e.dataTransfer.effectAllowed = "move";
+          try { e.dataTransfer.setData("text/plain", rk); } catch {}
+        }}
+        onDragEnd={() => { dragKeyRef.current = null; if (dropInfo) setDropInfo(null); }}
+        style={{ position: "relative", flex: isDir ? "0 0 auto" : "0 0 auto", width: w, height: h, overflow: (menuOpen || isDropTarget) ? "visible" : "hidden", zIndex: menuOpen ? 60 : "auto", borderRadius: 0, background: isDir ? "var(--surface-2)" : "var(--surface-2)", outline: selected ? "4px solid var(--accent)" : "none", cursor: dragEnabled ? "grab" : "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, contentVisibility: menuOpen ? "visible" : "auto", containIntrinsicSize: `${w}px ${h}px` }}
       >
         {src ? (
           <span style={{ position: "relative", width: "100%", height: "100%", flex: 1, display: "block", background: "#000", minHeight: 0 }}>
@@ -1024,12 +1164,33 @@ export default function Media() {
             )}
           </div>
         )}
+        {isDropTarget && (
+          <span data-testid="media-drop-line" style={{
+            position: "absolute",
+            borderRadius: 2,
+            background: "#6366f1",
+            boxShadow: "0 0 8px rgba(99,102,241,.9)",
+            zIndex: 5,
+            pointerEvents: "none",
+            ...(dropAlign === "left" ? { left: -6, top: -2, bottom: -2, width: 4 }
+              : dropAlign === "right" ? { right: -6, top: -2, bottom: -2, width: 4 }
+              : dropAlign === "top" ? { top: -6, left: -2, right: -2, height: 4 }
+              : { bottom: -6, left: -2, right: -2, height: 4 }),
+          }} />
+        )}
       </div>
     );
   };
   const toggleSort = (key) => {
     const ns = new URLSearchParams(searchParams);
     const cur = ns.get("sort");
+    if (key === "custom") {
+      // Custom has no direction: click activates, second click exits to unsorted.
+      if (cur !== "custom") { ns.set("sort", "custom"); ns.delete("dir"); }
+      else { ns.delete("sort"); ns.delete("dir"); }
+      setSearchParams(ns, { replace: true });
+      return;
+    }
     const curDir = ns.get("dir");
     const initialDir = key === "name" ? "asc" : "desc";
     if (cur !== key) { ns.set("sort", key); ns.set("dir", initialDir); }
@@ -1044,10 +1205,11 @@ export default function Media() {
   );
   const sortBarBtn = (key, label, tid) => {
     const active = sort === key;
+    const isCustom = key === "custom";
     return (
-      <button data-testid={tid} type="button" className={`btn btn-sm ${active ? "btn-primary" : "btn-outline-secondary"}`} onClick={() => toggleSort(key)} title={`Sort by ${label}`} style={{ height: 25, padding: "0 10px", fontSize: 11, display: "inline-flex", alignItems: "center", gap: 4, borderRadius: 6, fontWeight: 600 }}>
+      <button data-testid={tid} type="button" className={`btn btn-sm ${active ? "btn-primary" : "btn-outline-secondary"}`} onClick={() => toggleSort(key)} title={isCustom ? "Custom order — drag tiles to rearrange (grid)" : `Sort by ${label}`} style={{ height: 25, padding: "0 10px", fontSize: 11, display: "inline-flex", alignItems: "center", gap: 4, borderRadius: 6, fontWeight: 600 }}>
         {label}
-        {active && <span style={{ color: "#fff", display: "inline-block", fontSize: 10 }}>{sortDir === "desc" ? "▼" : "▲"}</span>}
+        {!isCustom && active && <span style={{ color: "#fff", display: "inline-block", fontSize: 10 }}>{sortDir === "desc" ? "▼" : "▲"}</span>}
       </button>
     );
   };
@@ -1157,6 +1319,7 @@ export default function Media() {
           {sortBarBtn("name", "Name", "media-sortbar-name")}
           {sortBarBtn("size", "Size", "media-sortbar-size")}
           {sortBarBtn("time", "Time", "media-sortbar-time")}
+          {sortBarBtn("custom", "Custom", "media-sortbar-custom")}
         </span>
       </div>
       </div>
@@ -1196,7 +1359,25 @@ export default function Media() {
                   </div>
                 )}
                 {(fileRows.length > 0 || (dirRows.length === 0 && filtered.length === 0 && (folder || playlists.length === 0))) && (
-                  <div data-testid="media-grid-files" style={{ display: "flex", flexWrap: "wrap", gap: GRID_GAP }}>
+                  <div data-testid="media-grid-files" style={{ display: "flex", flexWrap: "wrap", gap: GRID_GAP }}
+                    onDragOver={(e) => {
+                      if (sort !== "custom" || inPlaylistView || filtersActive || !dragKeyRef.current) return;
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = "move";
+                      const info = nearestDropInfo(e.currentTarget, e.clientX, e.clientY, dragKeyRef.current);
+                      if (sameDropInfo(dropInfo, info)) return;
+                      setDropInfo(info);
+                    }}
+                    onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget) && dropInfo) setDropInfo(null); }}
+                    onDrop={(e) => {
+                      if (sort !== "custom" || inPlaylistView || filtersActive || !dragKeyRef.current) return;
+                      e.preventDefault();
+                      const dk = dragKeyRef.current;
+                      setDropInfo(null);
+                      const info = nearestDropInfo(e.currentTarget, e.clientX, e.clientY, dk);
+                      if (info && info.key !== dk) moveCustomKey(dk, info.key, info.side === "after");
+                    }}
+                  >
                     {filtered.length === 0 ? (!loading && !err ? (filtersActive ? filterEmptyNotice : <div data-testid="media-empty" className="empty" style={{ padding: 20, gridColumn: "1 / -1", width: "100%", textAlign: "center" }}><i className="bi bi-inbox" /> {folder ? "This folder is empty" : "No files — download something!"}</div>) : null) : fileRows.map((row) => renderTile(row.it, row.i, row.w, row.h))}
                   </div>
                 )}
