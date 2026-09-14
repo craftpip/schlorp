@@ -1432,7 +1432,7 @@ app.post("/vnc/disable", async (_req, res) => {
 });
 
 app.get("/api/config", (_req, res) => {
-  const home = process.env.HOME || "/home/boniface";
+  const home = process.env.HOME || process.env.USERPROFILE || require("os").homedir();
   const groups = [
     {
       name: "Security",

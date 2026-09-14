@@ -7,3 +7,4 @@ node_modules/
 .mediadims.json
 .saved-sync-state.json.bak.*
 .env
+.docker-volumes.backup

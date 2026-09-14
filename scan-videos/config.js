@@ -75,7 +75,7 @@ function normalizeUrl(raw) {
 }
 
 function resolveProfileConfig() {
-  const home = process.env.HOME || "/home/boniface";
+  const home = process.env.HOME || process.env.USERPROFILE || require("os").homedir();
   const userDataDir =
     process.env.BROWSER_USER_DATA_DIR || `${home}/.config/cloakbrowser-profile`;
   const profileDir = process.env.BROWSER_PROFILE_DIR || "Default";
