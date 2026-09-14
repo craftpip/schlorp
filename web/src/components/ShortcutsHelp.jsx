@@ -5,8 +5,10 @@ const LIBRARY_SECTIONS = [
     { keys: ["←", "a"], desc: "Go up one folder (list view)" },
     { keys: ["→", "d", "Enter", "Space"], desc: "Open selected folder / file (list view)" },
     { keys: ["w", "a", "s", "d"], desc: "Grid view: nearest item up / left / down / right" },
-    { keys: ["Shift", "W", "S"], desc: "Grid view: page up / down" },
+    { keys: ["Shift", "W", "A", "S", "D"], desc: "Grid view: move selected file (custom order; onto a pile joins it)" },
+    { keys: ["Ctrl", "W", "S"], desc: "Grid view: page up / down (Ctrl+W closes the tab instead)" },
     { keys: ["Space", "Enter"], desc: "Grid view: open selected item" },
+    { keys: ["x"], desc: "Grid view: collapse / expand stack" },
     { keys: ["q"], desc: "Grid view: go up one folder" },
   ] },
   { heading: "Sort & filter", rows: [

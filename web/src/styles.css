@@ -704,7 +704,7 @@
         .view-title{font-size:20px !important}
       }
       /* Prevent horizontal scroll */
-      html,body{overflow-x:hidden;max-width:100%}
+      html,body{overflow-x:clip;max-width:100%}
       .main{min-width:0}
       .content{overflow-x:clip}
       .queue-url,.result-link,.file-path{overflow-wrap:anywhere;word-break:break-word}

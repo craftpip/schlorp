@@ -82,7 +82,7 @@ export default function Media() {
   const isFlat = searchParams.get("flat") === "1";
   const isGrid = searchParams.get("view") !== "list";
   const type = searchParams.get("type") || "all";
-  const sort = searchParams.get("sort") || null;
+  const sort = searchParams.get("sort") || "custom";
   const sortDir = searchParams.get("dir") || "asc";
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -107,14 +107,19 @@ export default function Media() {
   // filtered/viewable and playlistItemsForView are assigned after playlist state (which defines activePlId etc.) to avoid TDZ
 
   const setParam = (k, v) => {
-    const ns = new URLSearchParams(searchParams);
-    const key = k === "folder" ? "f" : k === "sel" ? "s" : k;
-    const val = k === "folder" || k === "sel" ? encB64(v) : v;
-    if (v == null || v === "" || val === "") ns.delete(key);
-    else ns.set(key, val);
-    if (k === "folder") ns.delete("folder");
-    if (k === "sel") ns.delete("sel");
-    setSearchParams(ns, { replace: true });
+    // Functional update: multiple setSearchParams in one batch (e.g. select
+    // + spread-sync on pile click) must chain instead of clobbering each
+    // other from a stale snapshot.
+    setSearchParams((prev) => {
+      const ns = new URLSearchParams(prev);
+      const key = k === "folder" ? "f" : k === "sel" ? "s" : k;
+      const val = k === "folder" || k === "sel" ? encB64(v) : v;
+      if (v == null || v === "" || val === "") ns.delete(key);
+      else ns.set(key, val);
+      if (k === "folder") ns.delete("folder");
+      if (k === "sel") ns.delete("sel");
+      return ns;
+    }, { replace: true });
   };
   const setFilter = (v) => setParam("q", v);
   const setType = (v) => setParam("type", v === "all" ? "" : v);
@@ -229,13 +234,46 @@ export default function Media() {
   const folderStacks = isGrid && !inPlaylistView ? stacksForFolderAll(folder) : [];
   const [selKeys, setSelKeys] = useState(() => new Set());
   const [anchorKey, setAnchorKey] = useState(null);
-  const [spreadStackId, setSpreadStackId] = useState(null);
+  // Spread (open) pile survives reloads via ?spread= (validated below).
+  const [spreadStackId, setSpreadStackId] = useState(() => searchParams.get("spread") || null);
+  // Stacks collapse toggle: false = stacked piles + navigation-reactive
+  // (spread on land/click, collapse on leave); true = every stack spread
+  // and kept open even when selection leaves.
+  const [stacksOpenAll, setStacksOpenAll] = useState(false);
+  useEffect(() => {
+    // Drop ?spread= ids that don't exist in this folder.
+    if (spreadStackId && folderStacks.length && !folderStacks.some((s) => s.id === spreadStackId)) setSpreadStackId(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [folderStacks, spreadStackId]);
+  useEffect(() => {
+    // Keep ?spread= in sync (replace: no history spam on open/close).
+    // Deferred a tick: selection changes committed in the same batch write
+    // the URL first; writing here immediately would snapshot a stale URL
+    // and clobber ?s= (react-router bases every same-batch updater on the
+    // render-time location).
+    const cur = searchParams.get("spread") || "";
+    const want = spreadStackId || "";
+    if (cur === want) return;
+    const t = setTimeout(() => {
+      setSearchParams((prev) => {
+        const ns = new URLSearchParams(prev);
+        if (spreadStackId) ns.set("spread", spreadStackId);
+        else ns.delete("spread");
+        return ns;
+      }, { replace: true });
+    }, 0);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spreadStackId, searchParams]);
   useEffect(() => {
     if (isGrid && !inPlaylistView) refreshStacks(folder);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isGrid, folder, inPlaylistView]);
   // Reset grid multi-select + spread whenever the visible set changes meaningfully.
+  // Skipped on mount so a ?spread= restore survives the reload.
+  const resetSkipRef = useRef(true);
   useEffect(() => {
+    if (resetSkipRef.current) { resetSkipRef.current = false; return; }
     setSelKeys(new Set());
     setAnchorKey(null);
     setSpreadStackId(null);
@@ -694,12 +732,16 @@ export default function Media() {
       setAnchorKey(k);
       setSelectedKey(k);
     };
-    const landOn = (el) => {
+    const landOn = (el, dir) => {
       if (el.getAttribute("data-testid") === "media-tile-pile") {
         const entry = gridVisibleRef.current.find((ve) => ve.kind === "pile" && ve.stackId === el.getAttribute("data-filename"));
         if (entry && entry.members && entry.members.length) {
+          // Land on the nearest edge: entering from left/above (moving
+          // right/down) starts at the FIRST member; from right/below ends
+          // at the LAST member.
+          const m = (dir === "left" || dir === "up") ? entry.members[entry.members.length - 1] : entry.members[0];
           setSpreadStackId(entry.stackId);
-          const fk = rowKey(entry.members[0]);
+          const fk = rowKey(m);
           setSelKeys(new Set([fk]));
           setAnchorKey(fk);
           setSelectedKey(fk);
@@ -709,15 +751,9 @@ export default function Media() {
       const fid = el.getAttribute("data-filename");
       if (fid) selectSingleKey(fid);
     };
-    const moveSelectionSpatial = (dir, smooth = true) => {
-      const nodes = [...document.querySelectorAll(TILE_NAV_Q)];
-      if (!nodes.length) return;
-      const current = navSelectedEl();
-      if (!current) {
-        keyboardScrollRef.current = true;
-        landOn(nodes[0]);
-        return;
-      }
+    // Nearest tile/chip from `current` in `dir` (shared by selection
+    // movement and keyboard reorder). Left/right ignore other rows.
+    const spatialBest = (dir, current, nodes) => {
       const cr = current.getBoundingClientRect();
       const cx = cr.left + cr.width / 2, cy = cr.top + cr.height / 2;
       let best = null, bestScore = Infinity;
@@ -737,6 +773,18 @@ export default function Media() {
         const score = primary + secondary * 2.5;
         if (score < bestScore) { bestScore = score; best = el; }
       }
+      return best;
+    };
+    const moveSelectionSpatial = (dir, smooth = true) => {
+      const nodes = [...document.querySelectorAll(TILE_NAV_Q)];
+      if (!nodes.length) return;
+      const current = navSelectedEl();
+      if (!current) {
+        keyboardScrollRef.current = true;
+        landOn(nodes[0], dir);
+        return;
+      }
+      const best = spatialBest(dir, current, nodes);
       if (!best && (dir === "left" || dir === "right")) {
         // Row edge: move to the next/prev cell in VISUAL grid order (not
         // folder order — members of a spread pile would otherwise jump to
@@ -754,7 +802,7 @@ export default function Media() {
             const target = order[gj];
             if (target.kind === "pile") {
               const pel = nodes.find((n) => n.getAttribute("data-testid") === "media-tile-pile" && n.getAttribute("data-filename") === target.stackId);
-              if (pel) { landOn(pel); return; }
+              if (pel) { landOn(pel, dir); return; }
             } else {
               selectSingleKey(target.key);
               return;
@@ -767,13 +815,13 @@ export default function Media() {
         const ni = ci + delta;
         if (ci !== -1 && ni >= 0 && ni < nodes.length) {
           keyboardScrollRef.current = smooth ? "smooth" : "instant";
-          landOn(nodes[ni]);
+          landOn(nodes[ni], dir);
         }
         return;
       }
       if (best) {
         keyboardScrollRef.current = smooth ? "smooth" : "instant";
-        landOn(best);
+        landOn(best, dir);
       }
     };
     // Grid view: Shift+W / Shift+S jumps a full page up / down, keeping the
@@ -804,7 +852,7 @@ export default function Media() {
       const target = rows[nextRow].els[Math.min(curCol, rows[nextRow].els.length - 1)];
       if (target) {
         keyboardScrollRef.current = smooth ? "smooth" : "instant";
-        landOn(target);
+        landOn(target, dir > 0 ? "down" : "up");
       }
     };
     const onKey = (e) => {
@@ -827,6 +875,29 @@ export default function Media() {
         setSelKeys(new Set(selKey ? [selKey] : []));
         setAnchorKey(selKey || null);
         if (hadSpread) return;
+      }
+      // Grid: X toggles the open (spread) stack — collapse it, or spread
+      // the pile under the primary selection.
+      if (isGrid && !inPlaylistView && lowK === "x" && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
+        e.preventDefault();
+        if (spreadStackIdRef.current) { setSpreadStackId(null); return; }
+        if (selectedIdx !== -1 && allSelectable.length) {
+          const it = allSelectable[selectedIdx];
+          if (it && !it._isPlaylist && !it.dir) {
+            const pileId = keyPileMapRef.current.get(selectableKey(it));
+            if (pileId) {
+              const entry = gridVisibleRef.current.find((ve) => ve.kind === "pile" && ve.stackId === pileId);
+              if (entry && entry.members && entry.members.length) {
+                setSpreadStackId(pileId);
+                const fk = rowKey(entry.members[0]);
+                setSelKeys(new Set([fk]));
+                setAnchorKey(fk);
+                setSelectedKey(fk);
+              }
+            }
+          }
+        }
+        return;
       }
       if (lowK === "g" && !e.ctrlKey && !e.altKey && !e.metaKey) { e.preventDefault(); setParam("view", isGrid ? "list" : ""); }
       else if (lowK === "j" && !e.ctrlKey && !e.altKey && !e.metaKey) { e.preventDefault(); setParam("flat", isFlat ? "" : "1"); }
@@ -868,7 +939,59 @@ export default function Media() {
           yTimerRef.current = setTimeout(() => { setYArmKey(null); yArmRef.current = null; lastYRef.current = 0; yTimerRef.current = null; }, 600);
         }
       }
-      else if (isGrid && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && (lowK === "w" || lowK === "s")) {
+      else if (isGrid && !inPlaylistView && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && (lowK === "w" || lowK === "a" || lowK === "s" || lowK === "d")) {
+        // Shift+WASD: move the selected file for manual ordering (custom
+        // sort only). Moving onto a pile joins it; moving a spread member
+        // outside its pile detaches it (same as drag rules).
+        e.preventDefault();
+        if (sort !== "custom" || filtersActive) return;
+        if (!allSelectable.length || selectedIdx === -1) return;
+        const it = allSelectable[selectedIdx];
+        if (!it || it._isPlaylist || it.dir) return;
+        const dk = selectableKey(it);
+        const afterMove = () => { keyboardScrollRef.current = false; scrollSelectionIntoView(!e.repeat); };
+        const vis = filtered.filter((x) => !x.dir).map((x) => rowKey(x));
+        if (lowK === "a" || lowK === "d") {
+          const i = vis.indexOf(dk);
+          const j = i + (lowK === "d" ? 1 : -1);
+          if (i === -1 || j < 0 || j >= vis.length) return;
+          detachIfOutsideSpread([dk], vis[j]);
+          moveCustomKeys([dk], vis[j], lowK === "d");
+          afterMove();
+          return;
+        }
+        // Up/down: take the slot of the tile above/below (pile = join it).
+        const nodes = [...document.querySelectorAll(TILE_NAV_Q)];
+        const current = navSelectedEl();
+        if (!nodes.length || !current) return;
+        const best = spatialBest(lowK === "w" ? "up" : "down", current, nodes);
+        if (!best || best === current) return;
+        if (best.getAttribute("data-testid") === "media-tile-pile") {
+          const sid = best.getAttribute("data-filename");
+          const entry = gridVisibleRef.current.find((ve) => ve.kind === "pile" && ve.stackId === sid);
+          const mem = entry && entry.members ? entry.members.map((m) => rowKey(m)) : pileMemberKeys(sid);
+          if (!mem.length) return;
+          const after = lowK === "s";
+          const edge = after ? mem[mem.length - 1] : mem[0];
+          if (edge === dk) return;
+          moveCustomKeys([dk], edge, after);
+          if (!mem.includes(dk)) {
+            addStackItems(sid, [dk], folder).then(() => {
+              detachIfOutsideSpread([dk], edge);
+              refreshStacksAndAnnotate();
+            }).catch(() => {});
+          }
+          afterMove();
+          return;
+        }
+        const tk = best.getAttribute("data-filename");
+        if (!tk || tk === dk) return;
+        const si = vis.indexOf(dk), ti = vis.indexOf(tk);
+        detachIfOutsideSpread([dk], tk);
+        moveCustomKeys([dk], tk, si > -1 && ti > -1 ? si < ti : lowK === "s");
+        afterMove();
+      }
+      else if (isGrid && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && (lowK === "w" || lowK === "s")) {
         e.preventDefault();
         moveSelectionPage(lowK === "w" ? -1 : 1, !e.repeat);
       }
@@ -1128,6 +1251,10 @@ export default function Media() {
     if (!it || it.dir) return;
     const k = rowKey(it);
     if (!viewable.some((v) => rowKey(v) === k)) return;
+    // Viewing is single-select: collapse any stale multi-selection so the
+    // grid highlight follows the viewed file on close.
+    setSelKeys(new Set([k]));
+    setAnchorKey(k);
     setSelectedKey(k);
     setViewerKey(k);
   };
@@ -1369,7 +1496,8 @@ export default function Media() {
     const ns = new URLSearchParams(searchParams);
     const cur = ns.get("sort");
     if (key === "custom") {
-      // Custom has no direction: click activates, second click exits to unsorted.
+      // Custom has no direction and is the default: click activates, second
+      // click clears the param (falls back to the custom default).
       if (cur !== "custom") { ns.set("sort", "custom"); ns.delete("dir"); }
       else { ns.delete("sort"); ns.delete("dir"); }
       setSearchParams(ns, { replace: true });
@@ -1397,6 +1525,16 @@ export default function Media() {
       </button>
     );
   };
+  // Stacks collapse toggle: open-all spreads every pile (kept open even
+  // when selection leaves); switching back collapses everything into piles.
+  const toggleStacksOpenAll = () => {
+    if (stacksOpenAll) {
+      setStacksOpenAll(false);
+      setSpreadStackId(null);
+    } else {
+      setStacksOpenAll(true);
+    }
+  };
   // Close the viewer if its file disappears entirely (e.g. externally deleted
   // with no neighbour to fall back to). Delete flows set viewerKey explicitly.
   useEffect(() => {
@@ -1406,6 +1544,8 @@ export default function Media() {
   const goViewer = (i) => {
     if (i >= 0 && i < viewable.length) {
       const k = rowKey(viewable[i]);
+      setSelKeys(new Set([k]));
+      setAnchorKey(k);
       setSelectedKey(k);
       setViewerKey(k);
     }
@@ -1431,6 +1571,8 @@ export default function Media() {
     } else {
       const nk = rowKey(next);
       pendingSelectRef.current = null;
+      setSelKeys(new Set([nk]));
+      setAnchorKey(nk);
       setSelectedKey(nk);
       setViewerKey(nk);
     }
@@ -1479,8 +1621,8 @@ export default function Media() {
         if (!members.length) continue;
         // Mark all members as emitted
         for (const m of members) emitted.add(m);
-        if (spreadStackId === st.id) {
-          // Spread: show members as normal tiles
+        if (spreadStackId === st.id || stacksOpenAll) {
+          // Spread (or open-all mode): show members as normal tiles
           for (const m of members) seq.push({ kind: "file", it: m, key: rowKey(m), w: 0, h: GRID_TARGET_H });
         } else {
           // Pile: one cell containing up to 4 stacked cards
@@ -1492,7 +1634,7 @@ export default function Media() {
       seq.push({ kind: "file", it, key: rowKey(it), w: 0, h: GRID_TARGET_H });
     }
     return seq;
-  }, [isGrid, gridW, filtered, inPlaylistView, spreadStackId, folderStacks]);
+  }, [isGrid, gridW, filtered, inPlaylistView, spreadStackId, stacksOpenAll, folderStacks]);
   // Compute widths for gridVisible entries
   const gridVisibleWithWidths = useMemo(() => {
     if (!isGrid || !gridW) return [];
@@ -1596,36 +1738,21 @@ export default function Media() {
     // Collapse any spread stack when clicking outside it (clicking a
     // member of the open pile keeps it open).
     if (spreadStackId && !isSpreadMember(k)) setSpreadStackId(null);
+    // Clicking the already-selected single item deselects it (single
+    // selection only). Deselecting a member of the open pile closes it.
+    if ((selKeys.size === 1 && selKeys.has(k)) || (!selKeys.size && selKey === k)) {
+      if (spreadStackId && isSpreadMember(k)) setSpreadStackId(null);
+      setSelKeys(new Set());
+      setAnchorKey(null);
+      setSelectedKey("");
+      return;
+    }
     setSelKeys(new Set([k]));
     setAnchorKey(k);
     setSelectedKey(k);
   };
   const gridClickRef = useRef(gridClickHandler);
   gridClickRef.current = gridClickHandler;
-  // Selection toolbar visible when grid multi-select is active
-  const selCount = selKeys.size || (selKey ? 1 : 0);
-  const canStackSelection = isGrid && !inPlaylistView && selCount >= 2 && (() => {
-    // All selected must be files (not dirs) and in the same folder (for non-flat)
-    return true; // simplified: frontend stacks are per-folder anyway
-  })();
-  const selToolbar = isGrid && !inPlaylistView && selCount > 0 && (
-    <span data-testid="media-selection-toolbar" style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12, fontWeight: 600 }}>
-      <span>{selCount} selected</span>
-      {canStackSelection && <button data-testid="media-stack-selection" type="button" className="btn btn-sm btn-primary" onClick={() => {
-        stackSelectionNow();
-      }} style={{ height: 24, padding: "0 10px", fontSize: 11 }}>Stack</button>}
-      {selCount > 0 && <button data-testid="media-delete-selection" type="button" className="btn btn-sm btn-outline-secondary" onClick={() => {
-        const keys = [...selKeys];
-        if (!keys.length && selKey) keys.push(selKey);
-        if (!keys.length) return;
-        // Build fake items for delete confirmation
-        const targets = keys.map((k) => filtered.find((it) => rowKey(it) === k)).filter(Boolean);
-        if (targets.length === 1) setDeleteTarget(targets[0]);
-        else if (targets.length > 1) { setMultiDeleteTarget(targets); }
-      }} style={{ height: 24, padding: "0 10px", fontSize: 11, color: "#f87171" }}>Delete</button>}
-      <button data-testid="media-clear-selection" type="button" className="btn btn-sm btn-outline-secondary" onClick={() => { setSelKeys(new Set()); setAnchorKey(null); setSpreadStackId(null); }} style={{ height: 24, padding: "0 10px", fontSize: 11 }}>Clear</button>
-    </span>
-  );
   // Multi-delete state (batch delete with confirm)
   const [multiDeleteTarget, setMultiDeleteTarget] = useState(null);
   const confirmMultiDelete = async () => {
@@ -1908,12 +2035,14 @@ export default function Media() {
           </span>
         )}
         {(folder || inPlaylistView) && <button data-testid="media-up" className="btn btn-sm btn-outline-secondary" onClick={goUp} style={{ marginLeft: 8 }}><i className="bi bi-arrow-90deg-up" /> Up</button>}
-        {selToolbar}
-        <span data-testid="media-sort-bar" title="Sort (same as list header)" style={{ display: "inline-flex", alignItems: "center", gap: 2, marginLeft: "auto", border: "1px solid var(--border)", borderRadius: 8, padding: 2, background: "var(--surface-2)" }}>
+        <button data-testid="media-stacks-toggle" type="button" className={`btn btn-sm ${stacksOpenAll ? "btn-primary" : "btn-outline-secondary"}`} onClick={toggleStacksOpenAll} title={stacksOpenAll ? "enable stacks — collapse all into piles, navigation reactive" : "open stacks — spread all stacks, kept open"} style={{ height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6, marginLeft: "auto" }}>
+          <i className="bi bi-stack" style={{ fontSize: 12 }} />
+        </button>
+        <span data-testid="media-sort-bar" title="Sort (same as list header)" style={{ display: "inline-flex", alignItems: "center", gap: 2, border: "1px solid var(--border)", borderRadius: 8, padding: 2, background: "var(--surface-2)" }}>
+          {sortBarBtn("custom", "Gallery", "media-sortbar-custom")}
           {sortBarBtn("name", "Name", "media-sortbar-name")}
           {sortBarBtn("size", "Size", "media-sortbar-size")}
           {sortBarBtn("time", "Time", "media-sortbar-time")}
-          {sortBarBtn("custom", "Custom", "media-sortbar-custom")}
         </span>
       </div>
       </div>
