@@ -38,6 +38,7 @@ const app = express();
 const rootDir = __dirname;
 const mediaDir = path.join(rootDir, "media");
 const webDistDir = path.join(rootDir, "web", "dist");
+const landingDir = path.join(rootDir, "landing");
 const port = Number(process.env.PORT) || 6767;
 const apiJobTimeoutMs = parsePositiveInt(process.env.API_JOB_TIMEOUT_MS, 1800000);
 const VNC_FLAG_PATH = process.env.VNC_FLAG || "/data/browser/.vnc-enabled";
@@ -548,8 +549,14 @@ function ensureQueueWorker() {
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: false }));
 
-// ---- Public: SPA assets (React app, must load before auth check) ----
+// ---- Public: landing page (goofy) + SPA assets (must load before auth check) ----
 const fsSync = require("fs");
+app.use("/landing", express.static(landingDir));
+app.get("/landing", (_req, res) => {
+  const idx = path.join(landingDir, "index.html");
+  if (fsSync.existsSync(idx)) return res.sendFile(idx);
+  return res.status(404).send("landing not built");
+});
 app.use(express.static(webDistDir));
 app.get("/", (_req, res) => {
   const distIndex = path.join(webDistDir, "index.html");
@@ -649,7 +656,7 @@ app.use((req, res, next) => {
   const expected = String(process.env.UI_PANEL_PASSWORD || process.env.ADMIN_PASSWORD || UI_PANEL_PASSWORD || "").trim();
   if (!expected) return next();
   // Public endpoints
-  if (req.path === "/api/auth/status" || req.path === "/api/auth" || req.path === "/health" || req.path.startsWith("/health") || req.path === "/vnc/status") return next();
+  if (req.path === "/api/auth/status" || req.path === "/api/auth" || req.path === "/health" || req.path.startsWith("/health") || req.path === "/vnc/status" || req.path === "/landing" || req.path.startsWith("/landing/")) return next();
   // Check header auth, query param, or session cookie
   const provided = String(req.headers["x-panel-password"] || req.headers["x-admin-password"] || req.headers["x-admin-token"] || req.query?.password || "");
   if (provided === expected) return next();
