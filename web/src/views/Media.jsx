@@ -209,21 +209,21 @@ export default function Media() {
   const inPlaylistView = !!activePlId;
   // Shared view ordering (filter text + type + sort, dirs first) so the
   // list render and the default-selection pick in load() agree.
+  // Search/type filters apply to files only — folders are always visible.
   const applyViewOrder = (list) => {
-    let base = list;
     const raw = filter.trim();
-    if (raw) {
-      const isNeg = raw.startsWith("!");
-      const term = (isNeg ? raw.slice(1).trim() : raw).toLowerCase();
+    const isNeg = raw.startsWith("!");
+    const term = (isNeg ? raw.slice(1).trim() : raw).toLowerCase();
+    let base = list.filter((it) => {
+      if (it.dir) return true;
       if (term) {
-        base = base.filter((it) => {
-          const hay = (isFlat ? it.rel || it.name : it.name).toLowerCase();
-          const hit = hay.includes(term);
-          return isNeg ? !hit : hit;
-        });
+        const hay = (isFlat ? it.rel || it.name : it.name).toLowerCase();
+        const hit = hay.includes(term);
+        if (isNeg ? hit : !hit) return false;
       }
-    }
-    if (type !== "all") base = base.filter((it) => !it.dir && fileCategory(it.name) === type);
+      if (type !== "all" && fileCategory(it.name) !== type) return false;
+      return true;
+    });
     if (sort) {
       const dirs = [];
       const files = [];
@@ -247,6 +247,24 @@ export default function Media() {
   })();
   const viewable = filtered.filter((it) => !it.dir);
   const isEmptyForList = filtered.length === 0 && (!folder ? playlists.length === 0 : true);
+  const filtersActive = type !== "all" || filter.trim() !== "";
+  // Missing folder on disk (API 400 ENOENT) with nothing loaded.
+  const folderMissing = !!err && items.length === 0 && /ENOENT|no such file or directory|ENOTDIR/i.test(err);
+  const clearFilters = () => {
+    const ns = new URLSearchParams(searchParams);
+    ns.delete("q");
+    ns.delete("type");
+    setSearchParams(ns, { replace: true });
+  };
+  // Shown instead of "no files" whenever search/type filters hide everything.
+  const filterEmptyNotice = (
+    <div data-testid="media-empty-filters" className="empty" style={{ padding: 20, gridColumn: "1 / -1", width: "100%", textAlign: "center" }}>
+      <i className="bi bi-funnel" /> No files match the current filters — folders are always shown.
+      <div style={{ marginTop: 8 }}>
+        <button data-testid="media-clear-filters" type="button" className="btn btn-sm btn-outline-secondary" onClick={clearFilters}>Clear search & type filter</button>
+      </div>
+    </div>
+  );
   // Playlists as selectable items for keyboard nav (root only, not in playlist view) — shown first like folders
   const playlistsAsItems = !folder && !inPlaylistView ? playlists.map((pl) => ({ _isPlaylist: true, _pl: pl, name: pl.name, dir: false, plKey: `playlist:${pl.id}` })) : [];
   const allSelectable = [...playlistsAsItems, ...filtered];
@@ -422,6 +440,12 @@ export default function Media() {
   const scrollSelectionIntoView = (smooth = false) => {
     const el = document.querySelector(`[data-selected="true"]`);
     if (!el) return;
+    // Cancel any in-flight smooth scroll first: single presses glide, so when
+    // reversing direction the previous animation is still running and the
+    // measurement below reads a mid-flight position (row looks in-view, no
+    // scroll fires, animation settles with the selection out of view — the
+    // "two presses to turn around" bug). Measuring at rest fixes it.
+    window.scrollTo({ top: window.scrollY, behavior: "auto" });
     const sticky = document.querySelector(`[data-testid="media-sticky"]`);
     const offset = (sticky ? sticky.offsetHeight : 0) + 12;
     const rect = el.getBoundingClientRect();
@@ -493,6 +517,38 @@ export default function Media() {
         setSelectedKey(keyOf(best));
       }
     };
+    // Grid view: Shift+W / Shift+S jumps a full page up / down, keeping the
+    // column. Tiles are grouped into visual rows by offsetTop.
+    const moveSelectionPage = (dir, smooth = true) => {
+      const nodes = [...document.querySelectorAll('[data-testid="media-tile-file"], [data-testid="media-tile-folder"], [data-testid="media-tile-playlist"]')];
+      if (!nodes.length) return;
+      const keyOf = (el) => el.getAttribute("data-filename");
+      const rows = [];
+      for (const el of nodes) {
+        const top = el.offsetTop;
+        const row = rows.find((r) => Math.abs(r.top - top) < 4);
+        if (row) row.els.push(el);
+        else rows.push({ top, els: [el] });
+      }
+      rows.sort((a, b) => a.top - b.top);
+      let curRow = dir > 0 ? 0 : rows.length - 1, curCol = 0;
+      const current = document.querySelector('[data-selected="true"]');
+      if (current) {
+        const ci = rows.findIndex((r) => r.els.includes(current));
+        if (ci !== -1) { curRow = ci; curCol = rows[ci].els.indexOf(current); }
+      }
+      const sticky = document.querySelector('[data-testid="media-sticky"]');
+      const offset = (sticky ? sticky.offsetHeight : 0) + 24;
+      const heights = rows.map((r) => Math.max(...r.els.map((el) => el.offsetHeight || GRID_TARGET_H)));
+      const rowH = [...heights].sort((a, b) => a - b)[Math.floor(heights.length / 2)] || GRID_TARGET_H;
+      const rowsPerPage = Math.max(1, Math.floor((window.innerHeight - offset) / (rowH + GRID_GAP)));
+      const nextRow = Math.min(rows.length - 1, Math.max(0, curRow + dir * rowsPerPage));
+      const target = rows[nextRow].els[Math.min(curCol, rows[nextRow].els.length - 1)];
+      if (target) {
+        keyboardScrollRef.current = smooth ? "smooth" : "instant";
+        setSelectedKey(keyOf(target));
+      }
+    };
     const onKey = (e) => {
       if (confirmState.open || promptState.open || alertState.open || !!deleteTarget) return;
       if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable) return;
@@ -544,6 +600,10 @@ export default function Media() {
           if (yTimerRef.current) clearTimeout(yTimerRef.current);
           yTimerRef.current = setTimeout(() => { setYArmKey(null); yArmRef.current = null; lastYRef.current = 0; yTimerRef.current = null; }, 600);
         }
+      }
+      else if (isGrid && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && (lowK === "w" || lowK === "s")) {
+        e.preventDefault();
+        moveSelectionPage(lowK === "w" ? -1 : 1, !e.repeat);
       }
       else if (isGrid && !e.ctrlKey && !e.altKey && !e.metaKey && (lowK === "w" || lowK === "a" || lowK === "s" || lowK === "d" || lowK === "q")) {
         e.preventDefault();
@@ -1102,14 +1162,14 @@ export default function Media() {
       </div>
 
       <div data-testid="media-content" className="media-full">
-      {err && <div data-testid="media-error" className="card" style={{ padding: 12, color: "var(--danger)", marginBottom: 12 }}>{err}</div>}
+      {err && <div data-testid="media-error" className="card" style={{ padding: 12, color: "var(--danger)", marginBottom: 12 }}>{folderMissing ? `Folder not found: ${folder} — it may have been moved, renamed or deleted.` : err}</div>}
 
       <style>{`.media-tile-file:hover .media-tile-playlist-btn-wrap{opacity:1 !important} .media-row:hover .media-row-playlist-btn{opacity:1 !important} .media-tile-playlist:hover .playlist-chip-actions{opacity:1 !important} .media-row-playlist:hover .playlist-row-actions{opacity:1 !important}`}</style>
       {isGrid ? (
         <div data-testid="media-grid-card" className="card media-lib-card">
           <div data-testid="media-grid" ref={gridRef} className="card-body" style={{ padding: GRID_GAP }}>
             {inPlaylistView ? (
-              playlistLoading ? <div data-testid="media-loading" style={{ padding: 20, gridColumn: "1 / -1", color: "var(--muted)" }}>Loading playlist…</div> : !playlistDetail ? <div data-testid="media-error" style={{ padding: 20, gridColumn: "1 / -1", color: "var(--danger)" }}>Playlist not found</div> : filtered.length === 0 ? <div data-testid="media-empty" className="empty" style={{ padding: 20, gridColumn: "1 / -1" }}><i className="bi bi-collection-play" /> Empty playlist — add files from Media</div> : !gridW ? <div data-testid="media-grid-measuring" style={{ padding: 20, color: "var(--muted)" }}>Measuring…</div> : (
+              playlistLoading ? <div data-testid="media-loading" style={{ padding: 20, gridColumn: "1 / -1", color: "var(--muted)" }}>Loading playlist…</div> : !playlistDetail ? <div data-testid="media-error" style={{ padding: 20, gridColumn: "1 / -1", color: "var(--danger)" }}>Playlist not found</div> : filtered.length === 0 ? (filtersActive ? filterEmptyNotice : <div data-testid="media-empty" className="empty" style={{ padding: 20, gridColumn: "1 / -1" }}><i className="bi bi-collection-play" /> Empty playlist — add files from Media</div>) : !gridW ? <div data-testid="media-grid-measuring" style={{ padding: 20, color: "var(--muted)" }}>Measuring…</div> : (
                 <div data-testid="media-grid-tiles" className="media-grid-tiles" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
                     <span className="small" style={{ color: "var(--muted)", fontWeight: 700 }}><i className="bi bi-collection-play-fill" style={{ color: "#6366f1", marginRight: 6 }} />{playlistDetail.name} · {playlistDetail.items.length} items</span>
@@ -1135,12 +1195,12 @@ export default function Media() {
                     </div>
                   </div>
                 )}
-                {(fileRows.length > 0 || (!playlists.length && dirRows.length === 0 && filtered.length === 0)) && (
+                {(fileRows.length > 0 || (dirRows.length === 0 && filtered.length === 0 && (folder || playlists.length === 0))) && (
                   <div data-testid="media-grid-files" style={{ display: "flex", flexWrap: "wrap", gap: GRID_GAP }}>
-                    {filtered.length === 0 ? (!loading ? <div data-testid="media-empty" className="empty" style={{ padding: 20, gridColumn: "1 / -1", width: "100%", textAlign: "center" }}><i className="bi bi-inbox" /> No files — download something!</div> : null) : fileRows.map((row) => renderTile(row.it, row.i, row.w, row.h))}
+                    {filtered.length === 0 ? (!loading && !err ? (filtersActive ? filterEmptyNotice : <div data-testid="media-empty" className="empty" style={{ padding: 20, gridColumn: "1 / -1", width: "100%", textAlign: "center" }}><i className="bi bi-inbox" /> {folder ? "This folder is empty" : "No files — download something!"}</div>) : null) : fileRows.map((row) => renderTile(row.it, row.i, row.w, row.h))}
                   </div>
                 )}
-                {filtered.length > 0 && fileRows.length === 0 && !inPlaylistView && <div data-testid="media-empty" className="empty" style={{ padding: 12 }}><i className="bi bi-inbox" /> No files in this folder</div>}
+                {filtered.length > 0 && fileRows.length === 0 && !inPlaylistView && (filtersActive ? filterEmptyNotice : <div data-testid="media-empty" className="empty" style={{ padding: 12 }}><i className="bi bi-inbox" /> No files in this folder</div>)}
               </div>
             )}
           </div>
@@ -1154,7 +1214,7 @@ export default function Media() {
           {inPlaylistView ? (
             playlistLoading ? <div data-testid="media-loading" style={{ padding: 20, gridColumn: "1 / -1", color: "var(--muted)" }}>Loading playlist…</div> : !playlistDetail ? <div data-testid="media-error" style={{ padding: 20, gridColumn: "1 / -1", color: "var(--danger)" }}>Playlist not found</div> : (
               <>
-                {filtered.length === 0 ? <div data-testid="media-empty" className="empty" style={{ padding: 20, gridColumn: "1 / -1" }}><i className="bi bi-collection-play" /> Empty playlist — add files from Media</div> : (
+                {filtered.length === 0 ? (filtersActive ? filterEmptyNotice : <div data-testid="media-empty" className="empty" style={{ padding: 20, gridColumn: "1 / -1" }}><i className="bi bi-collection-play" /> Empty playlist — add files from Media</div>) : (
                   <div data-testid="media-list-rows" style={{ display: "contents" }}>
                     {filtered.map((it) => {
                       const ky = rowKey(it);
@@ -1188,7 +1248,7 @@ export default function Media() {
             )
           ) : (
             <>
-              {loading && items.length === 0 ? <div data-testid="media-loading" style={{ padding: 20, gridColumn: "1 / -1", color: "var(--muted)" }}>Loading…</div> : (isEmptyForList ? (!loading ? <div data-testid="media-empty" className="empty" style={{ padding: 20, gridColumn: "1 / -1" }}><i className="bi bi-inbox" /> No files — download something!</div> : null) : (
+              {loading && items.length === 0 ? <div data-testid="media-loading" style={{ padding: 20, gridColumn: "1 / -1", color: "var(--muted)" }}>Loading…</div> : (isEmptyForList ? (!loading && !err ? (filtersActive ? filterEmptyNotice : <div data-testid="media-empty" className="empty" style={{ padding: 20, gridColumn: "1 / -1" }}><i className="bi bi-inbox" /> {folder ? "This folder is empty" : "No files — download something!"}</div>) : null) : (
                 <div data-testid="media-list-rows" style={{ display: "contents" }}>
                   {!folder && playlists.map((pl) => {
                     const plKey = `playlist:${pl.id}`;

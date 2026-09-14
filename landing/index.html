@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Schlorp Machine — feed it links. enjoyyy.</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='32' y2='0'%3E%3Cstop stop-color='%236366f1'/%3E%3Cstop offset='1' stop-color='%23ec4899'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M8 10l8 12M16 10l-8 12' stroke='white' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E" />
+<link rel="icon" type="image/png" href="logo.png" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -50,9 +50,12 @@
   @keyframes drift2{0%,100%{transform:translate(0,0) scale(1)}50%{transform:translate(-20px,30px) scale(1.08)}}
 
   /* nav */
-  .nav{position:sticky;top:12px;z-index:40;backdrop-filter:blur(16px) saturate(1.4);background:rgba(15,15,26,.72);border:1px solid rgba(255,255,255,.09);border-radius:50px;box-shadow:0 12px 32px rgba(0,0,0,.35);display:flex;align-items:center;gap:16px;padding:10px 12px 10px 20px;max-width:1060px;margin:12px auto 0}
-  .nav-logo svg{transition:transform .2s}
-  .nav-logo:hover svg{animation:wiggle .45s ease-in-out 2}
+  .nav{position:sticky;top:0;z-index:40;display:flex;align-items:center;gap:16px;padding:14px 22px;transition:background .25s}
+  .nav-scrolled{background:rgba(11,11,18,.82);backdrop-filter:blur(14px) saturate(1.3)}
+  .nav-mark{height:46px;display:grid;place-items:center;flex-shrink:0;transition:transform .2s;transform:translateY(-3px)}
+  .nav-mark img{height:46px;width:auto;display:block;border-radius:12px}
+  .nav-logo:hover .nav-mark{transform:translateY(-3px)}
+
   .nav-links a.ghost{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.14);border-radius:999px;box-shadow:2px 2px 0 rgba(0,0,0,.45);color:var(--muted);transition:transform .15s,box-shadow .15s,background .15s}
   .nav-links a.ghost:nth-child(1){transform:rotate(-2deg)}
   .nav-links a.ghost:nth-child(2){transform:rotate(1.5deg)}
@@ -60,9 +63,8 @@
   .nav-links a.ghost:hover{transform:rotate(0deg) translateY(-1px);box-shadow:3px 4px 0 rgba(0,0,0,.45);background:rgba(255,255,255,.1);color:var(--text)}
   .nav-links a.cta{transform:rotate(1deg);border:2px solid rgba(255,255,255,.9);box-shadow:2px 2px 0 rgba(139,92,246,.7)}
   .nav-links a.cta:hover{transform:rotate(-1.5deg) translateY(-1px);box-shadow:3px 4px 0 rgba(236,72,153,.7)}
-  .nav-logo{display:flex;align-items:center;gap:10px;text-decoration:none}
-  .nav-logo svg{height:32px;width:auto;display:block;filter:drop-shadow(0 2px 12px rgba(99,102,241,.4))}
-  .nav-brand{font-family:var(--display);font-weight:800;font-size:22px;letter-spacing:-.04em;line-height:1}
+  .nav-logo{display:flex;align-items:center;gap:11px;text-decoration:none}
+  .nav-brand{font-family:var(--display);font-weight:800;font-size:21px;letter-spacing:-.04em;line-height:1}
   .nav-tag{font-size:10px;letter-spacing:.18em;text-transform:uppercase;font-weight:700;color:var(--muted);margin-top:1px}
   .nav-links{margin-left:auto;display:flex;gap:8px;align-items:center}
   .nav-links a{font-size:13px;font-weight:600;padding:8px 14px;border-radius:999px;text-decoration:none}
@@ -107,6 +109,14 @@
   .worm-face.blink .eye{transform:scaleY(.12)}
   .worm-face.happy .eye{transform:scaleY(.55)}
   .worm-face.happy .pupil{width:15px;height:15px}
+  .worm-face.wide .eye{transform:scale(1.18)}
+  .worm-face.wide .pupil{width:15px;height:15px}
+  .worm-face.squint .eye{transform:scaleY(.6)}
+  .worm-face.stare .pupil{width:16px;height:16px}
+  .worm-face.sleepy .eye{transform:scaleY(.35)}
+  .worm-face .eye.wink{transform:scaleY(.12)}
+  .worm-face .eye.squint-one{transform:scaleY(.5)}
+  .worm-snack{position:absolute;z-index:6;font-family:var(--mono);font-size:11px;color:#a5b4fc;background:#0a0a12;border:1px solid rgba(99,102,241,.45);padding:7px 10px;border-radius:10px;white-space:nowrap;max-width:calc(100% - 16px);overflow:hidden;text-overflow:ellipsis;box-shadow:0 8px 20px rgba(0,0,0,.4);pointer-events:none}
   .worm-toolbar{display:flex;align-items:center;gap:8px;margin-bottom:12px}
   .dot{width:10px;height:10px;border-radius:50%}
   .dot.r{background:#ff5f57}.dot.y{background:#ffbd2e}.dot.g{background:#28c840}
@@ -232,39 +242,87 @@
   footer{max-width:1100px;margin:0 auto;padding:18px 20px 32px;color:var(--faint);font-size:12px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;justify-content:space-between;border-top:1px solid rgba(255,255,255,.06)}
   footer a{color:var(--muted);text-decoration:none;border-bottom:1px dotted rgba(148,163,184,.4)}
   footer a:hover{color:var(--text)}
+
+  /* responsive */
+  .nav-toggle{display:none;width:40px;height:40px;border-radius:10px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.06);color:var(--text);place-items:center;cursor:pointer;font-size:20px}
+  @media(max-width:860px){
+    .hero{padding-top:22px}
+    .section{padding:28px 16px}
+    .enjoy{padding:8px 16px 28px}
+  }
+  @media(max-width:720px){
+    .nav{padding:10px 14px;gap:10px}
+    .nav-mark{height:38px;transform:translateY(-3px)}
+    .nav-mark img{height:38px}
+    .nav-brand{font-size:18px}
+    .nav-tag{font-size:9px}
+    .nav-toggle{display:grid;margin-left:auto}
+    .nav-links{position:fixed;top:60px;right:12px;left:12px;background:rgba(24,24,38,.98);backdrop-filter:blur(16px);border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:12px;flex-direction:column;align-items:stretch;gap:8px;box-shadow:0 16px 40px rgba(0,0,0,.45);transform:translateY(-8px);opacity:0;pointer-events:none;transition:transform .18s, opacity .18s;z-index:50}
+    .nav-links.open{transform:translateY(0);opacity:1;pointer-events:auto}
+    .nav-links a.ghost{transform:none !important;justify-content:center;padding:12px 14px;background:rgba(255,255,255,.06);box-shadow:none;border:1px solid rgba(255,255,255,.08)}
+    .nav-links a.cta{transform:none !important;justify-content:center;padding:12px 14px}
+    .hero{grid-template-columns:1fr;gap:18px;padding:18px 16px 12px}
+    .hero h1{font-size:clamp(32px,9vw,42px);margin:14px 0 10px}
+    .hero p{font-size:14px}
+    .hero-actions .btn{flex:1 1 auto;justify-content:center}
+    .hero-meta{gap:6px}
+    .pill{font-size:10.5px;padding:5px 9px}
+    .worm-stage{padding:12px;border-radius:18px}
+    .worm-card{padding:12px;border-radius:16px}
+    .sticker{font-size:9px;padding:4px 8px}
+    .st-1{right:6px;top:-6px}
+    .section-head h2{font-size:24px}
+    .section-head p{font-size:13px}
+    .method-toggle{width:100%;justify-content:stretch}
+    .method-toggle button{flex:1;justify-content:center;padding:8px 10px;font-size:12.5px}
+    .step{padding:14px;border-radius:16px}
+    .step h3{font-size:14px}
+    .code{font-size:11.5px;padding:10px 38px 10px 10px}
+    .enjoy-inner{padding:16px;grid-template-columns:1fr}
+    .enjoy h3{font-size:22px}
+    .doodle-grid{grid-template-columns:1fr}
+    .feats{grid-template-columns:1fr}
+    div[style*="grid-template-columns:1.2fr"]{grid-template-columns:1fr !important}
+    footer{padding:16px;gap:10px}
+  }
+  @media(max-width:480px){
+    .nav{padding:10px 12px}
+    .hero{padding:14px 12px 10px}
+    .hero h1{font-size:28px;line-height:.95}
+    .section{padding:22px 12px}
+    .enjoy{padding:6px 12px 22px}
+    .eyebrow{font-size:11px;padding:5px 10px}
+    .yoink-url{flex-wrap:wrap}
+    .yoink-url .link{font-size:10.5px}
+    .yoink-console{padding:12px}
+    .worm-caption{font-size:10px}
+    .copy{width:26px;height:26px}
+    .marquee span{font-size:11px}
+  }
+  @media(max-width:360px){
+    .hero h1{font-size:26px}
+    .hero-actions{flex-direction:column}
+    .hero-actions .btn{width:100%}
+    .nav-links{left:8px;right:8px;top:56px}
+  }
+  html,body{overflow-x:hidden;max-width:100%}
 </style>
 </head>
 <body>
 <div class="bg-blobs"><div class="blob blob1"></div><div class="blob blob2"></div><div class="blob blob3"></div></div>
 
-<nav class="nav">
+<nav class="nav" id="top-nav">
   <a class="nav-logo" href="#">
-    <!-- schlorp worm mark -->
-    <svg viewBox="-1 0 73 35" width="84" height="32" fill="none" aria-hidden="true">
-      <defs>
-        <linearGradient id="g" x1="0" y1="0" x2="72" y2="0" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stop-color="#6366f1"/><stop offset=".55" stop-color="#8b5cf6"/><stop offset="1" stop-color="#ec4899"/>
-        </linearGradient>
-        <filter id="d"><feGaussianBlur stdDeviation="1.5"/></filter>
-        <g id="m">
-          <path d="M7,12 C10.5,14 13.5,18 17,22"/><path d="M17,12 C13.5,14 10.5,18 7,22"/>
-          <path d="M24.5,17 C24.5,13.5 27,11.5 30,11.5 C33,11.5 35.5,14 35.5,17.3 C35.5,20.6 33,22.8 30,22.8 C27,22.8 24.5,20.5 24.5,17 Z"/>
-          <path d="M35.5,22.8 C35.5,18 33.8,16 34.6,12 C35.1,9 36.8,7.5 36.2,5.5"/>
-          <path d="M45.5,22.8 C45.5,18 43.8,16 44.6,12 C45.1,9 46.8,7.5 46.2,5.5"/>
-          <path d="M4,26.5 q4,-4.5 8,0 t8,0 t8,0 t8,0 t8,0 t8,0 t8,0"/>
-          <path d="M60,23.8 L64.6,26.5 L60,29.2 Z"/>
-        </g>
-      </defs>
-      <use href="#m" stroke="url(#g)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" opacity=".28" filter="url(#d)"/>
-      <use href="#m" stroke="url(#g)" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
-      <path d="M60,23.8 L64.6,26.5 L60,29.2 Z" fill="url(#g)"/>
-    </svg>
+    <span class="nav-mark" aria-hidden="true">
+      <img src="logo.png" height="46" alt="schlorp logo" />
+    </span>
     <div>
       <div class="nav-brand">schlorp</div>
-      <div class="nav-tag">schlorp machine • enjoyyy</div>
+      <div class="nav-tag">feed it links • enjoyyy</div>
     </div>
   </a>
-  <div class="nav-links">
+  <button class="nav-toggle" id="nav-toggle" aria-label="Menu" aria-expanded="false"><i class="bi bi-list"></i></button>
+  <div class="nav-links" id="nav-links">
     <a class="ghost" href="#features"><i class="bi bi-stars"></i> features</a>
     <a class="ghost" href="#install"><i class="bi bi-terminal"></i> install</a>
     <a class="ghost" href="https://github.com" target="_blank" rel="noopener"><i class="bi bi-github"></i> github</a>
@@ -277,7 +335,7 @@
     <div class="eyebrow"><i class="bi bi-stars"></i> stealth browser goes brrr <em>since 2026</em></div>
     <h1>
       <span class="wiggle">yoink</span> videos<br>
-      <span class="grad scribble">like you mean it.</span>
+      <span class="grad scribble">of all your funny cat videos.</span>
     </h1>
     <p>
       <strong>Schlorp Machine</strong> is a tiny Node CLI + sneaky CloakBrowser that visits pages and <strong>yoinks the good bits</strong> — if it plays video, the worm can probably schlorp it ;) wink wink. HLS/DASH? <strong>ffmpeg muxes it</strong>. you click, it <em>schlorps</em>. enjoyyy ✨
@@ -335,6 +393,7 @@
   <span>•</span><span><i class="bi bi-stars"></i> worm approved</span>
   <span>•</span><span><i class="bi bi-stars"></i> six sevennn</span>
   <span>•</span><span><i class="bi bi-megaphone"></i> yoink videos, YEAHHHH</span>
+  <span>•</span><span>🐱 definitely just cat videos</span>
   <span>•</span><span>yoink responsibly</span>
   <span>•</span><span><i class="bi bi-lightning-charge-fill"></i> stealthy puppeteer</span>
   <span>•</span><span>enjoyyy</span>
@@ -343,6 +402,7 @@
   <span>•</span><span><i class="bi bi-stars"></i> worm approved</span>
   <span>•</span><span><i class="bi bi-stars"></i> six sevennn</span>
   <span>•</span><span><i class="bi bi-megaphone"></i> yoink videos, YEAHHHH</span>
+  <span>•</span><span>🐱 definitely just cat videos</span>
 </div></div>
 
 <section class="section" id="install">
@@ -440,7 +500,7 @@ ffmpeg -version | head -n 1
     <div class="step feat">
       <div class="feat-icon"><i class="bi bi-bookmark-star"></i></div>
       <h3>certified collectorr</h3>
-      <p>hoard posts from reddit threads, instagram saved collections &amp; such into tidy little folders. the sync daemon even re-checks your IG saved on autopilot like a loyal little goblin.</p>
+      <p>So. Many. CATS. Every CAT video from every reddit hole and IG saved pile, vacuumed into tidy little folders by a machine that never sleeps and never judges. 47 CATS at 3AM? That's not a problem. That's a Tuesday. 😌</p>
       <div class="feat-chips"><span><b>IG saved scan</b></span><span>auto-sync daemon</span><span>folders on folders</span></div>
     </div>
     <div class="step feat">
@@ -496,7 +556,7 @@ ffmpeg -version | head -n 1
         </div>
         <div style="margin-top:12px;display:flex;gap:8px">
           <a class="btn btn-primary" href="#install" style="flex:1;justify-content:center">let's yoink →</a>
-          <a class="btn btn-ghost" href="#" onclick="wiggleWorm();return false" title="wiggle the worm"><i class="bi bi-stars"></i> wiggle</a>
+          <a class="btn btn-ghost" href="#" onclick="feedWorm(event);return false" title="feed the worm"><i class="bi bi-cookie"></i> feed the worm 🪱</a>
         </div>
       </div>
     </div>
@@ -505,8 +565,8 @@ ffmpeg -version | head -n 1
 
 <footer>
   <div style="display:flex;align-items:center;gap:10px">
-    <svg viewBox="-1 0 73 35" width="48" height="18" fill="none" aria-hidden="true"><use href="#m" stroke="url(#g)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M60,23.8 L64.6,26.5 L60,29.2 Z" fill="url(#g)"/></svg>
-    <span><b style="font-family:var(--display);color:var(--text)">schlorp machine</b> — feed it links. enjoyyy. · <span style="font-family:var(--mono)">v1.0.0</span></span>
+    <img src="logo.png" height="28" alt="schlorp logo" style="border-radius:8px" />
+    <span><b style="font-family:var(--display);color:var(--text)">schlorp machine</b> — feed it links. enjoyyy.</span>
   </div>
   <div style="display:flex;gap:14px;flex-wrap:wrap">
     <span>crafted with wiggles & ffmpeg ✨</span>
@@ -533,13 +593,24 @@ ffmpeg -version | head -n 1
     });
   });
   function wiggleWorm(e){
-    const w = document.querySelector('.yoink-console') || document.querySelector('.worm-card');
-    if(w) w.animate([{transform:'rotate(-1.5deg) scale(1.01)'},{transform:'rotate(1.5deg) scale(1.02)'},{transform:'rotate(0deg) scale(1)'}],{duration:480,easing:'ease-in-out',iterations:2});
-    // confetti-ish — burst from the click point, center-screen fallback
+    const scope = (e && e.target && e.target.closest) ? e.target.closest('.enjoy-inner') : null;
+    const t = scope || ((e && e.target && e.target.closest) ? e.target.closest('.doodle, .worm-card, .yoink-console') : null);
+    const w = t || document.querySelector('.yoink-console') || document.querySelector('.worm-card');
+    const waveKF = [ // one sine ripple: up ~ crest ~ trough ~ rest
+      { transform: 'translateY(0) rotate(0deg)' },
+      { transform: 'translateY(-8px) rotate(.8deg)' },
+      { transform: 'translateY(0) rotate(0deg)' },
+      { transform: 'translateY(7px) rotate(-.8deg)' },
+      { transform: 'translateY(0) rotate(0deg)' },
+    ];
+    if(w) w.animate(waveKF, { duration: 1000, easing: 'ease-out', iterations: 1 }); // one confident wobble
     const ox = (e && typeof e.clientX === 'number') ? e.clientX : window.innerWidth / 2;
     const oy = (e && typeof e.clientY === 'number') ? e.clientY : window.innerHeight * 0.4;
+    confettiBurst(ox, oy, 6);
+  }
+  function confettiBurst(ox, oy, n){
     const emojis = ['✨','🪱','💫','🎉','💖','⚡'];
-    for(let i=0;i<6;i++){
+    for(let i=0;i<(n || 6);i++){
       const s=document.createElement('div');
       s.textContent=emojis[Math.floor(Math.random()*emojis.length)];
       s.style.cssText=`position:fixed;left:${ox}px;top:${oy}px;font-size:22px;pointer-events:none;z-index:99`;
@@ -547,6 +618,60 @@ ffmpeg -version | head -n 1
       const x=(Math.random()-0.5)*300, y= -120 - Math.random()*120;
       s.animate([{transform:'translate(-50%,0) scale(0)',opacity:1},{transform:`translate(calc(-50% + ${x}px), ${y}px) scale(1.4)`,opacity:0}],{duration:900+Math.random()*400,easing:'cubic-bezier(.2,.8,.2,1)'}).onfinish=()=>s.remove();
     }
+  }
+  const wormSnacks = [
+    'cats-only.biz/big-collection',
+    'reddit.com/r/onlycats/hot',
+    'instagram.com/saved/cats (67)',
+    'video-final-FINAL-v2.mp4',
+    '3am.cats/live',
+    'floptok.biz/compilation-47',
+    'localhost:6767/your-history',
+    'cats cats cats.html',
+  ];
+  const snackReactions = ['yummy', 'om nom nom', 'tasty link', 'slurped!', 'more!!', 'crunchy', '*burp*'];
+  function feedWorm(e){
+    e = e || {};
+    const btn = (e.target && e.target.closest) ? e.target.closest('a.btn') : document.querySelector('.doodle a.btn-ghost');
+    const holder = btn ? btn.closest('.doodle') : document.querySelector('.doodle');
+    if(!btn || !holder) return;
+    const box = holder.getBoundingClientRect();
+    const br = btn.getBoundingClientRect();
+    const bx = br.left - box.left, by = br.top - box.top;
+    btn.animate( // the button pops instantly
+      [{ transform: 'scale(1)' }, { transform: 'scale(.88)' }, { transform: 'scale(1.06)' }, { transform: 'scale(1)' }],
+      { duration: 240, easing: 'ease-out' }
+    );
+    const chip = document.createElement('div');
+    chip.className = 'worm-snack';
+    chip.textContent = '🔗 ' + wormSnacks[Math.floor(Math.random() * wormSnacks.length)];
+    chip.style.left = Math.max(8, bx - 40) + 'px';
+    chip.style.top = (by - 44) + 'px';
+    holder.appendChild(chip);
+    chip.animate( // dangles, then gets SLURPED into the button
+      [{ transform: 'translateY(-8px) rotate(-2deg) scale(.6)', opacity: 0 },
+       { transform: 'translateY(0) rotate(1deg) scale(1)', opacity: 1, offset: .3 },
+       { transform: 'translateY(6px) rotate(0deg) scale(1)', opacity: 1, offset: .6 },
+       { transform: 'translateY(44px) scale(.1)', opacity: 0 }],
+      { duration: 1200, easing: 'ease-in-out' }
+    ).onfinish = () => {
+      chip.remove();
+      const r = document.createElement('div');
+      r.className = 'float-schlorp';
+      r.textContent = snackReactions[Math.floor(Math.random() * snackReactions.length)];
+      r.style.left = (bx + br.width / 2) + 'px';
+      r.style.top = (by - 10) + 'px';
+      r.style.rotate = (Math.random() * 16 - 8).toFixed(0) + 'deg';
+      holder.appendChild(r);
+      r.animate(
+        [{ transform: 'translate(-50%,0) scale(.8)', opacity: 0 },
+         { transform: 'translate(-50%,-14px) scale(1.1)', opacity: 1, offset: .25 },
+         { transform: 'translate(-50%,-56px) scale(1)', opacity: 0 }],
+        { duration: 900, easing: 'ease-out' }
+      ).onfinish = () => r.remove();
+      const hasXY = (typeof e.clientX === 'number') && (e.clientX || e.clientY);
+      confettiBurst(hasXY ? e.clientX : bx + box.left + br.width / 2, hasXY ? e.clientY : by + box.top, 5);
+    };
   }
   document.querySelector('.yoink-console')?.addEventListener('click', wiggleWorm);
 
@@ -566,6 +691,38 @@ ffmpeg -version | head -n 1
     if(location.hash === '#node-install' || location.hash === '#docker-install') selectInstallMethod(methodFromHash(), false);
   });
   selectInstallMethod(methodFromHash(), false);
+
+  // navbar: transparent at top, bg once scrolled (no radius, no borders)
+  const navEl = document.querySelector('.nav');
+  function navBg(){ navEl?.classList.toggle('nav-scrolled', window.scrollY > 12); }
+  window.addEventListener('scroll', navBg, { passive: true });
+  navBg();
+  // mobile nav toggle
+  (function(){
+    const toggle = document.getElementById('nav-toggle');
+    const links = document.getElementById('nav-links');
+    if(!toggle || !links) return;
+    toggle.addEventListener('click', ()=>{
+      const open = links.classList.toggle('open');
+      toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+      setTimeout(()=>{ toggle.innerHTML = open ? '<i class="bi bi-x-lg"></i>' : '<i class="bi bi-list"></i>'; }, 0);
+    });
+    links.querySelectorAll('a').forEach(a=>a.addEventListener('click', ()=>{
+      if(window.innerWidth <= 720){
+        links.classList.remove('open');
+        toggle.setAttribute('aria-expanded','false');
+        toggle.innerHTML = '<i class="bi bi-list"></i>';
+      }
+    }));
+    document.addEventListener('click', (e)=>{
+      if(window.innerWidth > 720) return;
+      if(!links.classList.contains('open')) return;
+      if(links.contains(e.target) || toggle.contains(e.target)) return;
+      links.classList.remove('open');
+      toggle.setAttribute('aria-expanded','false');
+      toggle.innerHTML = '<i class="bi bi-list"></i>';
+    });
+  })();
 
   // worm-stage: tilt toward cursor + spotlight + clickable schlorps
   (function(){
@@ -607,18 +764,59 @@ ffmpeg -version | head -n 1
       if(!reduce && !raf) raf = requestAnimationFrame(apply);
     });
     const eyes = face ? [...face.querySelectorAll('.eye')] : [];
-    document.addEventListener('mousemove', (e) => { // eyes track you ANYWHERE. there is no escape.
-      if(!eyes.length || reduce) return;
+    let lastMX = window.innerWidth / 2, lastMY = window.innerHeight * 0.3, glanceUntil = 0;
+    function placePupils(x, y){
       for(const eye of eyes){
         const r = eye.getBoundingClientRect();
-        const dx = e.clientX - (r.left + r.width / 2);
-        const dy = e.clientY - (r.top + r.height / 2);
+        const dx = x - (r.left + r.width / 2);
+        const dy = y - (r.top + r.height / 2);
         const dist = Math.hypot(dx, dy) || 1;
         const mag = Math.min(5, dist * 0.03);
         eye.style.setProperty('--ex', (dx / dist * mag).toFixed(1) + 'px');
         eye.style.setProperty('--ey', (dy / dist * mag).toFixed(1) + 'px');
       }
+    }
+    document.addEventListener('mousemove', (e) => { // eyes track you ANYWHERE. there is no escape.
+      lastMX = e.clientX; lastMY = e.clientY;
+      if(!eyes.length || reduce || Date.now() < glanceUntil) return; // busy giving a look
+      placePupils(e.clientX, e.clientY);
     });
+    // idle attitude: random looks, squints and double-takes while it just sits there
+    let lastExpr = -1;
+    function setGlanceDir(dirx, diry){
+      const r = card.getBoundingClientRect();
+      placePupils(r.left + r.width / 2 + dirx * 300, r.top + r.height / 2 + diry * 300);
+    }
+    const exprs = [
+      { d: 450, go: () => setGlanceDir(-1, 0) },
+      { d: 450, go: () => setGlanceDir(1, 0) },
+      { d: 500, go: () => setGlanceDir(Math.random() < .5 ? -1 : 1, -1) },
+      { d: 950, go: () => { setGlanceDir(Math.random() < .5 ? -1 : 1, .2); face.classList.remove('happy'); face.classList.add('squint'); } },
+      { d: 750, go: () => { face.classList.remove('happy'); face.classList.add('wide'); } },
+      { d: 950, go: () => { face.classList.remove('happy'); face.classList.add('squint'); } },
+      { d: 650, go: () => { setGlanceDir(-1, 0); setTimeout(() => setGlanceDir(1, 0), 200); setTimeout(() => setGlanceDir(-1, 0), 400); } },
+      { d: 450, go: () => eyes[Math.floor(Math.random() * eyes.length)].classList.add('wink') },
+      { d: 700, go: () => eyes[Math.floor(Math.random() * eyes.length)].classList.add('squint-one') },
+      { d: 700, go: () => { eyes[0].style.setProperty('--ex', '4px'); eyes[1].style.setProperty('--ex', '-4px'); eyes.forEach((e) => e.style.setProperty('--ey', '0px')); } },
+      { d: 750, go: () => { setGlanceDir(0, -1); setTimeout(() => setGlanceDir(1, 0), 220); setTimeout(() => setGlanceDir(0, 1), 440); } },
+      { d: 1400, go: () => { face.classList.add('sleepy'); const r = card.getBoundingClientRect(); placePupils(r.left + r.width / 2, r.top + r.height + 200); } },
+      { d: 1200, go: () => { face.classList.remove('happy'); face.classList.add('stare'); placePupils(lastMX, lastMY); } },
+    ];
+    function clearExpr(){ glanceUntil = 0; face.classList.remove('wide', 'squint', 'stare', 'sleepy'); eyes.forEach((e) => e.classList.remove('wink', 'squint-one')); placePupils(lastMX, lastMY); }
+    if(face && !reduce) (function exprLoop(){
+      setTimeout(() => {
+        if(!document.hidden){
+          let n = Math.floor(Math.random() * exprs.length);
+          while(n === lastExpr) n = Math.floor(Math.random() * exprs.length);
+          lastExpr = n;
+          const x = exprs[n];
+          glanceUntil = Date.now() + x.d;
+          x.go();
+          setTimeout(clearExpr, x.d);
+        }
+        exprLoop();
+      }, 3500 + Math.random() * 3500);
+    })();
     const cardAnims = [ // every click = random move, never the same twice in a row
       { dur: 340, kf: (b) => [{ transform: `${b} scale(1)` }, { transform: `${b} scale(.94)` }, { transform: `${b} scale(1.04)` }, { transform: `${b} scale(1)` }] },
       { dur: 500, kf: (b) => [{ transform: `${b} rotate(0deg)` }, { transform: `${b} rotate(-4.5deg) scale(1.02)` }, { transform: `${b} rotate(3.5deg) scale(1.02)` }, { transform: `${b} rotate(-1.5deg)` }, { transform: `${b} rotate(0deg)` }] },
@@ -642,7 +840,8 @@ ffmpeg -version | head -n 1
       }
       const bar = stage.querySelector('.yoink-bar'); // click = schlorp again
       if(bar){ bar.style.animation = 'none'; void bar.offsetWidth; bar.style.animation = ''; }
-      if(face){ // happy worm
+      if(face){ // happy worm (poke interrupts the attitude)
+        glanceUntil = 0; face.classList.remove('wide', 'squint', 'stare', 'sleepy'); eyes.forEach((e) => e.classList.remove('wink', 'squint-one'));
         face.classList.remove('happy'); void face.offsetWidth; face.classList.add('happy');
         clearTimeout(happyT); happyT = setTimeout(() => face.classList.remove('happy'), 550);
       }

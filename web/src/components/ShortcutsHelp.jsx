@@ -5,6 +5,7 @@ const LIBRARY_SECTIONS = [
     { keys: ["←", "a"], desc: "Go up one folder (list view)" },
     { keys: ["→", "d", "Enter", "Space"], desc: "Open selected folder / file (list view)" },
     { keys: ["w", "a", "s", "d"], desc: "Grid view: nearest item up / left / down / right" },
+    { keys: ["Shift", "W", "S"], desc: "Grid view: page up / down" },
     { keys: ["Space", "Enter"], desc: "Grid view: open selected item" },
     { keys: ["q"], desc: "Grid view: go up one folder" },
   ] },
