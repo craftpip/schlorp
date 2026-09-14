@@ -6,6 +6,7 @@ node_modules/
 .playlists.json
 .mediadims.json
 .mediaorder.json
+*.xdlstack
 .saved-sync-state.json.bak.*
 .env
 .docker-volumes.backup

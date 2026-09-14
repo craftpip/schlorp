@@ -4,9 +4,11 @@ import FileViewer from "../components/FileViewer";
 import ShortcutsHelp from "../components/ShortcutsHelp";
 import PlaylistHoverMenu from "../components/PlaylistHoverMenu.jsx";
 import { usePlaylists, playlistKeyForMedia } from "../store/PlaylistsContext.jsx";
+import { useStacks } from "../store/StacksContext.jsx";
 import ConfirmModal from "../components/ConfirmModal.jsx";
 import PromptModal from "../components/PromptModal.jsx";
 import AlertModal from "../components/AlertModal.jsx";
+import MediaContextMenu from "../components/MediaContextMenu.jsx";
 
 function fmtSize(bytes) {
   if (bytes == null) return "";
@@ -92,6 +94,7 @@ export default function Media() {
   const [customOrder, setCustomOrder] = useState([]);
   const [dropInfo, setDropInfo] = useState(null);
   const dragKeyRef = useRef(null);
+  const dragKeysRef = useRef(null); // pile drag: whole member block moves as one
   const customOrderMap = useMemo(() => {
     const m = new Map();
     for (let i = 0; i < customOrder.length; i++) {
@@ -220,6 +223,23 @@ export default function Media() {
     });
   })();
   const inPlaylistView = !!activePlId;
+  // Stacks (016): per-folder pile state + grid-only multi-select. Stacks only
+  // apply to non-playlist grid views; list view stays flat single-select.
+  const { stacksForFolder: stacksForFolderAll, refresh: refreshStacks, createStack, renameStack, deleteStack, addItems: addStackItems, removeItems: removeStackItems } = useStacks();
+  const folderStacks = isGrid && !inPlaylistView ? stacksForFolderAll(folder) : [];
+  const [selKeys, setSelKeys] = useState(() => new Set());
+  const [anchorKey, setAnchorKey] = useState(null);
+  const [spreadStackId, setSpreadStackId] = useState(null);
+  useEffect(() => {
+    if (isGrid && !inPlaylistView) refreshStacks(folder);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isGrid, folder, inPlaylistView]);
+  // Reset grid multi-select + spread whenever the visible set changes meaningfully.
+  useEffect(() => {
+    setSelKeys(new Set());
+    setAnchorKey(null);
+    setSpreadStackId(null);
+  }, [folder, isFlat, type, filter, sort, activePlId]);
   // Shared view ordering (filter text + type + sort, dirs first) so the
   // list render and the default-selection pick in load() agree.
   // Search/type filters apply to files only — folders are always visible.
@@ -401,27 +421,67 @@ export default function Media() {
   // Reorder helpers operate on the visible file sequence (drag-drop is
   // disabled while search/type filters are active, so visible === all).
   const moveCustomKey = (dragKey, targetKey, after = false) => {
-    if (!dragKey || !targetKey || dragKey === targetKey) return;
+    moveCustomKeys(dragKey ? [dragKey] : [], targetKey, after);
+  };
+  // Move a block of file keys (a pile's members) as one unit to before/after
+  // a target file key in the visible custom order.
+  const moveCustomKeys = (dragKeys, targetKey, after = false) => {
+    const set = new Set(dragKeys || []);
+    if (!set.size || !targetKey || set.has(targetKey)) return;
     const vis = filtered.filter((it) => !it.dir).map((it) => rowKey(it));
-    if (!vis.includes(dragKey) || !vis.includes(targetKey)) return;
-    const next = vis.filter((k) => k !== dragKey);
+    if (!vis.includes(targetKey) || ![...set].every((k) => vis.includes(k))) return;
+    const orderedDrag = vis.filter((k) => set.has(k));
+    const next = vis.filter((k) => !set.has(k));
     const idx = next.indexOf(targetKey) + (after ? 1 : 0);
-    next.splice(idx, 0, dragKey);
-    setSelectedKey(dragKey);
+    next.splice(idx, 0, ...orderedDrag);
+    setSelectedKey(orderedDrag[0]);
     saveCustomOrder(next);
+  };
+  // Is this key a member of the currently spread pile? (Same basename
+  // rule as grouping; keeps the pile open when selecting inside it.)
+  const isSpreadMember = (k) => {
+    if (!spreadStackId || !k) return false;
+    const st = folderStacks.find((s) => s.id === spreadStackId);
+    const items = st && Array.isArray(st.items) ? st.items : [];
+    return items.includes(String(k).split("/").pop());
+  };
+  // Member file keys of a stack in visible order (works flat + non-flat by
+  // matching bare basenames, same rule as pile grouping).
+  const pileMemberKeys = (stackId) => {
+    const st = folderStacks.find((s) => s.id === stackId);
+    const items = st && Array.isArray(st.items) ? st.items : [];
+    if (!items.length) return [];
+    const set = new Set(items);
+    return filtered.filter((it) => !it.dir && set.has(String(rowKey(it)).split("/").pop())).map((it) => rowKey(it));
+  };
+  // Staggered rise-in animation for freshly spread members (mount-only;
+  // steady re-renders keep the same string so it never replays). Order
+  // follows the VISUAL sequence (grid order), not stack file order.
+  // NOTE: must stay BELOW gridVisible (memo runs during render).
+  const spreadMemberAnim = (key) => {
+    const idx = spreadVisualOrder.get(key);
+    if (idx === undefined) return undefined;
+    return `media-member-in .25s ease ${idx * 45}ms backwards`;
   };
   // For a given mouse point inside the tile container, find the nearest file
   // tile and where on it the drop should land: its closest edge/side, which
   // tells us both the insertion point (before/after the tile) and the visual
   // line position (left/right/top/bottom of the tile).
-  const nearestDropInfo = (container, px, py, dragKey) => {
+  // `skip` is a Set of dragged keys (single file or whole pile block incl.
+  // the pile id). Pile containers resolve to an edge member file key so
+  // drops onto piles insert before/after the whole pile.
+  const nearestDropInfo = (container, px, py, skip) => {
+    const skipSet = skip instanceof Set ? skip : new Set(skip ? [skip] : []);
     const vis = filtered.filter((it) => !it.dir).map((it) => rowKey(it));
     const els = container.querySelectorAll("[data-filename]");
     let best = null;
     let bestDist = Infinity;
     for (const el of els) {
-      if (el.dataset.filename === dragKey) continue;
+      if (skipSet.has(el.dataset.filename)) continue;
       if (el.classList.contains("media-tile-folder")) continue;
+      // Inner cascade tiles of a collapsed pile are hidden: the pile
+      // container itself represents the whole block as drop target.
+      if (el.getAttribute("data-testid") === "media-tile-file" && el.closest && el.closest('[data-testid="media-tile-pile"]')) continue;
       const r = el.getBoundingClientRect();
       if (r.width === 0 && r.height === 0) continue;
       const dx = px < r.left ? r.left - px : px > r.right ? px - r.right : 0;
@@ -440,12 +500,28 @@ export default function Media() {
       // Hovering ON the item: it is the destination, so the dragged file
       // takes its slot. If the target sits after the source, that slot is
       // one position ahead (after the target); otherwise it is before it.
-      const si = vis.indexOf(dragKey);
+      const firstDrag = [...skipSet].find((k) => vis.includes(k));
+      const si = firstDrag !== undefined ? vis.indexOf(firstDrag) : -1;
       const ti = vis.indexOf(best.dataset.filename);
       if (si > -1 && ti > -1 && si < ti) { side = "after"; align = "right"; }
       else { side = "before"; align = "left"; }
     }
-    return { key: best.dataset.filename, side, align };
+    let key = best.dataset.filename;
+    if (best.getAttribute("data-testid") === "media-tile-pile") {
+      // Dropping onto a pile inserts before/after the whole pile block:
+      // resolve to the edge member in visible order.
+      const mem = pileMemberKeys(key);
+      if (!mem.length) return null;
+      if (side === "after") key = mem[mem.length - 1];
+      else key = mem[0];
+      // If the dragged block sits before the pile, "before pile" really
+      // means after it (same slot rule as files above).
+      const firstDrag = [...skipSet].find((k) => vis.includes(k));
+      const si = firstDrag !== undefined ? vis.indexOf(firstDrag) : -1;
+      const ti = vis.indexOf(key);
+      if (si > -1 && ti > -1 && si < ti && side !== "after") { side = "after"; align = "right"; key = mem[mem.length - 1]; }
+    }
+    return { key, side, align };
   };
   const sameDropInfo = (a, b) => !!a && !!b && a.key === b.key && a.side === b.side && a.align === b.align;
   useEffect(() => () => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); if (yTimerRef.current) clearTimeout(yTimerRef.current); }, []);
@@ -534,6 +610,16 @@ export default function Media() {
     ? (viewerIdx !== null && viewerIdx !== -1 ? viewerIdx : Math.min(lastViewerIdxRef.current, Math.max(0, viewable.length - 1)))
     : null;
 
+  // Grid piles render member tiles inside the pile container: those inner
+  // tiles are not nav cells. TILE_NAV_Q selects only top-level cells
+  // (pile container counts as one cell for its members), and navSelectedEl
+  // prefers the pile container over an inner tile when both are marked.
+  const TILE_NAV_Q = '[data-testid="media-tile-file"]:not([data-testid="media-tile-pile"] [data-testid="media-tile-file"]), [data-testid="media-tile-folder"], [data-testid="media-tile-playlist"], [data-testid="media-tile-pile"]';
+  const navSelectedEl = () => {
+    const all = [...document.querySelectorAll('[data-selected="true"]')];
+    if (!all.length) return null;
+    return all.find((el) => el.getAttribute("data-testid") === "media-tile-pile" || !(el.closest && el.closest('[data-testid="media-tile-pile"]'))) || all[0];
+  };
   // Sticky-aware scroll: native scrollIntoView({block:"nearest"}) ignores the
   // sticky toolbar, leaving the row hidden under it or bottom-flush. Scroll
   // manually only when the selected row is actually out of view.
@@ -541,7 +627,7 @@ export default function Media() {
   // the sticky toolbar; rows leaving through the bottom only just come into
   // view at the bottom edge (never yanked up to the top).
   const scrollSelectionIntoView = (smooth = false) => {
-    const el = document.querySelector(`[data-selected="true"]`);
+    const el = navSelectedEl();
     if (!el) return;
     // Cancel any in-flight smooth scroll first: single presses glide, so when
     // reversing direction the previous animation is still running and the
@@ -586,17 +672,50 @@ export default function Media() {
       const base = selectedIdx !== -1 ? selectedIdx : (delta > 0 ? -1 : 0);
       const next = Math.min(allSelectable.length - 1, Math.max(0, base + delta));
       keyboardScrollRef.current = smooth ? "smooth" : "instant";
-      setSelectedKey(selectableKey(allSelectable[next]));
+      selectSingleKey(selectableKey(allSelectable[next]));
     };
     // Grid view: move to the nearest tile/chip in a direction (WASD).
+    // Piles ("media-tile-pile") are single cells: keyboard entering a pile
+    // expands it with a SINGLE primary (first member) — never mass-selects.
+    // Moving onto a file outside the spread pile collapses it again.
+    const collapseSpreadUnlessMember = (fid) => {
+      const spread = spreadStackIdRef.current;
+      if (!spread || !fid) return;
+      const st = (folderStacksRef.current || []).find((s) => s.id === spread);
+      const items = st && Array.isArray(st.items) ? st.items : [];
+      if (!items.includes(String(fid).split("/").pop())) setSpreadStackId(null);
+    };
+    // Keyboard motion is always single-select: primary + selKeys + anchor
+    // move together so no stale multi-selection (ghost outlines) survives.
+    const selectSingleKey = (k) => {
+      if (!k) return;
+      collapseSpreadUnlessMember(k);
+      setSelKeys(new Set([k]));
+      setAnchorKey(k);
+      setSelectedKey(k);
+    };
+    const landOn = (el) => {
+      if (el.getAttribute("data-testid") === "media-tile-pile") {
+        const entry = gridVisibleRef.current.find((ve) => ve.kind === "pile" && ve.stackId === el.getAttribute("data-filename"));
+        if (entry && entry.members && entry.members.length) {
+          setSpreadStackId(entry.stackId);
+          const fk = rowKey(entry.members[0]);
+          setSelKeys(new Set([fk]));
+          setAnchorKey(fk);
+          setSelectedKey(fk);
+        }
+        return;
+      }
+      const fid = el.getAttribute("data-filename");
+      if (fid) selectSingleKey(fid);
+    };
     const moveSelectionSpatial = (dir, smooth = true) => {
-      const nodes = [...document.querySelectorAll('[data-testid="media-tile-file"], [data-testid="media-tile-folder"], [data-testid="media-tile-playlist"]')];
+      const nodes = [...document.querySelectorAll(TILE_NAV_Q)];
       if (!nodes.length) return;
-      const keyOf = (el) => el.getAttribute("data-filename");
-      const current = document.querySelector('[data-selected="true"]');
+      const current = navSelectedEl();
       if (!current) {
         keyboardScrollRef.current = true;
-        setSelectedKey(keyOf(nodes[0]));
+        landOn(nodes[0]);
         return;
       }
       const cr = current.getBoundingClientRect();
@@ -619,36 +738,49 @@ export default function Media() {
         if (score < bestScore) { bestScore = score; best = el; }
       }
       if (!best && (dir === "left" || dir === "right")) {
-        // Row edge (or row grouping miss): move to the next/prev item in
-        // array order instead of the nearest tile elsewhere on the page.
+        // Row edge: move to the next/prev cell in VISUAL grid order (not
+        // folder order — members of a spread pile would otherwise jump to
+        // unrelated files and wrongly collapse the pile).
         const delta = dir === "right" ? 1 : -1;
-        if (selectedIdx !== -1 && allSelectable.length) {
-          const ni = selectedIdx + delta;
-          if (ni >= 0 && ni < allSelectable.length) {
+        const order = gridVisibleRef.current;
+        const curGKey = current.getAttribute("data-testid") === "media-tile-pile"
+          ? `stack:${current.getAttribute("data-filename")}`
+          : current.getAttribute("data-filename");
+        const gi = order.findIndex((ve) => ve.key === curGKey);
+        if (gi !== -1 && order.length) {
+          const gj = gi + delta;
+          if (gj >= 0 && gj < order.length) {
             keyboardScrollRef.current = smooth ? "smooth" : "instant";
-            setSelectedKey(selectableKey(allSelectable[ni]));
+            const target = order[gj];
+            if (target.kind === "pile") {
+              const pel = nodes.find((n) => n.getAttribute("data-testid") === "media-tile-pile" && n.getAttribute("data-filename") === target.stackId);
+              if (pel) { landOn(pel); return; }
+            } else {
+              selectSingleKey(target.key);
+              return;
+            }
           }
           return;
         }
+        // Non file/pile cells (folders at root): fall back to DOM order.
         const ci = nodes.indexOf(current);
         const ni = ci + delta;
         if (ci !== -1 && ni >= 0 && ni < nodes.length) {
           keyboardScrollRef.current = smooth ? "smooth" : "instant";
-          setSelectedKey(keyOf(nodes[ni]));
+          landOn(nodes[ni]);
         }
         return;
       }
       if (best) {
         keyboardScrollRef.current = smooth ? "smooth" : "instant";
-        setSelectedKey(keyOf(best));
+        landOn(best);
       }
     };
     // Grid view: Shift+W / Shift+S jumps a full page up / down, keeping the
     // column. Tiles are grouped into visual rows by offsetTop.
     const moveSelectionPage = (dir, smooth = true) => {
-      const nodes = [...document.querySelectorAll('[data-testid="media-tile-file"], [data-testid="media-tile-folder"], [data-testid="media-tile-playlist"]')];
+      const nodes = [...document.querySelectorAll(TILE_NAV_Q)];
       if (!nodes.length) return;
-      const keyOf = (el) => el.getAttribute("data-filename");
       const rows = [];
       for (const el of nodes) {
         const top = el.offsetTop;
@@ -658,7 +790,7 @@ export default function Media() {
       }
       rows.sort((a, b) => a.top - b.top);
       let curRow = dir > 0 ? 0 : rows.length - 1, curCol = 0;
-      const current = document.querySelector('[data-selected="true"]');
+      const current = navSelectedEl();
       if (current) {
         const ci = rows.findIndex((r) => r.els.includes(current));
         if (ci !== -1) { curRow = ci; curCol = rows[ci].els.indexOf(current); }
@@ -672,7 +804,7 @@ export default function Media() {
       const target = rows[nextRow].els[Math.min(curCol, rows[nextRow].els.length - 1)];
       if (target) {
         keyboardScrollRef.current = smooth ? "smooth" : "instant";
-        setSelectedKey(keyOf(target));
+        landOn(target);
       }
     };
     const onKey = (e) => {
@@ -687,6 +819,15 @@ export default function Media() {
       const lowK = k.toLowerCase();
       if ((k === "/" || k === "?") && !e.ctrlKey && !e.altKey && !e.metaKey) { e.preventDefault(); setShowHelp((v) => !v); return; }
       if (k === "Escape" && showHelp) { e.preventDefault(); setShowHelp(false); return; }
+      // Grid: Esc clears multi-select and collapses any spread stack.
+      if (isGrid && !inPlaylistView && k === "Escape") {
+        e.preventDefault();
+        const hadSpread = !!spreadStackIdRef.current;
+        setSpreadStackId(null);
+        setSelKeys(new Set(selKey ? [selKey] : []));
+        setAnchorKey(selKey || null);
+        if (hadSpread) return;
+      }
       if (lowK === "g" && !e.ctrlKey && !e.altKey && !e.metaKey) { e.preventDefault(); setParam("view", isGrid ? "list" : ""); }
       else if (lowK === "j" && !e.ctrlKey && !e.altKey && !e.metaKey) { e.preventDefault(); setParam("flat", isFlat ? "" : "1"); }
       else if (lowK === "t" && !e.ctrlKey && !e.altKey && !e.metaKey) {
@@ -748,6 +889,22 @@ export default function Media() {
         e.preventDefault();
         const it = allSelectable[selectedIdx];
         if (it) {
+          // Grid: Enter on a member of a collapsed pile spreads it (that pile
+          // becomes the selection instead of opening the file).
+          if (isGrid && !inPlaylistView && isEnter && !it._isPlaylist && !it.dir && !spreadStackIdRef.current) {
+            const pileId = keyPileMapRef.current.get(selectableKey(it));
+            if (pileId) {
+              const entry = gridVisibleRef.current.find((ve) => ve.kind === "pile" && ve.stackId === pileId);
+              if (entry) {
+                setSpreadStackId(pileId);
+                const fk = rowKey(entry.members[0]);
+                setSelKeys(new Set([fk]));
+                setAnchorKey(fk);
+                setSelectedKey(fk);
+                return;
+              }
+            }
+          }
           if (it._isPlaylist) openPlaylist(it._pl.id);
           else if (it.dir) goFolder(it.name);
           else openViewer(it);
@@ -955,7 +1112,7 @@ export default function Media() {
     });
   }, [isGrid, gridW, filtered, ratios]);
   // 1 click = select only; double-click (or Enter) = open. Touch keeps tap-to-open.
-  const selectOnly = (it) => setSelectedKey(rowKey(it));
+  const selectOnly = (it) => { const k = rowKey(it); setSelKeys(new Set([k])); setAnchorKey(k); setSelectedKey(k); };
   const openItem = (it) => {
     if (!it) return;
     setSelectedKey(rowKey(it));
@@ -1053,13 +1210,22 @@ export default function Media() {
       </div>
     );
   };
-  const renderTile = (it, fi, w, h) => {
+  const renderTile = (it, fi, w, h, anim) => {
     const rk = rowKey(it);
     // A thumbnail URL that 404s (no poster sibling, no embedded cover art)
     // falls back to the icon placeholder instead of a blank black tile.
     const src = imgErr[rk] ? null : thrumb(it);
-    const selected = selKey === rk;
+    const isPrimary = selKey === rk;
+    // Grid multi-select: `selKeys` drives the highlight (primary inside it).
+    // List view / single selection: highlight == primary. `data-selected` stays
+    // primary-only so keyboard nav & scroll keep working with multi-select on.
+    const gridMulti = isGrid && !inPlaylistView;
+    const highlight = gridMulti && selKeys.size ? selKeys.has(rk) : isPrimary;
+    const selected = isPrimary;
     const isDir = !!it.dir;
+    // Stack membership (gray) is independent of selection (accent): members
+    // of a stack always show the gray ring; selection overrides with accent.
+    const inStack = !isDir && Array.isArray(it.stacks) && it.stacks.length > 0;
     // `.gif` files that are actually MP4 bytes (mislabeled at download time,
     // e.g. reddit saves) fail in <img> — the server sniffs them as video/mp4.
     // Flip to a muted looping <video> on image error so they still preview.
@@ -1105,18 +1271,36 @@ export default function Media() {
         className={isDir ? "media-tile-folder" : "media-tile-file"}
         data-filename={rowKey(it)}
         data-selected={selected}
-        onClick={() => tapItem(it)}
+        onClick={(e) => { if (!isDir && gridMulti) gridClickHandler({ kind: "file", it, key: rk }, e); else if (!isDir && isCoarsePointer()) openItem(it); else tapItem(it); }}
         onDoubleClick={() => openItem(it)}
+        onContextMenu={(e) => { if (gridMulti && !isDir) { e.preventDefault(); openContextMenu(e, { kind: "file", it, key: rk }); } }}
         title={dragEnabled ? `${displayName(it)} — drag to reorder` : `${displayName(it)} — click to select, double-click to open`}
-        draggable={dragEnabled}
+        draggable={dragEnabled || (gridMulti && !isDir)}
         onDragStart={(e) => {
-          if (!dragEnabled) return;
-          dragKeyRef.current = rk;
-          e.dataTransfer.effectAllowed = "move";
-          try { e.dataTransfer.setData("text/plain", rk); } catch {}
+          if (!(dragEnabled || (gridMulti && !isDir))) return;
+          // Dragging an unselected file carries just that file — never a
+          // stale multi-selection (dragstart suppresses the click that
+          // would otherwise select it first).
+          let carry = [...selectedKeysForStack];
+          if (!carry.includes(rk)) {
+            carry = [rk];
+            setSelKeys(new Set([rk]));
+            setAnchorKey(rk);
+            setSelectedKey(rk);
+          }
+          if (dragEnabled) {
+            // Single file for ordering (even spread members: dropping
+            // outside the open pile detaches them, inside reorders).
+            dragKeyRef.current = rk;
+            dragKeysRef.current = null;
+            e.dataTransfer.effectAllowed = "move";
+            try { e.dataTransfer.setData("text/plain", rk); } catch {}
+          }
+          // Stack drag: carry the dragged file(s) so pile drop targets add them
+          try { e.dataTransfer.setData("application/x-xdl-stack", JSON.stringify(carry)); } catch {}
         }}
-        onDragEnd={() => { dragKeyRef.current = null; if (dropInfo) setDropInfo(null); }}
-        style={{ position: "relative", flex: isDir ? "0 0 auto" : "0 0 auto", width: w, height: h, overflow: (menuOpen || isDropTarget) ? "visible" : "hidden", zIndex: menuOpen ? 60 : "auto", borderRadius: 0, background: isDir ? "var(--surface-2)" : "var(--surface-2)", outline: selected ? "4px solid var(--accent)" : "none", cursor: dragEnabled ? "grab" : "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, contentVisibility: menuOpen ? "visible" : "auto", containIntrinsicSize: `${w}px ${h}px` }}
+        onDragEnd={() => { dragKeyRef.current = null; dragKeysRef.current = null; if (dropInfo) setDropInfo(null); }}
+        style={{ position: "relative", flex: isDir ? "0 0 auto" : "0 0 auto", width: w, height: h, overflow: (menuOpen || isDropTarget) ? "visible" : "hidden", zIndex: menuOpen ? 60 : "auto", borderRadius: 0, background: isDir ? "var(--surface-2)" : "var(--surface-2)", outline: highlight ? "4px solid var(--accent)" : (inStack ? "4px solid var(--muted)" : "none"), cursor: dragEnabled ? "grab" : "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, contentVisibility: menuOpen ? "visible" : "auto", containIntrinsicSize: `${w}px ${h}px`, animation: anim || undefined }}
       >
         {src ? (
           <span style={{ position: "relative", width: "100%", height: "100%", flex: 1, display: "block", background: "#000", minHeight: 0 }}>
@@ -1270,6 +1454,415 @@ export default function Media() {
   const dirRows = rows.filter((r) => r.isDir);
   const fileRows = rows.filter((r) => !r.isDir);
 
+  // --- Stacks (016): gridVisible pile grouping ---
+  // Each item's `it.stacks` (from API) tells which stack(s) it belongs to.
+  // A pile cell groups 2+ visible members of the same stack into one grid slot.
+  const gridVisible = useMemo(() => {
+    if (!isGrid || !gridW) return [];
+    if (inPlaylistView) {
+      return filtered.filter((it) => !it.dir).map((it) => ({ kind: "file", it, key: rowKey(it), w: 0, h: GRID_TARGET_H }));
+    }
+    const files = filtered.filter((it) => !it.dir);
+    // Count visible members per stack id
+    const stackCount = new Map();
+    for (const it of files) {
+      const st = (it.stacks || [])[0];
+      if (st) stackCount.set(st.id, (stackCount.get(st.id) || 0) + 1);
+    }
+    const seq = [];
+    const emitted = new Set();
+    for (const it of files) {
+      if (emitted.has(it)) continue;
+      const st = (it.stacks || [])[0];
+      if (st && stackCount.get(st.id) >= 2) {
+        const members = files.filter((x) => (x.stacks || [])[0]?.id === st.id && !emitted.has(x));
+        if (!members.length) continue;
+        // Mark all members as emitted
+        for (const m of members) emitted.add(m);
+        if (spreadStackId === st.id) {
+          // Spread: show members as normal tiles
+          for (const m of members) seq.push({ kind: "file", it: m, key: rowKey(m), w: 0, h: GRID_TARGET_H });
+        } else {
+          // Pile: one cell containing up to 4 stacked cards
+          const stack = folderStacks.find((s) => s.id === st.id);
+          seq.push({ kind: "pile", stackId: st.id, stackName: (stack && stack.name) || st.name, stack: stack || { id: st.id, name: st.name, count: st.count }, members, count: members.length, key: `stack:${st.id}` });
+        }
+        continue;
+      }
+      seq.push({ kind: "file", it, key: rowKey(it), w: 0, h: GRID_TARGET_H });
+    }
+    return seq;
+  }, [isGrid, gridW, filtered, inPlaylistView, spreadStackId, folderStacks]);
+  // Compute widths for gridVisible entries
+  const gridVisibleWithWidths = useMemo(() => {
+    if (!isGrid || !gridW) return [];
+    return gridVisible.map((entry) => {
+      if (entry.kind === "pile") return { ...entry, w: GRID_TARGET_H * 1.25, h: GRID_TARGET_H };
+      const it = entry.it;
+      const r = clampRatio(parseFloat(ratios[entry.key]) || it.ratio || 1);
+      let w = Math.round(GRID_TARGET_H * r);
+      const max = Math.max(gridW - GRID_GAP * 2, 80);
+      if (w > max) w = max;
+      return { ...entry, w, h: GRID_TARGET_H };
+    });
+  }, [isGrid, gridW, gridVisible, ratios]);
+  const gridKeys = useMemo(() => gridVisible.map((e) => e.key), [gridVisible]);
+  // Map: member rowKey → pile stackId (for Enter-to-spread on a selected member)
+  const keyPileMap = useMemo(() => {
+    const m = new Map();
+    for (const e of gridVisible) {
+      if (e.kind !== "pile") continue;
+      for (const mem of e.members) m.set(rowKey(mem), e.stackId);
+    }
+    return m;
+  }, [gridVisible]);
+  // Visual order index of spread members (for stagger delays). Declared
+  // here because gridVisible is only available below (memo runs on render).
+  const spreadVisualOrder = useMemo(() => {
+    const m = new Map();
+    if (!spreadStackId) return m;
+    const st = folderStacks.find((s) => s.id === spreadStackId);
+    const items = st && Array.isArray(st.items) ? st.items : [];
+    if (!items.length) return m;
+    const set = new Set(items);
+    let i = 0;
+    for (const e of gridVisible) {
+      if (e.kind === "file" && set.has(String(e.key).split("/").pop())) m.set(e.key, i++);
+    }
+    return m;
+  }, [spreadStackId, gridVisible, folderStacks]);
+  // Live refs so the keyboard effect can always read fresh grid data
+  const gridVisibleRef = useRef(gridVisible);
+  gridVisibleRef.current = gridVisible;
+  const keyPileMapRef = useRef(keyPileMap);
+  keyPileMapRef.current = keyPileMap;
+  const spreadStackIdRef = useRef(spreadStackId);
+  spreadStackIdRef.current = spreadStackId;
+  const folderStacksRef = useRef(folderStacks);
+  folderStacksRef.current = folderStacks;
+  // Grid click handler: Shift/Ctrl-aware multi-select (replaces tapItem for grid tiles).
+  const gridClickHandler = (entry, e) => {
+    if (!isGrid) { tapItem(entry.kind === "file" ? entry.it : entry.members[0]); return; }
+    const k = entry.key;
+    const isPile = entry.kind === "pile";
+    const cellKeys = isPile ? entry.members.map((m) => rowKey(m)) : [k];
+    const shift = e?.shiftKey;
+    const ctrl = e?.ctrlKey || e?.metaKey;
+    // Coarse pointer: treat as plain click (single tap = select+open)
+    if (isCoarsePointer()) {
+      if (isPile) { setSpreadStackId(entry.stackId); setSelKeys(new Set([cellKeys[0]])); setAnchorKey(cellKeys[0]); setSelectedKey(cellKeys[0]); }
+      else { setSelKeys(new Set([k])); setAnchorKey(k); setSelectedKey(k); }
+      return;
+    }
+    if (shift) {
+      // Range select from anchor to clicked in gridVisible order
+      const fromKey = anchorKey || selKey;
+      const fromIdx = gridKeys.indexOf(fromKey);
+      const toIdx = gridKeys.indexOf(k);
+      const lo = Math.min(fromIdx !== -1 ? fromIdx : toIdx, toIdx);
+      const hi = Math.max(fromIdx !== -1 ? fromIdx : toIdx, toIdx);
+      const range = new Set();
+      for (let i = lo; i <= hi; i++) {
+        const ve = gridVisible[i];
+        if (!ve) continue;
+        if (ve.kind === "pile") { for (const mk of ve.members.map((m) => rowKey(m))) range.add(mk); }
+        else range.add(ve.key);
+      }
+      setSelKeys(range);
+      setSelectedKey(cellKeys[0]);
+      return;
+    }
+    if (ctrl) {
+      // Toggle clicked in/out of selection
+      setSelKeys((prev) => {
+        const next = new Set(prev);
+        for (const ck of cellKeys) { if (next.has(ck)) next.delete(ck); else next.add(ck); }
+        return next;
+      });
+      setAnchorKey(cellKeys[0]);
+      setSelectedKey(cellKeys[0]);
+      if (isPile && !spreadStackId) setSpreadStackId(entry.stackId);
+      return;
+    }
+    // Plain click
+    if (isPile && !spreadStackId) {
+      // Click on a pile: spread it, select the first member only
+      setSpreadStackId(entry.stackId);
+      setSelKeys(new Set([cellKeys[0]]));
+      setAnchorKey(cellKeys[0]);
+      setSelectedKey(cellKeys[0]);
+      return;
+    }
+    // Collapse any spread stack when clicking outside it (clicking a
+    // member of the open pile keeps it open).
+    if (spreadStackId && !isSpreadMember(k)) setSpreadStackId(null);
+    setSelKeys(new Set([k]));
+    setAnchorKey(k);
+    setSelectedKey(k);
+  };
+  const gridClickRef = useRef(gridClickHandler);
+  gridClickRef.current = gridClickHandler;
+  // Selection toolbar visible when grid multi-select is active
+  const selCount = selKeys.size || (selKey ? 1 : 0);
+  const canStackSelection = isGrid && !inPlaylistView && selCount >= 2 && (() => {
+    // All selected must be files (not dirs) and in the same folder (for non-flat)
+    return true; // simplified: frontend stacks are per-folder anyway
+  })();
+  const selToolbar = isGrid && !inPlaylistView && selCount > 0 && (
+    <span data-testid="media-selection-toolbar" style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12, fontWeight: 600 }}>
+      <span>{selCount} selected</span>
+      {canStackSelection && <button data-testid="media-stack-selection" type="button" className="btn btn-sm btn-primary" onClick={() => {
+        stackSelectionNow();
+      }} style={{ height: 24, padding: "0 10px", fontSize: 11 }}>Stack</button>}
+      {selCount > 0 && <button data-testid="media-delete-selection" type="button" className="btn btn-sm btn-outline-secondary" onClick={() => {
+        const keys = [...selKeys];
+        if (!keys.length && selKey) keys.push(selKey);
+        if (!keys.length) return;
+        // Build fake items for delete confirmation
+        const targets = keys.map((k) => filtered.find((it) => rowKey(it) === k)).filter(Boolean);
+        if (targets.length === 1) setDeleteTarget(targets[0]);
+        else if (targets.length > 1) { setMultiDeleteTarget(targets); }
+      }} style={{ height: 24, padding: "0 10px", fontSize: 11, color: "#f87171" }}>Delete</button>}
+      <button data-testid="media-clear-selection" type="button" className="btn btn-sm btn-outline-secondary" onClick={() => { setSelKeys(new Set()); setAnchorKey(null); setSpreadStackId(null); }} style={{ height: 24, padding: "0 10px", fontSize: 11 }}>Clear</button>
+    </span>
+  );
+  // Multi-delete state (batch delete with confirm)
+  const [multiDeleteTarget, setMultiDeleteTarget] = useState(null);
+  const confirmMultiDelete = async () => {
+    const targets = multiDeleteTarget;
+    setMultiDeleteTarget(null);
+    if (!targets || !targets.length) return;
+    for (const it of targets) {
+      try {
+        const key = rowKey(it);
+        const isPlItem = !!it._isPlaylistItem;
+        const slash = key.lastIndexOf("/");
+        let parent, base;
+        if (isPlItem) { parent = slash === -1 ? "" : key.slice(0, slash); base = slash === -1 ? key : key.slice(slash + 1); }
+        else { parent = slash === -1 ? folder : (folder ? `${folder}/${key.slice(0, slash)}` : key.slice(0, slash)); base = slash === -1 ? key : key.slice(slash + 1); }
+        await fetch(`/api/media?folder=${encodeURIComponent(parent)}&name=${encodeURIComponent(base)}`, { method: "DELETE" });
+      } catch {}
+    }
+    setSelKeys(new Set());
+    setAnchorKey(null);
+    refresh();
+  };
+  // Pile rendering: regular member tiles cascaded in a single grid cell —
+  // first tile full, each next tile tucked behind showing only its right
+  // PEEK strip. Clicks/drops are handled at the pile container level.
+  const renderPile = (entry) => {
+    const { stackId, stackName, members, count, key } = entry;
+    const PEEK = 10;
+    const firstKey = rowKey(members[0]);
+    const r0 = clampRatio(parseFloat(ratios[firstKey]) || members[0].ratio || 1);
+    let memberW = Math.round(GRID_TARGET_H * r0);
+    const max = Math.max(gridW - GRID_GAP * 2, 80);
+    if (memberW > max) memberW = max;
+    const inSel = selKeys.size ? members.some((m) => selKeys.has(rowKey(m))) : false;
+    const shift = Math.max(memberW - PEEK, 0);
+    // Custom manual order: the whole pile drags as one block. Dropping onto
+    // another pile inserts before/after it (by half); dropping files onto a
+    // pile still adds them to the stack (existing behavior).
+    const isCustomReorder = sort === "custom" && !inPlaylistView && !filtersActive;
+    const pileDropSide = (() => {
+      if (!dropInfo || !isCustomReorder) return null;
+      const mem = pileMemberKeys(stackId);
+      if (!mem.includes(dropInfo.key)) return null;
+      return dropInfo.side === "after" ? "right" : "left";
+    })();
+    return (
+      <div
+        key={key}
+        data-testid="media-tile-pile"
+        data-filename={stackId}
+        data-selected={members.some((m) => selKey === rowKey(m))}
+        onClick={(e) => gridClickHandler(entry, e)}
+        onDoubleClick={(e) => {
+          // Double-click pile: spread it, select the first member only
+          e.stopPropagation();
+          setSpreadStackId(stackId);
+          setSelKeys(new Set([rowKey(members[0])]));
+        }}
+        draggable={isCustomReorder}
+        onDragStart={(e) => {
+          if (!isCustomReorder) return;
+          const mem = pileMemberKeys(stackId);
+          if (!mem.length) return;
+          dragKeysRef.current = mem;
+          dragKeyRef.current = null;
+          e.dataTransfer.effectAllowed = "move";
+          try { e.dataTransfer.setData("text/plain", mem[0]); } catch {}
+        }}
+        onDragEnd={() => { dragKeysRef.current = null; dragKeyRef.current = null; if (dropInfo) setDropInfo(null); }}
+        onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = "move"; e.currentTarget.style.outline = "3px solid var(--accent)"; }}
+        onDragLeave={(e) => { e.currentTarget.style.outline = inSel ? "4px solid var(--accent)" : "none"; }}
+        onDrop={(e) => {
+          e.preventDefault(); e.stopPropagation();
+          e.currentTarget.style.outline = inSel ? "4px solid var(--accent)" : "none";
+          if (dragKeysRef.current && dragKeysRef.current.length) {
+            // Reorder: drop the dragged pile block before/after this pile.
+            const r = e.currentTarget.getBoundingClientRect();
+            const after = (e.clientX - r.left) > r.width / 2;
+            const mem = pileMemberKeys(stackId);
+            const edge = after ? mem[mem.length - 1] : mem[0];
+            const dks = dragKeysRef.current;
+            dragKeysRef.current = null; dragKeyRef.current = null; setDropInfo(null);
+            if (edge) moveCustomKeys(dks, edge, after);
+            return;
+          }
+          try {
+            const data = JSON.parse(e.dataTransfer.getData("application/x-xdl-stack") || "null");
+            if (Array.isArray(data) && data.length && stackId) {
+              // Dropped onto another pile: join it, leaving the open pile.
+              detachIfOutsideSpread(data, null);
+              addStackItems(stackId, data, folder).then(() => refreshStacksAndAnnotate()).catch(() => {});
+            }
+          } catch {}
+        }}
+        title={isCustomReorder ? `${stackName} — ${count} files — drag to reorder` : `${stackName} — ${count} files`}
+        style={{ position: "relative", display: "flex", flexDirection: "row", alignItems: "stretch", width: memberW + PEEK * (members.length - 1), height: GRID_TARGET_H, flex: "0 0 auto", cursor: isCustomReorder ? "grab" : "pointer", outline: inSel ? "4px solid var(--accent)" : "none", animation: "media-pile-in .22s ease" }}
+      >
+        {pileDropSide && (
+          <div style={{ position: "absolute", top: 0, bottom: 0, [pileDropSide]: -3, width: 4, borderRadius: 2, background: "var(--accent)", zIndex: 10, pointerEvents: "none" }} />
+        )}
+        {members.map((m, i) => (
+          <div key={rowKey(m)} style={{ marginLeft: i === 0 ? 0 : -shift, zIndex: members.length - i, pointerEvents: "none", flex: "0 0 auto" }}>
+            {renderTile(m, i, memberW, GRID_TARGET_H)}
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  // --- Context menu (grid only) ---
+  const [ctxMenu, setCtxMenu] = useState(null); // { x, y, entry }
+  const [ctxMenuStackId, setCtxMenuStackId] = useState(null);
+  const ctxRef = useRef(null);
+  const openContextMenu = (e, entry) => {
+    e.preventDefault();
+    e.stopPropagation();
+    let sid = null;
+    if (entry.kind === "pile") sid = entry.stackId;
+    else if (entry.kind === "file") {
+      const stacks = entry.it && entry.it.stacks;
+      if (Array.isArray(stacks) && stacks.length) sid = stacks[0].id;
+    }
+    setCtxMenu({ x: e.clientX, y: e.clientY, entry });
+    setCtxMenuStackId(sid);
+  };
+  // Close context menu on outside click / escape
+  useEffect(() => {
+    if (!ctxMenu) return;
+    const onDoc = (e) => {
+      if (e.target && e.target.closest && e.target.closest('[data-testid="media-context-menu"]')) return;
+      setCtxMenu(null);
+    };
+    const onKey = (e) => { if (e.key === "Escape") setCtxMenu(null); };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", onDoc); document.removeEventListener("keydown", onKey); };
+  }, [ctxMenu]);
+  // Selected keys in grid (files only)
+  const selectedKeysForStack = useMemo(() => {
+    const s = new Set();
+    if (selKeys.size) for (const k of selKeys) s.add(k);
+    else if (selKey) s.add(selKey);
+    return s;
+  }, [selKeys, selKey]);
+  const promptStackPropsFor = (id) => {
+    const st = folderStacks.find((s) => s.id === id);
+    return { title: "Rename stack", message: "", defaultValue: st ? st.name : "", placeholder: "Stack name" };
+  };
+  // After stack mutations, refresh stacks + patch `it.stacks` annotations
+  // in place. A full media reload would wipe thumbnail state (ratios,
+  // loaded flags) and force ~1000 images to refetch with spinners.
+  // Stacks left with a lone file are dissolved server-side; a spread pile
+  // whose stack vanished collapses.
+  const annotateItems = (stacks) => {
+    const byBase = new Map();
+    for (const s of stacks || []) {
+      const scount = s.count ?? (Array.isArray(s.items) ? s.items.length : 0);
+      for (const b of (s.items || [])) {
+        if (!byBase.has(b)) byBase.set(b, []);
+        byBase.get(b).push({ id: s.id, name: s.name, count: scount });
+      }
+    }
+    setItems((prev) => prev.map((it) => {
+      if (it.dir) return it;
+      const base = String(isFlat ? (it.rel || it.name) : it.name).split("/").pop();
+      const mine = byBase.get(base) || [];
+      if (!mine.length && !it.stacks) return it;
+      const next = { ...it };
+      if (mine.length) next.stacks = mine;
+      else delete next.stacks;
+      return next;
+    }));
+  };
+  const refreshStacksAndAnnotate = async () => {
+    const stacks = await refreshStacks(folder);
+    if (!Array.isArray(stacks)) { refresh(); return; }
+    if (spreadStackIdRef.current && !stacks.some((s) => s.id === spreadStackIdRef.current)) setSpreadStackId(null);
+    annotateItems(stacks);
+  };
+  // A member dragged out of the open (spread) pile leaves the stack.
+  // Dropping inside the open pile (infoKey is a fellow member) keeps it.
+  const detachIfOutsideSpread = (keys, infoKey) => {
+    if (!spreadStackId) return;
+    const mem = pileMemberKeys(spreadStackId);
+    const dragged = (keys || []).filter((k) => mem.includes(k));
+    if (!dragged.length) return;
+    if (infoKey && mem.includes(infoKey)) return;
+    removeStackItems(spreadStackId, dragged, folder).then(() => refreshStacksAndAnnotate()).catch(() => {});
+  };
+  const handleStackPromptConfirm = async (v) => {
+    const id = promptState.id;
+    setPromptState({ open: false, id: null, value: "" });
+    try {
+      await renameStack(id, v, folder);
+      await refreshStacksAndAnnotate();
+    } catch (e) {
+      setAlertState({ open: true, title: "Stack error", message: e.message || String(e) });
+    }
+  };
+  // Stacks need no name: create immediately with the first unused "Stack N".
+  const stackSelectionNow = async () => {
+    const items = [...selectedKeysForStack];
+    if (items.length < 2) return;
+    const used = new Set(folderStacks.map((s) => String(s.name || "").toLowerCase()));
+    let n = 1;
+    while (used.has(`stack ${n}`)) n++;
+    try {
+      await createStack({ name: `Stack ${n}`, folder, items });
+      await refreshStacksAndAnnotate();
+    } catch (e) {
+      setAlertState({ open: true, title: "Stack error", message: e.message || String(e) });
+    }
+  };
+  const confirmStackDelete = (id) => {
+    setConfirmState({ open: true, id: `stack:${id}`, name: folderStacks.find((s) => s.id === id)?.name || "" });
+  };
+  const handleStackDeleteConfirm = async () => {
+    const id = String(confirmState.id || "").replace(/^stack:/, "");
+    setConfirmState({ open: false, id: null, name: "" });
+    try {
+      await deleteStack(id, folder);
+      await refreshStacksAndAnnotate();
+      if (spreadStackId === id) setSpreadStackId(null);
+    } catch (e) {
+      setAlertState({ open: true, title: "Delete failed", message: e.message || String(e) });
+    }
+  };
+  const handleRemoveFromStack = async (stackId, keys) => {
+    try {
+      // Server dissolves stacks left with a lone file; sync clears dead spread.
+      await removeStackItems(stackId, keys, folder);
+      await refreshStacksAndAnnotate();
+      setSelKeys(new Set());
+    } catch (e) {
+      setAlertState({ open: true, title: "Remove failed", message: e.message || String(e) });
+    }
+  };
+
   return (
     <div data-testid="media-page" className="media-page">
       <div className="media-page-title" style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
@@ -1315,6 +1908,7 @@ export default function Media() {
           </span>
         )}
         {(folder || inPlaylistView) && <button data-testid="media-up" className="btn btn-sm btn-outline-secondary" onClick={goUp} style={{ marginLeft: 8 }}><i className="bi bi-arrow-90deg-up" /> Up</button>}
+        {selToolbar}
         <span data-testid="media-sort-bar" title="Sort (same as list header)" style={{ display: "inline-flex", alignItems: "center", gap: 2, marginLeft: "auto", border: "1px solid var(--border)", borderRadius: 8, padding: 2, background: "var(--surface-2)" }}>
           {sortBarBtn("name", "Name", "media-sortbar-name")}
           {sortBarBtn("size", "Size", "media-sortbar-size")}
@@ -1327,7 +1921,7 @@ export default function Media() {
       <div data-testid="media-content" className="media-full">
       {err && <div data-testid="media-error" className="card" style={{ padding: 12, color: "var(--danger)", marginBottom: 12 }}>{folderMissing ? `Folder not found: ${folder} — it may have been moved, renamed or deleted.` : err}</div>}
 
-      <style>{`.media-tile-file:hover .media-tile-playlist-btn-wrap{opacity:1 !important} .media-row:hover .media-row-playlist-btn{opacity:1 !important} .media-tile-playlist:hover .playlist-chip-actions{opacity:1 !important} .media-row-playlist:hover .playlist-row-actions{opacity:1 !important}`}</style>
+      <style>{`.media-tile-file:hover .media-tile-playlist-btn-wrap{opacity:1 !important} .media-row:hover .media-row-playlist-btn{opacity:1 !important} .media-tile-playlist:hover .playlist-chip-actions{opacity:1 !important} .media-row-playlist:hover .playlist-row-actions{opacity:1 !important}@keyframes media-pile-in{from{opacity:0;transform:scale(.9)}to{opacity:1;transform:scale(1)}}@keyframes media-member-in{from{opacity:0;transform:translateY(10px) scale(.97)}to{opacity:1;transform:none}}`}</style>
       {isGrid ? (
         <div data-testid="media-grid-card" className="card media-lib-card">
           <div data-testid="media-grid" ref={gridRef} className="card-body" style={{ padding: GRID_GAP }}>
@@ -1358,27 +1952,51 @@ export default function Media() {
                     </div>
                   </div>
                 )}
-                {(fileRows.length > 0 || (dirRows.length === 0 && filtered.length === 0 && (folder || playlists.length === 0))) && (
+                {(gridVisibleWithWidths.length > 0 || (gridVisibleWithWidths.length === 0 && filtered.length === 0 && (folder || playlists.length === 0))) && (
                   <div data-testid="media-grid-files" style={{ display: "flex", flexWrap: "wrap", gap: GRID_GAP }}
+                    onContextMenu={(e) => {
+                      // Empty-area context menu: keep selection, allow stack actions
+                      if (e.target && e.target.closest && e.target.closest('[data-testid="media-tile-file"], [data-testid="media-tile-pile"], [data-testid="media-tile-folder"]')) return;
+                      e.preventDefault();
+                      setCtxMenu({ x: e.clientX, y: e.clientY, entry: { kind: "file", it: null, key: null } });
+                      setCtxMenuStackId(null);
+                    }}
                     onDragOver={(e) => {
-                      if (sort !== "custom" || inPlaylistView || filtersActive || !dragKeyRef.current) return;
+                      if (sort !== "custom" || inPlaylistView || filtersActive || (!dragKeyRef.current && !dragKeysRef.current)) return;
                       e.preventDefault();
                       e.dataTransfer.dropEffect = "move";
-                      const info = nearestDropInfo(e.currentTarget, e.clientX, e.clientY, dragKeyRef.current);
+                      const skip = dragKeysRef.current && dragKeysRef.current.length ? new Set(dragKeysRef.current) : dragKeyRef.current;
+                      const info = nearestDropInfo(e.currentTarget, e.clientX, e.clientY, skip);
                       if (sameDropInfo(dropInfo, info)) return;
                       setDropInfo(info);
                     }}
                     onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget) && dropInfo) setDropInfo(null); }}
                     onDrop={(e) => {
-                      if (sort !== "custom" || inPlaylistView || filtersActive || !dragKeyRef.current) return;
+                      if (sort !== "custom" || inPlaylistView || filtersActive || (!dragKeyRef.current && !dragKeysRef.current)) return;
                       e.preventDefault();
                       const dk = dragKeyRef.current;
+                      const dks = dragKeysRef.current;
                       setDropInfo(null);
-                      const info = nearestDropInfo(e.currentTarget, e.clientX, e.clientY, dk);
-                      if (info && info.key !== dk) moveCustomKey(dk, info.key, info.side === "after");
+                      const skip = dks && dks.length ? new Set(dks) : dk;
+                      const info = nearestDropInfo(e.currentTarget, e.clientX, e.clientY, skip);
+                      if (dks && dks.length) {
+                        if (info) moveCustomKeys(dks, info.key, info.side === "after");
+                      } else if (info && info.key !== dk) {
+                        // Spread member dropped outside the open pile leaves it.
+                        detachIfOutsideSpread([dk], info.key);
+                        // Outsider dropped inside the open pile joins it (at the
+                        // drop index via the reorder below).
+                        if (spreadStackId) {
+                          const mem = pileMemberKeys(spreadStackId);
+                          if (mem.includes(info.key) && !mem.includes(dk)) {
+                            addStackItems(spreadStackId, [dk], folder).then(() => refreshStacksAndAnnotate()).catch(() => {});
+                          }
+                        }
+                        moveCustomKey(dk, info.key, info.side === "after");
+                      }
                     }}
                   >
-                    {filtered.length === 0 ? (!loading && !err ? (filtersActive ? filterEmptyNotice : <div data-testid="media-empty" className="empty" style={{ padding: 20, gridColumn: "1 / -1", width: "100%", textAlign: "center" }}><i className="bi bi-inbox" /> {folder ? "This folder is empty" : "No files — download something!"}</div>) : null) : fileRows.map((row) => renderTile(row.it, row.i, row.w, row.h))}
+                    {filtered.length === 0 ? (!loading && !err ? (filtersActive ? filterEmptyNotice : <div data-testid="media-empty" className="empty" style={{ padding: 20, gridColumn: "1 / -1", width: "100%", textAlign: "center" }}><i className="bi bi-inbox" /> {folder ? "This folder is empty" : "No files — download something!"}</div>) : null) : gridVisibleWithWidths.map((entry) => (entry.kind === "pile" ? renderPile(entry) : renderTile(entry.it, 0, entry.w, entry.h, spreadMemberAnim(entry.key))))}
                   </div>
                 )}
                 {filtered.length > 0 && fileRows.length === 0 && !inPlaylistView && (filtersActive ? filterEmptyNotice : <div data-testid="media-empty" className="empty" style={{ padding: 12 }}><i className="bi bi-inbox" /> No files in this folder</div>)}
@@ -1525,12 +2143,16 @@ export default function Media() {
       {showHelp && !viewerOpen && <ShortcutsHelp active="library" onClose={() => setShowHelp(false)} />}
       <PromptModal
         open={promptState.open}
-        title="Rename playlist"
-        message={`Enter new name for "${playlists.find((p) => p.id === promptState.id)?.name || ""}"`}
+        title={promptState.id && String(promptState.id).startsWith("stack:") ? "Rename stack" : "Rename playlist"}
+        message={promptState.id && String(promptState.id).startsWith("stack:") ? `Enter a new name for "${folderStacks.find((s) => s.id === String(promptState.id).slice(6))?.name || ""}"` : `Enter new name for "${playlists.find((p) => p.id === promptState.id)?.name || ""}"`}
         defaultValue={promptState.value}
-        placeholder="Playlist name"
+        placeholder={promptState.id && String(promptState.id).startsWith("stack:") ? "Stack name" : "Playlist name"}
         onCancel={() => setPromptState({ open: false, id: null, value: "" })}
         onConfirm={async (v) => {
+          if (promptState.id && String(promptState.id).startsWith("stack:")) {
+            await handleStackPromptConfirm(v);
+            return;
+          }
           try {
             await renamePlaylist(promptState.id, v);
             setPromptState({ open: false, id: null, value: "" });
@@ -1541,18 +2163,98 @@ export default function Media() {
       />
       <ConfirmModal
         open={confirmState.open}
-        title="Delete playlist"
-        message={`Delete playlist "${confirmState.name}"? Files stay in Media.`}
+        title={String(confirmState.id || "").startsWith("stack:") ? "Unstack" : "Delete playlist"}
+        message={String(confirmState.id || "").startsWith("stack:") ? `Delete stack "${confirmState.name}"? Files stay in Media.` : `Delete playlist "${confirmState.name}"? Files stay in Media.`}
         confirmLabel="Delete"
         danger
         onCancel={() => setConfirmState({ open: false, id: null, name: "" })}
         onConfirm={async () => {
+          if (String(confirmState.id || "").startsWith("stack:")) {
+            await handleStackDeleteConfirm();
+            return;
+          }
           try {
             await deletePlaylist(confirmState.id);
             setConfirmState({ open: false, id: null, name: "" });
           } catch (e) {
             setAlertState({ open: true, title: "Delete failed", message: e.message || String(e) });
           }
+        }}
+      />
+      <MediaContextMenu
+        menu={ctxMenu}
+        stacks={folderStacks}
+        selCount={selectedKeysForStack.size}
+        onClose={() => setCtxMenu(null)}
+        onStack={() => stackSelectionNow()}
+        onOpen={() => {
+          const entry = ctxMenu && ctxMenu.entry;
+          if (!entry) return;
+          if (entry.kind === "file" && entry.it) openItem(entry.it);
+          else if (entry.kind === "pile" && entry.members && entry.members.length) openViewer(entry.members[0]);
+        }}
+        onDelete={() => {
+          const entry = ctxMenu && ctxMenu.entry;
+          if (!entry) return;
+          if (entry.kind === "file" && entry.it) { setDeleteTarget(entry.it); return; }
+          if (entry.kind === "pile") { confirmStackDelete(entry.stackId); return; }
+          // Empty-area / selection: delete selected files
+          const keys = [...selectedKeysForStack];
+          const targets = keys.map((k) => filtered.find((it) => rowKey(it) === k)).filter(Boolean);
+          if (targets.length === 1) setDeleteTarget(targets[0]);
+          else if (targets.length > 1) setMultiDeleteTarget(targets);
+        }}
+        onAddToStack={(stackId, stackName) => {
+          const keys = [...selectedKeysForStack];
+          if (!keys.length && ctxMenu && ctxMenu.entry && ctxMenu.entry.kind === "file" && ctxMenu.entry.it) keys.push(rowKey(ctxMenu.entry.it));
+          if (!keys.length) return;
+          (async () => {
+            try {
+              await addStackItems(stackId, keys, folder);
+              // Move: files already stacked elsewhere leave those stacks
+              // (server dissolves any left with a lone file).
+              const leaving = new Map();
+              for (const k of keys) {
+                const it = filtered.find((x) => rowKey(x) === k);
+                const st = it && Array.isArray(it.stacks) ? it.stacks : [];
+                for (const s of st) {
+                  if (s.id === stackId) continue;
+                  if (!leaving.has(s.id)) leaving.set(s.id, []);
+                  leaving.get(s.id).push(k);
+                }
+              }
+              for (const [sid, ks] of leaving) {
+                try { await removeStackItems(sid, ks, folder); } catch {}
+              }
+            } catch (e) {
+              setAlertState({ open: true, title: "Add failed", message: e.message || String(e) });
+              return;
+            }
+            refreshStacksAndAnnotate();
+          })();
+        }}
+        onRename={() => {
+          const entry = ctxMenu && ctxMenu.entry;
+          const id = entry && entry.kind === "pile" ? entry.stackId : ctxMenuStackId;
+          if (!id) return;
+          setPromptState({ open: true, id: `stack:${id}`, value: folderStacks.find((s) => s.id === id)?.name || "" });
+        }}
+        onUnstack={() => {
+          const entry = ctxMenu && ctxMenu.entry;
+          const id = entry && entry.kind === "pile" ? entry.stackId : ctxMenuStackId;
+          if (id) confirmStackDelete(id);
+        }}
+        onRemoveFromStack={() => {
+          const entry = ctxMenu && ctxMenu.entry;
+          const id = entry && entry.kind === "pile" ? entry.stackId : ctxMenuStackId;
+          if (!id) return;
+          let keys = [...selectedKeysForStack];
+          if (entry && entry.kind === "file" && entry.it) {
+            const rk = rowKey(entry.it);
+            if (!keys.includes(rk)) keys = [rk];
+          }
+          if (!keys.length) return;
+          handleRemoveFromStack(id, keys);
         }}
       />
       {yArmKey && !viewerOpen && (
@@ -1573,6 +2275,15 @@ export default function Media() {
         danger
         onCancel={() => setDeleteTarget(null)}
         onConfirm={confirmDeleteFile}
+      />
+      <ConfirmModal
+        open={!!multiDeleteTarget}
+        title="Delete selected files"
+        message={multiDeleteTarget ? `Delete ${multiDeleteTarget.length} files? This removes them from /media.` : ""}
+        confirmLabel="Delete"
+        danger
+        onCancel={() => setMultiDeleteTarget(null)}
+        onConfirm={confirmMultiDelete}
       />
       </div>
     </div>

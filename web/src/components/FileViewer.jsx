@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import ShortcutsHelp from "./ShortcutsHelp";
 import PlaylistHoverMenu from "./PlaylistHoverMenu.jsx";
 import { usePlaylists } from "../store/PlaylistsContext.jsx";
@@ -88,6 +88,13 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const navRef = useRef(mediaUrl);
   const [loadedUrl, setLoadedUrl] = useState(mediaUrl);
   const loadTimerRef = useRef(null);
+  const seekRef = useRef(null);
+  const animRef = useRef(null);
+  const rafRef = useRef(null);
+  const pendingSeekRef = useRef(null);
+  const pressedRef = useRef(false);
+  const isDraggingRef = useRef(false);
+  const pressStartRef = useRef({ x: 0, y: 0 });
   const [mediaReady, setMediaReady] = useState(false);
   useEffect(() => {
     navRef.current = mediaUrl;
@@ -127,7 +134,58 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   useEffect(() => { try { localStorage.setItem("xdl_viewer_rate", String(rate)); } catch {} }, [rate]);
   useEffect(() => { try { localStorage.setItem("xdl_viewer_seekFrames", seekFrames ? "1" : "0"); } catch {} }, [seekFrames]);
   useEffect(() => { try { localStorage.setItem("xdl_viewer_endMode", endMode); } catch {} }, [endMode]);
-  useEffect(() => { setZoom(1); setOrigin("50% 50%"); setPan({x:0,y:0}); setCurrent(0); setDuration(0); setGifAsVideo(false); setMediaReady(false); setYConfirm(false); lastYRef.current = 0; if (yConfirmTimerRef.current) { clearTimeout(yConfirmTimerRef.current); yConfirmTimerRef.current = null; } setTimeout(() => videoRef.current?.focus(), 50); }, [loadedUrl]);
+  useEffect(() => { setZoom(1); setOrigin("50% 50%"); setPan({x:0,y:0}); setCurrent(0); setDuration(0); setGifAsVideo(false); setMediaReady(false); setYConfirm(false); lastYRef.current = 0; animRef.current = null; pendingSeekRef.current = null; if (yConfirmTimerRef.current) { clearTimeout(yConfirmTimerRef.current); yConfirmTimerRef.current = null; } setTimeout(() => videoRef.current?.focus(), 50); }, [loadedUrl]);
+  // Drive the seekbar with requestAnimationFrame: read the video's live
+  // currentTime every frame so the thumb glides instead of stepping with the
+  // ~4/s timeupdate events. Any seek (keyboard, wheel, ±10s, track click, or
+  // loop restart) sets a pending target that the thumb flies to with a short
+  // easeOut glide; an active pointer drag cancels the flight and tracks the
+  // pointer directly.
+  const seekTo = useCallback((nt) => {
+    const v = videoRef.current;
+    if (!v) return;
+    const lim = Number.isFinite(v.duration) ? v.duration : 1e9;
+    const t = Math.max(0, Math.min(lim, typeof nt === "number" && Number.isFinite(nt) ? nt : 0));
+    pendingSeekRef.current = t;
+    v.currentTime = t;
+    setCurrent(t);
+  }, []);
+  useEffect(() => {
+    const frame = () => {
+      rafRef.current = requestAnimationFrame(frame);
+      const el = seekRef.current;
+      const v = videoRef.current;
+      if (!v || !el) return;
+      const max = Number.isFinite(v.duration) ? v.duration : duration || 0;
+      const now = performance.now();
+      const a = animRef.current;
+      if (a) {
+        if (pendingSeekRef.current != null && Math.abs(pendingSeekRef.current - a.to) > 0.01) {
+          const cur = a.from + (a.to - a.from) * (1 - Math.pow(1 - Math.min(1, (now - a.start) / a.dur), 3));
+          a.from = cur;
+          a.to = Math.max(0, Math.min(max, pendingSeekRef.current));
+          a.start = now;
+          pendingSeekRef.current = null;
+        }
+        const q = Math.min(1, (now - a.start) / a.dur);
+        const eased = 1 - Math.pow(1 - q, 3);
+        const shown = a.from + (a.to - a.from) * eased;
+        if (Math.abs(el.valueAsNumber - shown) > 0.005) el.value = String(shown);
+        if (q >= 1) animRef.current = null;
+        return;
+      }
+      if (pendingSeekRef.current != null) {
+        const to = Math.max(0, Math.min(max, pendingSeekRef.current));
+        if (Math.abs(to - el.valueAsNumber) > 0.01) animRef.current = { from: el.valueAsNumber, to, start: now, dur: 280 };
+        else pendingSeekRef.current = null;
+        return;
+      }
+      const t = v.currentTime;
+      if (Math.abs(el.valueAsNumber - t) > 0.01 && t <= max) el.value = String(t);
+    };
+    rafRef.current = requestAnimationFrame(frame);
+    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); animRef.current = null; pendingSeekRef.current = null; };
+  }, [loadedUrl, duration]);
   // The loading gate above unmounts the <img> while debouncing, then remounts
   // it — grid thumbnails are the full photo bytes, so the remount is usually
   // cache-complete before insertion and onLoad never fires. Detect that so a
@@ -242,7 +300,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     if (mode === "next") {
       if (hasN) onNextRef.current();
     } else if (mode === "repeat") {
-      if (videoRef.current) { videoRef.current.currentTime = 0; videoRef.current.play().catch(() => {}); }
+      if (videoRef.current) { seekTo(0); videoRef.current.play().catch(() => {}); }
     } else if (mode === "random" && v && v.length > 1) {
       const newIdx = pickRandomDifferent(v.length, i);
       const cur = randCursorRef.current;
@@ -276,8 +334,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
         const delta = raw < 0 ? d : -d;
         const v = videoRef.current;
         const nt = Math.max(0, Math.min(duration || v.duration || Infinity, v.currentTime + delta));
-        v.currentTime = nt;
-        setCurrent(nt);
+        seekTo(nt);
         return;
       }
       e.preventDefault();
@@ -451,7 +508,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
         else if (videoRef.current) {
           e.preventDefault(); const v = videoRef.current;
           if (e.shiftKey) {
-            v.currentTime = Math.max(0, v.currentTime - 5);
+            seekTo(Math.max(0, v.currentTime - 5));
           } else if (seekFrames) {
             if (jogRef.current) { clearInterval(jogRef.current); jogRef.current = null; }
             else { jogWasPlayingRef.current = !v.paused; }
@@ -460,16 +517,16 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
             let steps = 0; const max = 30;
             jogRef.current = setInterval(() => {
               if (steps >= max || jogGenRef.current !== gen) { clearInterval(jogRef.current); if (jogGenRef.current === gen) { jogRef.current = null; if (jogWasPlayingRef.current) { jogWasPlayingRef.current = false; v.play().catch(() => {}); } } return; }
-              v.currentTime = Math.max(0, v.currentTime - 1/30); steps++;
+              seekTo(Math.max(0, v.currentTime - 1/30)); steps++;
             }, 33 / rate);
-          } else { v.currentTime = Math.max(0, v.currentTime - 1); }
+          } else { seekTo(Math.max(0, v.currentTime - 1)); }
         }
       } else if (isRight) {
         if (showImage) { e.preventDefault(); dispatchNextRef.current(); }
         else if (videoRef.current) {
           e.preventDefault(); const v = videoRef.current;
           if (e.shiftKey) {
-            v.currentTime = Math.min(duration || v.duration || Infinity, v.currentTime + 5);
+            seekTo(Math.min(duration || v.duration || Infinity, v.currentTime + 5));
           } else if (seekFrames) {
             if (jogRef.current) { clearInterval(jogRef.current); jogRef.current = null; }
             else { jogWasPlayingRef.current = !v.paused; }
@@ -478,9 +535,9 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
             let steps = 0; const max = 30;
             jogRef.current = setInterval(() => {
               if (steps >= max || jogGenRef.current !== gen) { clearInterval(jogRef.current); if (jogGenRef.current === gen) { jogRef.current = null; if (jogWasPlayingRef.current) { jogWasPlayingRef.current = false; v.play().catch(() => {}); } } return; }
-              v.currentTime = Math.min(duration || v.duration || Infinity, v.currentTime + 1/30); steps++;
+              seekTo(Math.min(duration || v.duration || Infinity, v.currentTime + 1/30)); steps++;
             }, 33 / rate);
-          } else { v.currentTime = Math.min(duration || v.duration || Infinity, v.currentTime + 1); }
+          } else { seekTo(Math.min(duration || v.duration || Infinity, v.currentTime + 1)); }
         }
       } else if (isUp) { if (endModeRef.current === "random" || hasPrev) { e.preventDefault(); dispatchPrevRef.current(); } }
       else if (isDown) { if (endModeRef.current === "random" || hasNext) { e.preventDefault(); dispatchNextRef.current(); } }
@@ -505,7 +562,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     const prev = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     return () => { document.removeEventListener("keydown", onKey); document.body.style.overflow = prev; };
-  }, [onClose, hasPrev, hasNext, onPrev, onNext, showImage, duration, seekFrames, rate, showHelp]);
+  }, [onClose, hasPrev, hasNext, onPrev, onNext, showImage, duration, seekFrames, rate, showHelp, seekTo]);
   // Hold-F: keep the save popup open while F is held; letter toggles the
   // first matching list, 1-9 toggles extras by number.
   // The F fullscreen keybind is disabled (button still available).
@@ -808,7 +865,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
             {(isVideo || isAudio || gifAsVideoEff) && (
             <div className="fv-timeline" style={{ display: "flex", alignItems: "center", gap: 6 }}>
               <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--muted)", minWidth: 32 }}>{fmtTime(current)}</span>
-              <input type="range" tabIndex={-1} min={0} max={duration || 0} step={0.1} value={current} onChange={(e)=> { const v=parseFloat(e.target.value); if(videoRef.current){ videoRef.current.currentTime=v; setCurrent(v);} }} onMouseUp={(e)=>e.target.blur()} onTouchEnd={(e)=>e.target.blur()} style={{ flex: 1, accentColor: "#6366f1", height: 4 }} />
+              <input ref={seekRef} type="range" tabIndex={-1} min={0} max={duration || 0} step="any" defaultValue={0} onChange={(e)=> { const v=parseFloat(e.target.value); if(!videoRef.current) return; if (isDraggingRef.current) { animRef.current = null; pendingSeekRef.current = null; videoRef.current.currentTime = v; setCurrent(v); } else { seekTo(v); } }} onPointerDown={(e)=>{ pressedRef.current = true; isDraggingRef.current = false; pressStartRef.current = { x: e.clientX, y: e.clientY }; }} onPointerMove={(e)=>{ if (pressedRef.current) { const dx = e.clientX - pressStartRef.current.x; const dy = e.clientY - pressStartRef.current.y; if (Math.hypot(dx, dy) > 4) isDraggingRef.current = true; } }} onPointerUp={()=>{ pressedRef.current = false; isDraggingRef.current = false; }} onPointerCancel={()=>{ pressedRef.current = false; isDraggingRef.current = false; }} onMouseUp={(e)=>e.target.blur()} onTouchEnd={(e)=>e.target.blur()} onBlur={()=>{ pressedRef.current = false; isDraggingRef.current = false; }} style={{ flex: 1, accentColor: "#6366f1", height: 4 }} />
               <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--muted)", minWidth: 32 }}>{fmtTime(duration)}</span>
               <button type="button" tabIndex={-1} className="btn btn-sm btn-outline-secondary" onClick={toggleFullscreen} title="Fullscreen" style={{ padding: "4px 8px", fontSize: 11 }}><i className="bi bi-arrows-fullscreen" /></button>
             </div>
@@ -831,14 +888,14 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
                 {(isVideo || isAudio || gifAsVideoEff) && (
                   <>
                     <button type="button" tabIndex={-1} className="btn btn-sm btn-outline-secondary" onClick={() => setMuted((m) => !m)} title={muted ? "Unmute (m)" : "Mute (m)"} style={{ color: muted ? "#f87171" : undefined, minWidth: 36, padding: "4px 6px", fontSize: 11 }}><i className={`bi ${muted ? "bi-volume-mute-fill" : "bi-volume-up-fill"}`} /></button>
-                    <button type="button" tabIndex={-1} className="fv-10s btn btn-sm btn-outline-secondary" onClick={() => { if (videoRef.current) videoRef.current.currentTime = Math.max(0, videoRef.current.currentTime - 10); videoRef.current?.focus(); }} title="Back 10s" style={{ padding: "4px 6px", fontSize: 11 }}><i className="bi bi-skip-backward" /> 10s</button>
+                    <button type="button" tabIndex={-1} className="fv-10s btn btn-sm btn-outline-secondary" onClick={() => { if (videoRef.current) seekTo(videoRef.current.currentTime - 10); videoRef.current?.focus(); }} title="Back 10s" style={{ padding: "4px 6px", fontSize: 11 }}><i className="bi bi-skip-backward" /> 10s</button>
                   </>
                 )}
                 <button type="button" tabIndex={-1} className="btn btn-sm btn-primary" onClick={() => { if (!videoRef.current) return; if (videoRef.current.paused) videoRef.current.play(); else videoRef.current.pause(); videoRef.current?.focus(); }} style={{ padding: "4px 8px", fontSize: 11 }}>
                   <i className={`bi ${isPlaying ? "bi-pause-fill" : "bi-play-fill"}`} /> {isPlaying ? "Pause" : "Play"}
                 </button>
                 {(isVideo || isAudio || gifAsVideoEff) && (
-                  <button type="button" tabIndex={-1} className="fv-10s btn btn-sm btn-outline-secondary" onClick={() => { if (videoRef.current) videoRef.current.currentTime += 10; videoRef.current?.focus(); }} title="Forward 10s" style={{ padding: "4px 6px", fontSize: 11 }}>10s <i className="bi bi-skip-forward" /></button>
+                  <button type="button" tabIndex={-1} className="fv-10s btn btn-sm btn-outline-secondary" onClick={() => { if (videoRef.current) seekTo(videoRef.current.currentTime + 10); videoRef.current?.focus(); }} title="Forward 10s" style={{ padding: "4px 6px", fontSize: 11 }}>10s <i className="bi bi-skip-forward" /></button>
                 )}
               </div>
             )}

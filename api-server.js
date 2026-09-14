@@ -765,6 +765,10 @@ async function listMediaDir(resolved, flat) {
       return a.name.localeCompare(b.name);
     });
   }
+  // Filter out .xdlstack files from the listing (both branches)
+  for (let i = items.length - 1; i >= 0; i--) {
+    if (/\.xdlstack$/i.test(items[i].name)) items.splice(i, 1);
+  }
   const posterByStem = new Map();
   for (const it of items) {
     const m = /^(.*)-poster\.(jpe?g|png|webp|avif|gif)$/i.exec(it.rel || it.name);
@@ -776,6 +780,23 @@ async function listMediaDir(resolved, flat) {
     const poster = posterByStem.get(key);
     it.thumb = poster ? (poster.rel || poster.name) : null;
   }
+  // Stack member annotation: sibling .xdlstack membership for non-flat (same
+  // folder) and flat (per-folder stack files along the walk).
+  try {
+    const stackMap = await collectStacksForListing(resolved, flat);
+    if (stackMap && stackMap.size) {
+      for (const it of items) {
+        if (it.dir) continue;
+        const key = it.rel || it.name;
+        const folderKey = key.includes("/") ? key.slice(0, key.lastIndexOf("/")) : "";
+        const stacks = stackMap.get(folderKey);
+        if (!stacks || !stacks.length) continue;
+        const base = key.split("/").pop();
+        const mine = stacks.filter((s) => s.members.has(base)).map((s) => ({ id: s.id, name: s.name, count: s.members.size }));
+        if (mine.length) it.stacks = mine;
+      }
+    }
+  } catch {}
   return items;
 }
 
@@ -1072,6 +1093,24 @@ app.delete("/api/media", async (req, res) => {
       }
       if (mutated) await saveMediaorder();
     } catch {}
+    // Prune from sibling stacks (best-effort): strip the deleted filename
+    // from any .xdlstack file in the same folder. A lone file is not a
+    // stack: release it and drop the stack file.
+    try {
+      const dir = path.dirname(fullPath);
+      const deletedBase = path.basename(fullPath);
+      const stackFiles = await readStacksInFolder(dir);
+      await withStacksFile(dir, async () => {
+        for (const s of stackFiles) {
+          if (!s.items.includes(deletedBase)) continue;
+          const full = path.join(dir, s.id);
+          const data = parseStackFile(await fs.readFile(full, "utf8"));
+          data.items = data.items.filter((x) => x !== deletedBase);
+          if (data.items.length <= 1) await fs.unlink(full).catch(() => {});
+          else await fs.writeFile(full, JSON.stringify(data, null, 2), "utf8");
+        }
+      });
+    } catch {}
     return res.json({ ok: true });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message });
@@ -1304,6 +1343,253 @@ app.post("/api/playlists/:id/toggle", async (req, res) => {
   } catch (e) {
     const msg = e.message || String(e);
     if (/key|invalid|full/i.test(msg)) return res.status(400).json({ ok: false, error: msg });
+    return res.status(500).json({ ok: false, error: msg });
+  }
+});
+// --- Stacks (.xdlstack sibling files) ---
+// Each stack is a sibling JSON file `media/<folder>/<name>.xdlstack` grouping
+// bare filenames from that same folder (sibling rule). No central store.
+const STACK_LIMIT_PER_FOLDER = 100;
+const STACK_LIMIT_ITEMS = 5000;
+function normalizeStackName(raw) {
+  const s = String(raw || "").trim();
+  if (!s) throw new Error("stack name required");
+  if (s.length > 80) throw new Error("stack name too long (max 80)");
+  if (/[\n\r/\\]/.test(s)) throw new Error("invalid stack name");
+  if (/\.xdlstack$/i.test(s)) throw new Error("invalid stack name");
+  return s;
+}
+function normalizeStackItem(raw) {
+  const s = String(raw || "").trim().replace(/\\/g, "/");
+  if (!s) throw new Error("item required");
+  if (s.includes("/") || s.includes("..") || s.startsWith(".")) throw new Error("invalid item");
+  if (s.endsWith(".xdlstack")) throw new Error("stack files cannot be items");
+  return s;
+}
+function stackFilePath(dir, id) {
+  const base = String(id || "").trim();
+  if (!/^[^/\\]+\.xdlstack$/i.test(base)) throw new Error("invalid stack id");
+  return path.join(dir, base);
+}
+function parseStackFile(raw) {
+  const parsed = JSON.parse(raw);
+  if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.items)) throw new Error("invalid stack file");
+  const name = String(parsed.name || "").trim();
+  if (!name) throw new Error("invalid stack file");
+  const items = [];
+  for (const it of parsed.items) {
+    try { items.push(normalizeStackItem(it)); } catch {}
+  }
+  return { name, items };
+}
+const stackChains = new Map(); // dir → Promise chain (per-folder serialization)
+function withStacksFile(dir, fn) {
+  let result, error;
+  const task = async () => { try { result = await fn(); } catch (e) { error = e; } };
+  const prev = stackChains.get(dir) || Promise.resolve();
+  const next = prev.then(task, task);
+  stackChains.set(dir, next);
+  return next.then(() => { if (error) throw error; return result; });
+}
+async function writeStackFile(dir, id, name, items) {
+  await withStacksFile(dir, async () => {
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, id), JSON.stringify({ name, items }, null, 2), "utf8");
+  });
+}
+async function readStackFile(dir, id) {
+  const full = stackFilePath(dir, id);
+  const raw = await fs.readFile(full, "utf8");
+  const st = await fs.stat(full);
+  const parsed = parseStackFile(raw);
+  return { id, name: parsed.name, items: parsed.items, count: parsed.items.length, updatedAt: st.mtime.toISOString() };
+}
+async function readStacksInFolder(dir) {
+  const out = [];
+  let entries;
+  try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch (e) { if (e && e.code === "ENOENT") return out; throw e; }
+  for (const entry of entries) {
+    if (!entry.isFile() || !/\.xdlstack$/i.test(entry.name)) continue;
+    try {
+      const parsed = parseStackFile(await fs.readFile(path.join(dir, entry.name), "utf8"));
+      out.push({ id: entry.name, name: parsed.name, items: parsed.items, count: parsed.items.length });
+    } catch {}
+  }
+  return out;
+}
+async function collectStacksForListing(resolved, flat) {
+  const map = new Map(); // folderRelKey → [{ id, name, members:Set }]
+  const walk = async (dir, relKey) => {
+    let entries;
+    try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return; }
+    const stacks = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || !/\.xdlstack$/i.test(entry.name)) continue;
+      try {
+        const parsed = parseStackFile(await fs.readFile(path.join(dir, entry.name), "utf8"));
+        stacks.push({ id: entry.name, name: parsed.name, members: new Set(parsed.items) });
+      } catch {}
+    }
+    if (stacks.length) map.set(relKey, stacks);
+    if (flat) {
+      for (const entry of entries) {
+        if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+        await walk(path.join(dir, entry.name), relKey ? `${relKey}/${entry.name}` : entry.name);
+      }
+    }
+  };
+  await walk(resolved, "");
+  return map;
+}
+app.get("/api/stacks", async (req, res) => {
+  try {
+    const folder = String(req.query?.folder || "").trim();
+    const dir = resolveMediaOutputDir(folder);
+    const stacks = await readStacksInFolder(dir);
+    stacks.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    return res.json({ ok: true, folder, stacks });
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error.message });
+  }
+});
+app.post("/api/stacks", async (req, res) => {
+  try {
+    const folder = String(req.body?.folder || "").trim();
+    const dir = resolveMediaOutputDir(folder);
+    const name = normalizeStackName(req.body?.name);
+    const rawItems = Array.isArray(req.body?.items) ? req.body.items : [];
+    if (!rawItems.length) throw new Error("at least one item required");
+    if (rawItems.length > STACK_LIMIT_ITEMS) throw new Error(`stack full (max ${STACK_LIMIT_ITEMS})`);
+    const stacks = await readStacksInFolder(dir);
+    if (stacks.length >= STACK_LIMIT_PER_FOLDER) throw new Error(`too many stacks (max ${STACK_LIMIT_PER_FOLDER})`);
+    if (stacks.some((s) => s.name.toLowerCase() === name.toLowerCase())) throw new Error("stack name already exists in this folder");
+    const items = [];
+    for (const r of rawItems) {
+      const item = normalizeStackItem(r);
+      const stat = await fs.stat(path.join(dir, item)).catch(() => null);
+      if (!stat || !stat.isFile()) throw new Error(`file not found: ${item}`);
+      items.push(item);
+    }
+    const id = `${name}.xdlstack`;
+    await writeStackFile(dir, id, name, items);
+    const stack = await readStackFile(dir, id);
+    return res.status(201).json({ ok: true, stack });
+  } catch (error) {
+    const msg = error.message || String(error);
+    if (/already exists/i.test(msg)) return res.status(409).json({ ok: false, error: msg });
+    if (/required|too many|too long|invalid|not found|full|item/i.test(msg)) return res.status(400).json({ ok: false, error: msg });
+    return res.status(500).json({ ok: false, error: msg });
+  }
+});
+app.patch("/api/stacks/:id", async (req, res) => {
+  try {
+    const folder = String(req.body?.folder || req.query?.folder || "").trim();
+    const dir = resolveMediaOutputDir(folder);
+    const id = String(req.params.id || "").trim();
+    const name = normalizeStackName(req.body?.name);
+    const oldPath = stackFilePath(dir, id);
+    const stat = await fs.stat(oldPath).catch(() => null);
+    if (!stat || !stat.isFile()) return res.status(404).json({ ok: false, error: "stack not found" });
+    const stacks = await readStacksInFolder(dir);
+    if (stacks.some((s) => s.id !== id && s.name.toLowerCase() === name.toLowerCase())) return res.status(409).json({ ok: false, error: "stack name already exists in this folder" });
+    const newId = `${name}.xdlstack`;
+    await withStacksFile(dir, async () => {
+      const parsed = parseStackFile(await fs.readFile(oldPath, "utf8"));
+      const newPath = path.join(dir, newId);
+      if (oldPath !== newPath) await fs.rename(oldPath, newPath);
+      await fs.writeFile(newPath, JSON.stringify({ name, items: parsed.items }, null, 2), "utf8");
+    });
+    const stack = await readStackFile(dir, newId);
+    return res.json({ ok: true, stack });
+  } catch (error) {
+    const msg = error.message || String(error);
+    if (/already exists/i.test(msg)) return res.status(409).json({ ok: false, error: msg });
+    if (/stack not found/i.test(msg)) return res.status(404).json({ ok: false, error: msg });
+    if (/required|too long|invalid/i.test(msg)) return res.status(400).json({ ok: false, error: msg });
+    return res.status(500).json({ ok: false, error: msg });
+  }
+});
+app.delete("/api/stacks/:id", async (req, res) => {
+  try {
+    const folder = String(req.query?.folder || req.body?.folder || "").trim();
+    const dir = resolveMediaOutputDir(folder);
+    const id = String(req.params.id || "").trim();
+    const full = stackFilePath(dir, id);
+    const stat = await fs.stat(full).catch(() => null);
+    if (!stat || !stat.isFile()) return res.status(404).json({ ok: false, error: "stack not found" });
+    await withStacksFile(dir, async () => { await fs.unlink(full); });
+    return res.json({ ok: true });
+  } catch (error) {
+    const msg = error.message || String(error);
+    if (/stack not found/i.test(msg)) return res.status(404).json({ ok: false, error: msg });
+    if (/invalid/i.test(msg)) return res.status(400).json({ ok: false, error: msg });
+    return res.status(500).json({ ok: false, error: msg });
+  }
+});
+app.post("/api/stacks/:id/items", async (req, res) => {
+  try {
+    const folder = String(req.body?.folder || req.query?.folder || "").trim();
+    const dir = resolveMediaOutputDir(folder);
+    const id = String(req.params.id || "").trim();
+    const keys = Array.isArray(req.body?.keys) ? req.body.keys : [];
+    const full = stackFilePath(dir, id);
+    const stat = await fs.stat(full).catch(() => null);
+    if (!stat || !stat.isFile()) return res.status(404).json({ ok: false, error: "stack not found" });
+    if (!keys.length) return res.json({ ok: true, stack: await readStackFile(dir, id), added: 0 });
+    const addedCount = await withStacksFile(dir, async () => {
+      const data = parseStackFile(await fs.readFile(full, "utf8"));
+      const seen = new Set(data.items);
+      const added = [];
+      for (const k of keys) {
+        const item = normalizeStackItem(k);
+        if (seen.has(item)) continue;
+        const st = await fs.stat(path.join(dir, item)).catch(() => null);
+        if (!st || !st.isFile()) throw new Error(`file not found: ${item}`);
+        if (data.items.length >= STACK_LIMIT_ITEMS) throw new Error(`stack full (max ${STACK_LIMIT_ITEMS})`);
+        data.items.push(item);
+        seen.add(item);
+        added.push(item);
+      }
+      if (added.length) await fs.writeFile(full, JSON.stringify({ name: data.name, items: data.items }, null, 2), "utf8");
+      return added.length;
+    });
+    return res.json({ ok: true, stack: await readStackFile(dir, id), added: addedCount });
+  } catch (error) {
+    const msg = error.message || String(error);
+    if (/stack not found/i.test(msg)) return res.status(404).json({ ok: false, error: msg });
+    if (/invalid|not found|full/i.test(msg)) return res.status(400).json({ ok: false, error: msg });
+    return res.status(500).json({ ok: false, error: msg });
+  }
+});
+app.delete("/api/stacks/:id/items", async (req, res) => {
+  try {
+    const folder = String(req.body?.folder || req.query?.folder || "").trim();
+    const dir = resolveMediaOutputDir(folder);
+    const id = String(req.params.id || "").trim();
+    const keys = Array.isArray(req.body?.keys) ? req.body.keys : [];
+    const full = stackFilePath(dir, id);
+    const stat = await fs.stat(full).catch(() => null);
+    if (!stat || !stat.isFile()) return res.status(404).json({ ok: false, error: "stack not found" });
+    const removedCount = await withStacksFile(dir, async () => {
+      const data = parseStackFile(await fs.readFile(full, "utf8"));
+      const del = new Set();
+      for (const k of keys) { try { del.add(normalizeStackItem(k)); } catch {} }
+      const before = data.items.length;
+      data.items = data.items.filter((x) => !del.has(x));
+      // A lone file is not a stack: release it and drop the stack file.
+      if (data.items.length <= 1) {
+        await fs.unlink(full).catch(() => {});
+        return { removed: before - data.items.length, dissolved: true };
+      }
+      if (data.items.length !== before) await fs.writeFile(full, JSON.stringify({ name: data.name, items: data.items }, null, 2), "utf8");
+      return { removed: before - data.items.length, dissolved: false };
+    });
+    if (removedCount.dissolved) return res.json({ ok: true, stack: null, removed: removedCount.removed, dissolved: true });
+    return res.json({ ok: true, stack: await readStackFile(dir, id), removed: removedCount.removed });
+  } catch (error) {
+    const msg = error.message || String(error);
+    if (/stack not found/i.test(msg)) return res.status(404).json({ ok: false, error: msg });
+    if (/invalid/i.test(msg)) return res.status(400).json({ ok: false, error: msg });
     return res.status(500).json({ ok: false, error: msg });
   }
 });
