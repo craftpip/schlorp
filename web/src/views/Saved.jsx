@@ -85,7 +85,7 @@ export default function Saved() {
     return () => ws.close();
   }, []);
 
-  const onDownloadAll = async () => { if (!pending.length) return; setGlobalBusy("download"); const byKey = {}; for (const p of pending) { const key = `${p.folder || ""}|||${p.account || "default"}`; (byKey[key] = byKey[key] || []).push(p.url); } for (const [key, us] of Object.entries(byKey)) { const [f, a] = key.split("|||"); await fetch("/queue/add", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ urls: us, folder: f, account: a }) }); } for (const p of pending) { await fetch("/sync-queue/pending/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: p.url }) }); }
+  const onDownloadAll = async () => { if (!pending.length) return; setGlobalBusy("download"); const folderToAccount = new Map(lists.map((li) => [String(li.folder || ""), String(li.account || "default")])); const byKey = {}; for (const p of pending) { const f = String(p.folder || ""); const a = folderToAccount.get(f) || String(p.account || "default"); const key = `${f}|||${a}`; (byKey[key] = byKey[key] || []).push(p.url); } for (const [key, us] of Object.entries(byKey)) { const [f, a] = key.split("|||"); await fetch("/queue/add", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ urls: us, folder: f, account: a }) }); } for (const p of pending) { await fetch("/sync-queue/pending/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: p.url }) }); }
     showToast("Download has been queued"); load(); setGlobalBusy(null); setTimeout(() => navigate("/dashboard"), 900); };
   const [busyIdx, setBusyIdx] = useState(null);
   const effBusy =
@@ -139,7 +139,7 @@ export default function Saved() {
     const l = lists[idx];
     const folder = l.folder || "";
     const listAccount = l.account || "default";
-    const pendingForFolder = pending.filter((p) => (p.folder || "") === folder && (p.account || "default") === listAccount);
+    const pendingForFolder = pending.filter((p) => (p.folder || "") === folder);
     if (!pendingForFolder.length) { setMsg(`No pending for ${folder || "—"}`); return; }
     setBusyIdx(`dl-${idx}`);
     try {
