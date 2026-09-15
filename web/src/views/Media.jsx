@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useMemo } from "react";
+import { useEffect, useState, useRef, useMemo, useLayoutEffect } from "react";
 import { useSearchParams } from "react-router-dom";
 import FileViewer from "../components/FileViewer";
 import ShortcutsHelp from "../components/ShortcutsHelp";
@@ -236,6 +236,79 @@ export default function Media() {
   const [anchorKey, setAnchorKey] = useState(null);
   // Spread (open) pile survives reloads via ?spread= (validated below).
   const [spreadStackId, setSpreadStackId] = useState(() => searchParams.get("spread") || null);
+  const [closingSpreadId, setClosingSpreadId] = useState(null);
+  const closingTimerRef = useRef(null);
+  const prevSpreadRef = useRef(spreadStackId);
+  useEffect(() => {
+    const prev = prevSpreadRef.current;
+    const wasUserClose = userCloseRef.current;
+    userCloseRef.current = false;
+    if (prev && !spreadStackId) {
+      // Only user-initiated closes play the roll-in members window; navigation
+      // resets and ?spread= clears collapse instantly.
+      if (wasUserClose) {
+        setClosingSpreadId(prev);
+        if (closingTimerRef.current) clearTimeout(closingTimerRef.current);
+        const st = folderStacksRef.current.find((s) => s.id === prev);
+        const n = st && Array.isArray(st.items) ? st.items.length : 4;
+        const closeMs = 320 + (n - 1) * 40 + 160;
+        closingTimerRef.current = setTimeout(() => { setClosingSpreadId(null); rollRectsRef.current = null; }, closeMs);
+      } else {
+        setClosingSpreadId(null);
+        rollRectsRef.current = null;
+      }
+    }
+    if (spreadStackId) {
+      if (closingTimerRef.current) { clearTimeout(closingTimerRef.current); closingTimerRef.current = null; }
+      setClosingSpreadId(null);
+    }
+    prevSpreadRef.current = spreadStackId;
+    return () => {};
+  }, [spreadStackId]);
+  useEffect(() => () => { if (closingTimerRef.current) clearTimeout(closingTimerRef.current); }, []);
+  // Pile-origin roll-out/roll-in. spreadFromRectRef holds per-member peeked
+  // rects captured at click time (pile still mounted, so we can FLIP from each
+  // card's own slot); userCloseRef gates the collapse animation to explicit
+  // user closes, never to navigation resets or ?spread= restore.
+  const spreadFromRectRef = useRef(null);
+  const userCloseRef = useRef(false);
+  // Per-stack rects kept alive until the pile reforms (used by roll-in).
+  const rollRectsRef = useRef(null);
+  // Per-member source rects captured from the pile's own peeked tiles at click
+  // time. `rects` maps member rowKey → its card's rect inside the pile, so each
+  // card rolls out from ITS OWN slot (not the whole pile cell) and folds back
+  // to the same slot on close — preserving the pile's one-under-the-other look.
+  const capturePileRect = (stackId) => {
+    const gridEl = gridRef.current;
+    if (!gridEl) return;
+    let rects = null;
+    for (const el of gridEl.querySelectorAll('[data-testid="media-tile-pile"]')) {
+      if (el.getAttribute('data-filename') !== stackId) continue;
+      rects = new Map();
+      for (const tile of el.querySelectorAll('[data-testid="media-tile-file"]')) {
+        const key = tile.getAttribute('data-filename');
+        if (!key) continue;
+        const r = tile.getBoundingClientRect();
+        if (r.width && r.height) rects.set(key, { left: r.left, top: r.top, width: r.width, height: r.height });
+      }
+      break;
+    }
+    spreadFromRectRef.current = rects && rects.size ? { stackId, rects } : null;
+    // Persist the same rects through the whole open→close cycle so roll-in
+    // returns each card to its own pile slot.
+    rollRectsRef.current = rects && rects.size ? { stackId, rects } : null;
+  };
+  // User-driven collapse: switch to the closing window synchronously (so the
+  // members roll back IN toward the pile instead of flashing the pile first),
+  // then let the effect below reschedule the teardown timer.
+  const closeSpread = () => {
+    const sid = spreadStackIdRef.current;
+    if (!sid) return;
+    userCloseRef.current = true;
+    if (closingTimerRef.current) clearTimeout(closingTimerRef.current);
+    setClosingSpreadId(sid);
+    setSpreadStackId(null);
+  };
   // Stacks mode: "stacked" (piles, open on select/navigate) · "open"
   // (all stacks spread) · "locked" (piles that never open on select/navigate).
   const [stacksMode, setStacksMode] = useState("stacked");
@@ -499,15 +572,8 @@ export default function Media() {
     const set = new Set(items);
     return filtered.filter((it) => !it.dir && set.has(String(rowKey(it)).split("/").pop())).map((it) => rowKey(it));
   };
-  // Staggered rise-in animation for freshly spread members (mount-only;
-  // steady re-renders keep the same string so it never replays). Order
-  // follows the VISUAL sequence (grid order), not stack file order.
-  // NOTE: must stay BELOW gridVisible (memo runs during render).
-  const spreadMemberAnim = (key) => {
-    const idx = spreadVisualOrder.get(key);
-    if (idx === undefined) return undefined;
-    return `media-member-in .25s ease ${idx * 45}ms backwards`;
-  };
+  // Animations are handled in the FLIP layout effect (rolled out from the pile
+  // cell on open, folded back into the front card on user close).
   // For a given mouse point inside the tile container, find the nearest file
   // tile and where on it the drop should land: its closest edge/side, which
   // tells us both the insertion point (before/after the tile) and the visual
@@ -747,7 +813,7 @@ export default function Media() {
           // right/down) starts at the FIRST member; from right/below ends
           // at the LAST member.
           const m = (dir === "left" || dir === "up") ? entry.members[entry.members.length - 1] : entry.members[0];
-          if (stacksModeRef.current !== "locked") setSpreadStackId(entry.stackId);
+          if (stacksModeRef.current !== "locked") { capturePileRect(entry.stackId); setSpreadStackId(entry.stackId); }
           const fk = rowKey(m);
           setSelKeys(new Set([fk]));
           setAnchorKey(fk);
@@ -878,7 +944,7 @@ export default function Media() {
       if (isGrid && !inPlaylistView && k === "Escape") {
         e.preventDefault();
         const hadSpread = !!spreadStackIdRef.current;
-        setSpreadStackId(null);
+        if (hadSpread) closeSpread();
         setSelKeys(new Set(selKey ? [selKey] : []));
         setAnchorKey(selKey || null);
         if (hadSpread) return;
@@ -1065,6 +1131,7 @@ export default function Media() {
             if (pileId) {
               const entry = gridVisibleRef.current.find((ve) => ve.kind === "pile" && ve.stackId === pileId);
               if (entry) {
+                capturePileRect(pileId);
                 setSpreadStackId(pileId);
                 const fk = rowKey(entry.members[0]);
                 setSelKeys(new Set([fk]));
@@ -1671,9 +1738,9 @@ export default function Media() {
         if (!members.length) continue;
         // Mark all members as emitted
         for (const m of members) emitted.add(m);
-        if (spreadStackId === st.id || stacksMode === "open") {
-          // Spread (or open-all mode): show members as normal tiles
-          for (const m of members) seq.push({ kind: "file", it: m, key: rowKey(m), w: 0, h: GRID_TARGET_H });
+        if (spreadStackId === st.id || stacksMode === "open" || closingSpreadId === st.id) {
+          // Spread (or closing/ open-all): show members as normal tiles (closing anim handled separately)
+          for (const m of members) seq.push({ kind: "file", it: m, key: rowKey(m), w: 0, h: GRID_TARGET_H, closing: closingSpreadId === st.id });
         } else {
           // Pile: one cell containing up to 4 stacked cards
           const stack = folderStacks.find((s) => s.id === st.id);
@@ -1684,7 +1751,7 @@ export default function Media() {
       seq.push({ kind: "file", it, key: rowKey(it), w: 0, h: GRID_TARGET_H });
     }
     return seq;
-  }, [isGrid, gridW, filtered, inPlaylistView, spreadStackId, stacksMode, folderStacks]);
+  }, [isGrid, gridW, filtered, inPlaylistView, spreadStackId, closingSpreadId, stacksMode, folderStacks]);
   // Compute widths for gridVisible entries
   const gridVisibleWithWidths = useMemo(() => {
     if (!isGrid || !gridW) return [];
@@ -1723,6 +1790,19 @@ export default function Media() {
     }
     return m;
   }, [spreadStackId, gridVisible, folderStacks]);
+  const closingVisualOrder = useMemo(() => {
+    const m = new Map();
+    if (!closingSpreadId) return m;
+    const st = folderStacks.find((s) => s.id === closingSpreadId);
+    const items = st && Array.isArray(st.items) ? st.items : [];
+    if (!items.length) return m;
+    const set = new Set(items);
+    let i = 0;
+    for (const e of gridVisible) {
+      if (e.kind === "file" && set.has(String(e.key).split("/").pop())) m.set(e.key, i++);
+    }
+    return m;
+  }, [closingSpreadId, gridVisible, folderStacks]);
   // Live refs so the keyboard effect can always read fresh grid data
   const gridVisibleRef = useRef(gridVisible);
   gridVisibleRef.current = gridVisible;
@@ -1734,6 +1814,86 @@ export default function Media() {
   stacksModeRef.current = stacksMode;
   const folderStacksRef = useRef(folderStacks);
   folderStacksRef.current = folderStacks;
+  // Pile-origin roll-out/roll-in: when a stack opens, each member card slides
+  // out FROM ITS OWN peeked slot inside the pile to its grid cell (FLIP).
+  // On close each card folds back to its own pile slot. Per-card rects prevent
+  // the stretch bug (no single-wide-rect scale) and z-index follows the pile's
+  // "one-under-another" stacking order: cover (visual idx 0) on top, each
+  // deeper card one step below (total - idx) — same ranking as renderPile's
+  // `zIndex: members.length - i`, so the under-card never pops above the cover.
+  // Runs ONLY for real spreadStackId changes driven by capturePileRect()
+  // (user clicks/keys), never on ?spread= restore or folder navigation
+  // (spreadFromRectRef stays null there) — those render statically.
+  useLayoutEffect(() => {
+    const container = gridRef.current;
+    if (!container || !isGrid) return;
+    const tiles = [...container.querySelectorAll('[data-testid="media-tile-file"]')];
+    // ROLL-OUT (open): each card flies from its own pile slot to its grid tile.
+    const from = spreadFromRectRef.current;
+    if (from && spreadStackId === from.stackId) {
+      spreadFromRectRef.current = null;
+      const { rects } = from;
+      const total = spreadVisualOrder.size || 1;
+      for (const el of tiles) {
+        const key = el.getAttribute('data-filename');
+        if (!key || !spreadVisualOrder.has(key)) continue;
+        const idx = spreadVisualOrder.get(key);
+        const fr = rects.get(key);
+        if (!fr) continue;
+        const cur = el.getBoundingClientRect();
+        if (!cur.width || !cur.height) continue;
+        // Pile stacking order: cover (idx 0) on top, each deeper card one step
+        // below — same as renderPile's `zIndex: members.length - i`.
+        el.style.zIndex = total - idx;
+        if (!idx) continue; // front cover already visible as the pile cover
+        const dx = fr.left - cur.left;
+        const dy = fr.top - cur.top;
+        if (dx === 0 && dy === 0) continue;
+        el.style.transformOrigin = 'top left';
+        el.style.transform = `translate(${dx}px, ${dy}px) scale(${fr.width / cur.width}, ${fr.height / cur.height})`;
+        el.style.transition = 'transform 0s, opacity 0s';
+        el.getBoundingClientRect();
+        el.style.transition = `transform .34s cubic-bezier(.22,.8,.36,1) ${idx * 45}ms, opacity .25s ease ${idx * 45}ms`;
+        el.style.transform = 'translate(0, 0) scale(1)';
+        el.style.opacity = '1';
+        const clean = () => { el.style.transition = ''; el.style.transform = ''; el.style.opacity = ''; el.style.transformOrigin = ''; el.style.zIndex = ''; el.removeEventListener('transitionend', clean); };
+        el.addEventListener('transitionend', clean);
+      }
+      return;
+    }
+    // ROLL-IN (close): each card folds back to its own pile slot. Only runs
+    // for user-initiated closes.
+    if (closingSpreadId) {
+      const rects = rollRectsRef.current && rollRectsRef.current.stackId === closingSpreadId ? rollRectsRef.current.rects : null;
+      const total = closingVisualOrder.size || 1;
+      for (const el of tiles) {
+        const key = el.getAttribute('data-filename');
+        if (!key || !closingVisualOrder.has(key)) continue;
+        const idx = closingVisualOrder.get(key);
+        const target = rects ? rects.get(key) : null;
+        if (!target) continue;
+        const cur = el.getBoundingClientRect();
+        if (!cur.width || !cur.height) continue;
+        // Keep the pile's stacking order while folding in.
+        el.style.zIndex = total - idx;
+        if (!idx) continue; // front cover folds back to its own slot (already there)
+        const dx = target.left - cur.left;
+        const dy = target.top - cur.top;
+        el.style.transformOrigin = 'top left';
+        el.style.transition = 'transform 0s, opacity 0s';
+        el.style.transform = 'translate(0, 0) scale(1)';
+        el.style.opacity = '1';
+        el.getBoundingClientRect();
+        const rev = total - idx - 1;
+        el.style.transition = `transform .3s cubic-bezier(.4,0,.6,1) ${rev * 40}ms, opacity .28s ease ${rev * 40 + 120}ms`;
+        el.style.transform = `translate(${dx}px, ${dy}px) scale(${target.width / cur.width}, ${target.height / cur.height})`;
+        el.style.opacity = '0';
+        const clean = () => { el.style.transition = ''; el.style.transform = ''; el.style.opacity = ''; el.style.transformOrigin = ''; el.style.zIndex = ''; el.removeEventListener('transitionend', clean); };
+        el.addEventListener('transitionend', clean);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spreadStackId, closingSpreadId, gridVisible]);
   // Grid click handler: Shift/Ctrl-aware multi-select (replaces tapItem for grid tiles).
   const gridClickHandler = (entry, e) => {
     if (!isGrid) { tapItem(entry.kind === "file" ? entry.it : entry.members[0]); return; }
@@ -1746,7 +1906,7 @@ export default function Media() {
     if (isCoarsePointer()) {
       if (isPile) {
         const ks = pilesLocked ? cellKeys : [cellKeys[0]];
-        if (!pilesLocked) setSpreadStackId(entry.stackId);
+        if (!pilesLocked) { capturePileRect(entry.stackId); setSpreadStackId(entry.stackId); }
         setSelKeys(new Set(ks));
         setAnchorKey(ks[0]);
         setSelectedKey(ks[0]);
@@ -1780,7 +1940,7 @@ export default function Media() {
       });
       setAnchorKey(cellKeys[0]);
       setSelectedKey(cellKeys[0]);
-      if (isPile && !spreadStackId && !pilesLocked) setSpreadStackId(entry.stackId);
+      if (isPile && !spreadStackId && !pilesLocked) { capturePileRect(entry.stackId); setSpreadStackId(entry.stackId); }
       return;
     }
     // Plain click
@@ -1793,6 +1953,7 @@ export default function Media() {
         return;
       }
       // Click on a pile: spread it, select the first member only
+      capturePileRect(entry.stackId);
       setSpreadStackId(entry.stackId);
       setSelKeys(new Set([cellKeys[0]]));
       setAnchorKey(cellKeys[0]);
@@ -1801,11 +1962,11 @@ export default function Media() {
     }
     // Collapse any spread stack when clicking outside it (clicking a
     // member of the open pile keeps it open).
-    if (spreadStackId && !isSpreadMember(k)) setSpreadStackId(null);
+    if (spreadStackId && !isSpreadMember(k)) closeSpread();
     // Clicking the already-selected single item deselects it (single
     // selection only). Deselecting a member of the open pile closes it.
     if ((selKeys.size === 1 && selKeys.has(k)) || (!selKeys.size && selKey === k)) {
-      if (spreadStackId && isSpreadMember(k)) setSpreadStackId(null);
+      if (spreadStackId && isSpreadMember(k)) closeSpread();
       setSelKeys(new Set());
       setAnchorKey(null);
       setSelectedKey("");
@@ -1894,6 +2055,7 @@ export default function Media() {
           // (locked mode: never opens).
           e.stopPropagation();
           if (stacksModeRef.current !== "locked") {
+            capturePileRect(stackId);
             setSpreadStackId(stackId);
             setSelKeys(new Set([rowKey(members[0])]));
           }
@@ -1935,7 +2097,7 @@ export default function Media() {
           } catch {}
         }}
         title={isCustomReorder ? `${stackName} — ${count} files — drag to reorder` : `${stackName} — ${count} files`}
-        style={{ position: "relative", display: "flex", flexDirection: "row", alignItems: "stretch", width: memberW + PEEK * (members.length - 1), height: GRID_TARGET_H, flex: "0 0 auto", cursor: isCustomReorder ? "grab" : "pointer", outline: inSel ? "4px solid var(--accent)" : "none", animation: "media-pile-in .22s ease" }}
+        style={{ position: "relative", display: "flex", flexDirection: "row", alignItems: "stretch", width: memberW + PEEK * (members.length - 1), height: GRID_TARGET_H, flex: "0 0 auto", cursor: isCustomReorder ? "grab" : "pointer", outline: inSel ? "4px solid var(--accent)" : "none" }}
       >
         {pileDropSide && (
           <div style={{ position: "absolute", top: 0, bottom: 0, [pileDropSide]: -3, width: 4, borderRadius: 2, background: "var(--accent)", zIndex: 10, pointerEvents: "none" }} />
@@ -2138,7 +2300,7 @@ export default function Media() {
       <div data-testid="media-content" className="media-full">
       {err && <div data-testid="media-error" className="card" style={{ padding: 12, color: "var(--danger)", marginBottom: 12 }}>{folderMissing ? `Folder not found: ${folder} — it may have been moved, renamed or deleted.` : err}</div>}
 
-      <style>{`.media-tile-file:hover .media-tile-playlist-btn-wrap{opacity:1 !important} .media-row:hover .media-row-playlist-btn{opacity:1 !important} .media-tile-playlist:hover .playlist-chip-actions{opacity:1 !important} .media-row-playlist:hover .playlist-row-actions{opacity:1 !important}@keyframes media-pile-in{from{opacity:0;transform:scale(.9)}to{opacity:1;transform:scale(1)}}@keyframes media-member-in{from{opacity:0;transform:translateY(10px) scale(.97)}to{opacity:1;transform:none}}`}</style>
+      <style>{`.media-tile-file:hover .media-tile-playlist-btn-wrap{opacity:1 !important} .media-row:hover .media-row-playlist-btn{opacity:1 !important} .media-tile-playlist:hover .playlist-chip-actions{opacity:1 !important} .media-row-playlist:hover .playlist-row-actions{opacity:1 !important}`}</style>
       {isGrid ? (
         <div data-testid="media-grid-card" className="card media-lib-card">
           <div data-testid="media-grid" ref={gridRef} className="card-body" style={{ padding: GRID_GAP }}>
@@ -2213,7 +2375,7 @@ export default function Media() {
                       }
                     }}
                   >
-                    {filtered.length === 0 ? (!loading && !err ? (filtersActive ? filterEmptyNotice : <div data-testid="media-empty" className="empty" style={{ padding: 20, gridColumn: "1 / -1", width: "100%", textAlign: "center" }}><i className="bi bi-inbox" /> {folder ? "This folder is empty" : "No files — download something!"}</div>) : null) : gridVisibleWithWidths.map((entry) => (entry.kind === "pile" ? renderPile(entry) : renderTile(entry.it, 0, entry.w, entry.h, spreadMemberAnim(entry.key))))}
+                    {filtered.length === 0 ? (!loading && !err ? (filtersActive ? filterEmptyNotice : <div data-testid="media-empty" className="empty" style={{ padding: 20, gridColumn: "1 / -1", width: "100%", textAlign: "center" }}><i className="bi bi-inbox" /> {folder ? "This folder is empty" : "No files — download something!"}</div>) : null) : gridVisibleWithWidths.map((entry) => (entry.kind === "pile" ? renderPile(entry) : renderTile(entry.it, 0, entry.w, entry.h)))}
                   </div>
                 )}
                 {filtered.length > 0 && fileRows.length === 0 && !inPlaylistView && (filtersActive ? filterEmptyNotice : <div data-testid="media-empty" className="empty" style={{ padding: 12 }}><i className="bi bi-inbox" /> No files in this folder</div>)}
