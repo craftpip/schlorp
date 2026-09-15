@@ -20,7 +20,7 @@ export default function AlertModal({ open, title = "Notice", message, buttonLabe
     <div
       data-testid="alert-modal"
       onClick={onClose}
-      style={{ position: "fixed", inset: 0, zIndex: 90, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, background: "rgba(6,8,18,0.55)", backdropFilter: "blur(6px)" }}
+      style={{ position: "fixed", inset: 0, zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, background: "rgba(6,8,18,0.55)", backdropFilter: "blur(6px)" }}
     >
       <div
         onClick={(e) => e.stopPropagation()}

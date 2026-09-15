@@ -6,10 +6,16 @@ export default function MediaContextMenu({ menu, onClose, stacks, selCount, onSt
   // Selection count wins: right-clicking with files multi-selected stacks the selection.
   const fileCount = selCount > 1 ? selCount : (entry && entry.kind === "file" ? 1 : count);
   // Stacks the right-clicked file already belongs to (✓ marked; picking
-  // another one moves it there).
+  // another one moves it there). A right-clicked pile counts as its own stack.
   const memberOf = new Set(
     (entry && entry.kind === "file" && entry.it && Array.isArray(entry.it.stacks) ? entry.it.stacks : []).map((s) => s.id)
   );
+  if (isPile && entry.stackId) memberOf.add(entry.stackId);
+  // Split list: the item's own stacks go on top, then the remaining stacks
+  // (up to 5) below.
+  const own = stacks.filter((s) => memberOf.has(s.id));
+  const rest = stacks.filter((s) => !memberOf.has(s.id));
+  const restShown = rest.slice(0, 5);
   return (
     <div
       data-testid="media-context-menu"
@@ -18,11 +24,21 @@ export default function MediaContextMenu({ menu, onClose, stacks, selCount, onSt
       style={{ position: "fixed", left: menu.x, top: menu.y, zIndex: 100, minWidth: 180, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, boxShadow: "0 12px 32px rgba(0,0,0,.35)", padding: 4, fontSize: 13 }}
     >
       <MenuItem data-testid="media-ctx-stack-create" label={`Stack ${fileCount} item${fileCount === 1 ? "" : "s"}`} icon="bi-layers" disabled={fileCount < 2} onClick={() => { onClose(); onStack(); }} />
-      {stacks.length > 0 && stacks.map((s) => (
+      {own.map((s) => (
         <MenuItem key={s.id} data-testid="media-ctx-add-stack" label={`${memberOf.has(s.id) ? "✓ " : ""}${s.name}`} icon={memberOf.has(s.id) ? "bi-check-lg" : "bi-layers"} disabled={fileCount < 1} onClick={() => { onClose(); onAddToStack(s.id, s.name); }}>
           <span style={{ marginLeft: "auto", color: "var(--muted)", fontSize: 11 }}>{s.count ?? s.items?.length ?? 0}</span>
         </MenuItem>
       ))}
+      {rest.length > 0 && (
+        <>
+          <Divider />
+          {restShown.map((s) => (
+            <MenuItem key={s.id} data-testid="media-ctx-add-stack" label={s.name} icon={memberOf.has(s.id) ? "bi-check-lg" : "bi-layers"} disabled={fileCount < 1} onClick={() => { onClose(); onAddToStack(s.id, s.name); }}>
+              <span style={{ marginLeft: "auto", color: "var(--muted)", fontSize: 11 }}>{s.count ?? s.items?.length ?? 0}</span>
+            </MenuItem>
+          ))}
+        </>
+      )}
       <Divider />
       <MenuItem label="Open" icon="bi-box-arrow-up-right" onClick={() => { onClose(); onOpen(); }} />
       <MenuItem label="Delete" icon="bi-trash" danger onClick={() => { onClose(); onDelete(); }} />

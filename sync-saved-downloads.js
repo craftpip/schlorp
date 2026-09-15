@@ -59,9 +59,10 @@ async function saveQueue(queue) {
   await fs.writeFile(QUEUE_FILE, JSON.stringify(queue, null, 2), "utf8");
 }
 
-function enqueueUrls(queue, urls, folder, existingSeenUrls) {
+function enqueueUrls(queue, urls, folder, existingSeenUrls, account) {
   const seenSet = new Set(existingSeenUrls.map((u) => normalizeUrl(u)));
   let added = 0;
+  const acct = normalizeAccountName(account || "default");
   // Scanned lists come back newest-first; queue oldest-first so downloads
   // follow the collection's sequence.
   const ordered = [...urls].reverse();
@@ -74,6 +75,7 @@ function enqueueUrls(queue, urls, folder, existingSeenUrls) {
     queue.pending.push({
       url,
       folder,
+      account: acct,
       addedAt: new Date().toISOString(),
     });
     seenSet.add(normalized);
@@ -338,7 +340,7 @@ async function scanRandomList(state, queue, apiBase) {
   );
 
   const firstPostUrl = scannedPageUrls.find((u) => /instagram\.com\/(?:[A-Za-z0-9._]+\/)?(?:p|reel|tv)\//i.test(u)) || "";
-  const added = enqueueUrls(queue, scannedPageUrls, target.folder, scannedUrls);
+  const added = enqueueUrls(queue, scannedPageUrls, target.folder, scannedUrls, target.account);
 
   state.lists[target.url] = {
     ...listState,
@@ -370,6 +372,7 @@ async function downloadRandomUrl(queue, apiBase) {
       () => postDownload(`${apiBase}/download`, {
         link: item.url,
         folder: item.folder,
+        account: normalizeAccountName(item.account || "default"),
       }),
       RETRY_COUNT,
       RETRY_DELAY_MS
@@ -379,6 +382,7 @@ async function downloadRandomUrl(queue, apiBase) {
     queue.completed.push({
       url: item.url,
       folder: item.folder,
+      account: normalizeAccountName(item.account || "default"),
       downloadedAt: new Date().toISOString(),
     });
 

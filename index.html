@@ -1510,8 +1510,8 @@
       });
       if(svEnqueueBtn)svEnqueueBtn.addEventListener("click",async()=>{
         const urls=filterPostUrls(savedScanResults);if(!urls.length){setSavedStatus("No posts to enqueue.","error");return}
-        const folder=String(svFolder.value||"").trim();svEnqueueBtn.disabled=true;
-        try{const p=await postJson("/sync-queue/pending/add",{urls,folder});setSavedStatus(`Enqueued ${p.added||0} (skipped ${p.skipped||0}). Daemon will download.`,"ok");await loadSyncData()}catch(err){setSavedStatus(err&&err.message?err.message:"Failed.","error")}finally{svEnqueueBtn.disabled=false}
+        const folder=String(svFolder.value||"").trim();const account=String((svAccount&&svAccount.value)||"default").trim()||"default";svEnqueueBtn.disabled=true;
+        try{const p=await postJson("/sync-queue/pending/add",{urls,folder,account});setSavedStatus(`Enqueued ${p.added||0} (skipped ${p.skipped||0}). Daemon will download.`,"ok");await loadSyncData()}catch(err){setSavedStatus(err&&err.message?err.message:"Failed.","error")}finally{svEnqueueBtn.disabled=false}
       });
       if(svCopyBtn)svCopyBtn.addEventListener("click",async()=>{
         const urls=filterPostUrls(savedScanResults);if(!urls.length)return;

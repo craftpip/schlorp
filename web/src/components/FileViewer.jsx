@@ -710,7 +710,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     <div
       onClick={onClose}
       onContextMenu={(e) => e.preventDefault()}
-      style={{ position: "fixed", inset: 0, zIndex: 80, display: "flex", alignItems: "stretch", justifyContent: "stretch", padding: 0, margin: 0, background: "rgba(6,8,18,0.72)", backdropFilter: "blur(8px)" }}
+      style={{ position: "fixed", inset: 0, zIndex: 110, display: "flex", alignItems: "stretch", justifyContent: "stretch", padding: 0, margin: 0, background: "rgba(6,8,18,0.72)", backdropFilter: "blur(8px)" }}
     >
       <div
         ref={viewerRef}

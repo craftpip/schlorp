@@ -198,10 +198,12 @@ export default function Saved() {
   };
   const onAddQueue = async (e) => {
     e.preventDefault();
-    const urls = queueUrls.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    const rawUrls = typeof queueUrls !== "undefined" ? queueUrls : "";
+    const rawFolder = typeof queueFolder !== "undefined" ? queueFolder : "";
+    const urls = String(rawUrls || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
     if (!urls.length) return;
-    await fetch("/sync-queue/pending/add", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ urls, folder: queueFolder }) });
-    setQueueUrls(""); load();
+    await fetch("/sync-queue/pending/add", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ urls, folder: rawFolder, account: "default" }) });
+    if (typeof setQueueUrls === "function") setQueueUrls(""); load();
   };
   const onRemovePending = async (u) => {
     await fetch("/sync-queue/pending/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: u }) });

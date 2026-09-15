@@ -236,10 +236,10 @@ export default function Media() {
   const [anchorKey, setAnchorKey] = useState(null);
   // Spread (open) pile survives reloads via ?spread= (validated below).
   const [spreadStackId, setSpreadStackId] = useState(() => searchParams.get("spread") || null);
-  // Stacks collapse toggle: false = stacked piles + navigation-reactive
-  // (spread on land/click, collapse on leave); true = every stack spread
-  // and kept open even when selection leaves.
-  const [stacksOpenAll, setStacksOpenAll] = useState(false);
+  // Stacks mode: "stacked" (piles, open on select/navigate) · "open"
+  // (all stacks spread) · "locked" (piles that never open on select/navigate).
+  const [stacksMode, setStacksMode] = useState("stacked");
+  const pilesLocked = stacksMode === "locked";
   useEffect(() => {
     // Drop ?spread= ids that don't exist in this folder.
     if (spreadStackId && folderStacks.length && !folderStacks.some((s) => s.id === spreadStackId)) setSpreadStackId(null);
@@ -740,7 +740,7 @@ export default function Media() {
           // right/down) starts at the FIRST member; from right/below ends
           // at the LAST member.
           const m = (dir === "left" || dir === "up") ? entry.members[entry.members.length - 1] : entry.members[0];
-          setSpreadStackId(entry.stackId);
+          if (stacksModeRef.current !== "locked") setSpreadStackId(entry.stackId);
           const fk = rowKey(m);
           setSelKeys(new Set([fk]));
           setAnchorKey(fk);
@@ -876,27 +876,11 @@ export default function Media() {
         setAnchorKey(selKey || null);
         if (hadSpread) return;
       }
-      // Grid: X toggles the open (spread) stack — collapse it, or spread
-      // the pile under the primary selection.
+      // Grid: X cycles the stacks mode — stacked → open → locked (same as the
+      // toolbar stacks-toggle button).
       if (isGrid && !inPlaylistView && lowK === "x" && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
         e.preventDefault();
-        if (spreadStackIdRef.current) { setSpreadStackId(null); return; }
-        if (selectedIdx !== -1 && allSelectable.length) {
-          const it = allSelectable[selectedIdx];
-          if (it && !it._isPlaylist && !it.dir) {
-            const pileId = keyPileMapRef.current.get(selectableKey(it));
-            if (pileId) {
-              const entry = gridVisibleRef.current.find((ve) => ve.kind === "pile" && ve.stackId === pileId);
-              if (entry && entry.members && entry.members.length) {
-                setSpreadStackId(pileId);
-                const fk = rowKey(entry.members[0]);
-                setSelKeys(new Set([fk]));
-                setAnchorKey(fk);
-                setSelectedKey(fk);
-              }
-            }
-          }
-        }
+        cycleStacksMode();
         return;
       }
       if (lowK === "g" && !e.ctrlKey && !e.altKey && !e.metaKey) { e.preventDefault(); setParam("view", isGrid ? "list" : ""); }
@@ -917,9 +901,64 @@ export default function Media() {
         else toggleSort("time");
       }
       else if (lowK === "y" && !e.ctrlKey && !e.altKey && !e.metaKey) {
-        // Same as viewer: y twice deletes the selected file (600ms window).
         if (e.repeat) return;
         e.preventDefault();
+        // Grid multi-select: y y deletes all selected files
+        const multiKeys = isGrid && !inPlaylistView ? [...selectedKeysForStack].filter((k) => { const it = filtered.find((x) => rowKey(x) === k); return it && !it.dir && !it._isPlaylist; }) : [];
+        if (multiKeys.length > 1) {
+          const armKey = "multi:" + multiKeys.slice().sort().join("|");
+          const now = Date.now();
+          if (now - lastYRef.current < 600 && yArmRef.current === armKey) {
+            lastYRef.current = 0;
+            yArmRef.current = null;
+            setYArmKey(null);
+            if (yTimerRef.current) { clearTimeout(yTimerRef.current); yTimerRef.current = null; }
+            const targets = multiKeys.map((k) => filtered.find((x) => rowKey(x) === k)).filter(Boolean);
+            if (targets.length) {
+              const deletedKeys = targets.map((t) => rowKey(t));
+              const deletedSet = new Set(deletedKeys);
+              const idxs = deletedKeys.map((k) => filtered.findIndex((x) => rowKey(x) === k)).filter((i) => i !== -1).sort((a, b) => a - b);
+              let nextKey = null;
+              if (idxs.length) {
+                const max = idxs[idxs.length - 1];
+                for (let i2 = max + 1; i2 < filtered.length; i2++) { const rk = rowKey(filtered[i2]); if (!deletedSet.has(rk)) { nextKey = rk; break; } }
+                if (!nextKey) { const min = idxs[0]; for (let i2 = min - 1; i2 >= 0; i2--) { const rk = rowKey(filtered[i2]); if (!deletedSet.has(rk)) { nextKey = rk; break; } } }
+              }
+              (async () => {
+                for (const it of targets) {
+                  try {
+                    const key = rowKey(it);
+                    const isPlItem = !!it._isPlaylistItem;
+                    const slash = key.lastIndexOf("/");
+                    let parent, base;
+                    if (isPlItem) { parent = slash === -1 ? "" : key.slice(0, slash); base = slash === -1 ? key : key.slice(slash + 1); }
+                    else { parent = slash === -1 ? folder : (folder ? `${folder}/${key.slice(0, slash)}` : key.slice(0, slash)); base = slash === -1 ? key : key.slice(slash + 1); }
+                    await fetch(`/api/media?folder=${encodeURIComponent(parent)}&name=${encodeURIComponent(base)}`, { method: "DELETE" });
+                  } catch {}
+                }
+                if (nextKey) {
+                  pendingSelectRef.current = nextKey;
+                  setSelKeys(new Set([nextKey]));
+                  setAnchorKey(nextKey);
+                  setSelectedKey(nextKey);
+                } else {
+                  setSelKeys(new Set());
+                  setAnchorKey(null);
+                  if (deletedSet.has(selKey)) setSelectedKey("");
+                }
+                setItems((prev) => prev.filter((x) => { const rk = rowKey(x); return !deletedSet.has(rk) && !deletedSet.has(playlistKeyForMedia(folder, rk)); }));
+                if (!nextKey && deletedSet.size) refresh();
+              })();
+            }
+          } else {
+            lastYRef.current = now;
+            yArmRef.current = armKey;
+            setYArmKey(armKey);
+            if (yTimerRef.current) clearTimeout(yTimerRef.current);
+            yTimerRef.current = setTimeout(() => { setYArmKey(null); yArmRef.current = null; lastYRef.current = 0; yTimerRef.current = null; }, 600);
+          }
+          return;
+        }
         if (selectedIdx === -1) return;
         const it = allSelectable[selectedIdx];
         if (!it || it._isPlaylist || it.dir) return;
@@ -1014,7 +1053,7 @@ export default function Media() {
         if (it) {
           // Grid: Enter on a member of a collapsed pile spreads it (that pile
           // becomes the selection instead of opening the file).
-          if (isGrid && !inPlaylistView && isEnter && !it._isPlaylist && !it.dir && !spreadStackIdRef.current) {
+          if (isGrid && !inPlaylistView && isEnter && !it._isPlaylist && !it.dir && !spreadStackIdRef.current && stacksModeRef.current !== "locked") {
             const pileId = keyPileMapRef.current.get(selectableKey(it));
             if (pileId) {
               const entry = gridVisibleRef.current.find((ve) => ve.kind === "pile" && ve.stackId === pileId);
@@ -1215,7 +1254,14 @@ export default function Media() {
     }));
     const pending = pendingSelectRef.current;
     pendingSelectRef.current = null;
-    if (pending) setSelectedKey(pending);
+    if (pending) {
+      setSelectedKey(pending);
+      if (isGrid && !inPlaylistView) { setSelKeys(new Set([pending])); setAnchorKey(pending); }
+    } else if (isGrid && !inPlaylistView && selKey === key) {
+      setSelKeys(new Set());
+      setAnchorKey(null);
+      setSelectedKey("");
+    }
   };
   const runDeleteItemRef = useRef(null);
   runDeleteItemRef.current = runDeleteItem;
@@ -1525,15 +1571,12 @@ export default function Media() {
       </button>
     );
   };
-  // Stacks collapse toggle: open-all spreads every pile (kept open even
-  // when selection leaves); switching back collapses everything into piles.
-  const toggleStacksOpenAll = () => {
-    if (stacksOpenAll) {
-      setStacksOpenAll(false);
-      setSpreadStackId(null);
-    } else {
-      setStacksOpenAll(true);
-    }
+  // Stacks mode cycle: stacked → open → locked → stacked. Leaving "open"
+  // collapses any per-pile spread too.
+  const cycleStacksMode = () => {
+    const next = stacksMode === "stacked" ? "open" : stacksMode === "open" ? "locked" : "stacked";
+    if (next !== "open") setSpreadStackId(null);
+    setStacksMode(next);
   };
   // Close the viewer if its file disappears entirely (e.g. externally deleted
   // with no neighbour to fall back to). Delete flows set viewerKey explicitly.
@@ -1621,7 +1664,7 @@ export default function Media() {
         if (!members.length) continue;
         // Mark all members as emitted
         for (const m of members) emitted.add(m);
-        if (spreadStackId === st.id || stacksOpenAll) {
+        if (spreadStackId === st.id || stacksMode === "open") {
           // Spread (or open-all mode): show members as normal tiles
           for (const m of members) seq.push({ kind: "file", it: m, key: rowKey(m), w: 0, h: GRID_TARGET_H });
         } else {
@@ -1634,7 +1677,7 @@ export default function Media() {
       seq.push({ kind: "file", it, key: rowKey(it), w: 0, h: GRID_TARGET_H });
     }
     return seq;
-  }, [isGrid, gridW, filtered, inPlaylistView, spreadStackId, stacksOpenAll, folderStacks]);
+  }, [isGrid, gridW, filtered, inPlaylistView, spreadStackId, stacksMode, folderStacks]);
   // Compute widths for gridVisible entries
   const gridVisibleWithWidths = useMemo(() => {
     if (!isGrid || !gridW) return [];
@@ -1680,6 +1723,8 @@ export default function Media() {
   keyPileMapRef.current = keyPileMap;
   const spreadStackIdRef = useRef(spreadStackId);
   spreadStackIdRef.current = spreadStackId;
+  const stacksModeRef = useRef(stacksMode);
+  stacksModeRef.current = stacksMode;
   const folderStacksRef = useRef(folderStacks);
   folderStacksRef.current = folderStacks;
   // Grid click handler: Shift/Ctrl-aware multi-select (replaces tapItem for grid tiles).
@@ -1692,8 +1737,13 @@ export default function Media() {
     const ctrl = e?.ctrlKey || e?.metaKey;
     // Coarse pointer: treat as plain click (single tap = select+open)
     if (isCoarsePointer()) {
-      if (isPile) { setSpreadStackId(entry.stackId); setSelKeys(new Set([cellKeys[0]])); setAnchorKey(cellKeys[0]); setSelectedKey(cellKeys[0]); }
-      else { setSelKeys(new Set([k])); setAnchorKey(k); setSelectedKey(k); }
+      if (isPile) {
+        const ks = pilesLocked ? cellKeys : [cellKeys[0]];
+        if (!pilesLocked) setSpreadStackId(entry.stackId);
+        setSelKeys(new Set(ks));
+        setAnchorKey(ks[0]);
+        setSelectedKey(ks[0]);
+      } else { setSelKeys(new Set([k])); setAnchorKey(k); setSelectedKey(k); }
       return;
     }
     if (shift) {
@@ -1723,11 +1773,18 @@ export default function Media() {
       });
       setAnchorKey(cellKeys[0]);
       setSelectedKey(cellKeys[0]);
-      if (isPile && !spreadStackId) setSpreadStackId(entry.stackId);
+      if (isPile && !spreadStackId && !pilesLocked) setSpreadStackId(entry.stackId);
       return;
     }
     // Plain click
     if (isPile && !spreadStackId) {
+      if (pilesLocked) {
+        // Locked: select the whole stack without opening it.
+        setSelKeys(new Set(cellKeys));
+        setAnchorKey(cellKeys[0]);
+        setSelectedKey(cellKeys[0]);
+        return;
+      }
       // Click on a pile: spread it, select the first member only
       setSpreadStackId(entry.stackId);
       setSelKeys(new Set([cellKeys[0]]));
@@ -1759,6 +1816,15 @@ export default function Media() {
     const targets = multiDeleteTarget;
     setMultiDeleteTarget(null);
     if (!targets || !targets.length) return;
+    const deletedKeys = targets.map((t) => rowKey(t));
+    const deletedSet = new Set(deletedKeys);
+    const idxs = deletedKeys.map((k) => filtered.findIndex((x) => rowKey(x) === k)).filter((i) => i !== -1).sort((a, b) => a - b);
+    let nextKey = null;
+    if (idxs.length) {
+      const max = idxs[idxs.length - 1];
+      for (let i = max + 1; i < filtered.length; i++) { const rk = rowKey(filtered[i]); if (!deletedSet.has(rk)) { nextKey = rk; break; } }
+      if (!nextKey) { const min = idxs[0]; for (let i = min - 1; i >= 0; i--) { const rk = rowKey(filtered[i]); if (!deletedSet.has(rk)) { nextKey = rk; break; } } }
+    }
     for (const it of targets) {
       try {
         const key = rowKey(it);
@@ -1770,9 +1836,21 @@ export default function Media() {
         await fetch(`/api/media?folder=${encodeURIComponent(parent)}&name=${encodeURIComponent(base)}`, { method: "DELETE" });
       } catch {}
     }
-    setSelKeys(new Set());
-    setAnchorKey(null);
-    refresh();
+    if (nextKey) {
+      pendingSelectRef.current = nextKey;
+      setSelKeys(new Set([nextKey]));
+      setAnchorKey(nextKey);
+      setSelectedKey(nextKey);
+    } else {
+      setSelKeys(new Set());
+      setAnchorKey(null);
+      if (deletedSet.has(selKey)) setSelectedKey("");
+    }
+    setItems((prev) => prev.filter((x) => { const rk = rowKey(x); return !deletedSet.has(rk) && !deletedSet.has(playlistKeyForMedia(folder, rk)); }));
+    if (!nextKey && deletedSet.size) {
+      // No neighbour: full reload to pick default selection
+      refresh();
+    }
   };
   // Pile rendering: regular member tiles cascaded in a single grid cell —
   // first tile full, each next tile tucked behind showing only its right
@@ -1806,9 +1884,12 @@ export default function Media() {
         onClick={(e) => gridClickHandler(entry, e)}
         onDoubleClick={(e) => {
           // Double-click pile: spread it, select the first member only
+          // (locked mode: never opens).
           e.stopPropagation();
-          setSpreadStackId(stackId);
-          setSelKeys(new Set([rowKey(members[0])]));
+          if (stacksModeRef.current !== "locked") {
+            setSpreadStackId(stackId);
+            setSelKeys(new Set([rowKey(members[0])]));
+          }
         }}
         draggable={isCustomReorder}
         onDragStart={(e) => {
@@ -1998,7 +2079,7 @@ export default function Media() {
         {loading && items.length > 0 && <span data-testid="media-updating" className="small text-muted"><i className="bi bi-arrow-clockwise" /> Updating…</span>}
         <span className="small text-muted media-hint" style={{ marginLeft: 2 }}>Click to select · double-click to open</span>
       </div>
-      <div data-testid="media-sticky" className="media-sticky" style={{ position: "sticky", top: 0, zIndex: 50, margin: "0 -10px", paddingTop: 6, paddingLeft: 10, paddingRight: 10, paddingBottom: 10, borderRadius: "0 0 10px 10px", background: "color-mix(in srgb, var(--bg) 60%, transparent)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)", borderBottom: err ? "none" : "1px solid var(--border)", marginBottom: 12, boxShadow: "0 6px 12px -8px rgba(0,0,0,.4)" }}>
+      <div data-testid="media-sticky" className="media-sticky" style={{ position: "sticky", top: 0, zIndex: 100, margin: "0 -10px", paddingTop: 6, paddingLeft: 10, paddingRight: 10, paddingBottom: 10, borderRadius: "0 0 10px 10px", background: "color-mix(in srgb, var(--bg) 60%, transparent)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)", borderBottom: err ? "none" : "1px solid var(--border)", marginBottom: 12, boxShadow: "0 6px 12px -8px rgba(0,0,0,.4)" }}>
       <div data-testid="media-toolbar" className="media-toolbar" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <input data-testid="media-filter" className="form-control form-control-sm media-filter" style={{ maxWidth: 200, height: 31 }} placeholder="Filter files…" value={filter} onChange={(e) => setFilter(e.target.value)} />
         <button data-testid="media-refresh" className="btn btn-sm btn-outline-secondary" style={{ height: 31, display: "inline-flex", alignItems: "center" }} onClick={refresh} disabled={loading} title="Refresh"><i className="bi bi-arrow-clockwise" /> <span className="media-btn-label">Refresh</span></button>
@@ -2035,9 +2116,9 @@ export default function Media() {
           </span>
         )}
         {(folder || inPlaylistView) && <button data-testid="media-up" className="btn btn-sm btn-outline-secondary" onClick={goUp} style={{ marginLeft: 8 }}><i className="bi bi-arrow-90deg-up" /> Up</button>}
-        <button data-testid="media-stacks-toggle" type="button" className={`btn btn-sm ${stacksOpenAll ? "btn-primary" : "btn-outline-secondary"}`} onClick={toggleStacksOpenAll} title={stacksOpenAll ? "enable stacks — collapse all into piles, navigation reactive" : "open stacks — spread all stacks, kept open"} style={{ height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6, marginLeft: "auto" }}>
-          <i className="bi bi-stack" style={{ fontSize: 12 }} />
-        </button>
+        {isGrid && !inPlaylistView && <button data-testid="media-stacks-toggle" type="button" className={`btn btn-sm ${stacksMode === "open" ? "btn-primary" : "btn-outline-secondary"}`} onClick={cycleStacksMode} title={stacksMode === "locked" ? "stacked & locked — piles never open on select or navigation" : stacksMode === "open" ? "unstacked — all stacks spread open; click to lock" : "stacked — piles open on select/navigate; click to unstack"} style={{ height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6, marginLeft: "auto" }}>
+          <i className={`bi ${stacksMode === "locked" ? "bi-lock-fill" : stacksMode === "open" ? "bi-grid-3x3-gap-fill" : "bi-stack"}`} style={{ fontSize: 12 }} />
+        </button>}
         <span data-testid="media-sort-bar" title="Sort (same as list header)" style={{ display: "inline-flex", alignItems: "center", gap: 2, border: "1px solid var(--border)", borderRadius: 8, padding: 2, background: "var(--surface-2)" }}>
           {sortBarBtn("custom", "Gallery", "media-sortbar-custom")}
           {sortBarBtn("name", "Name", "media-sortbar-name")}

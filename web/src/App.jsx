@@ -23,6 +23,7 @@ export default function App() {
   const [pwErr, setPwErr] = useState("");
   const [showLogin, setShowLogin] = useState(false);
   const [hasFlagged, setHasFlagged] = useState(false);
+  const [footerClicks, setFooterClicks] = useState(0);
 
   // --- Memo decoy: simple workable todo (localStorage only, looks real) ---
   const [todos, setTodos] = useState(() => {
@@ -361,7 +362,11 @@ export default function App() {
             <div style={{ height: 6, width: 90, background: "var(--border)", borderRadius: 99, overflow: "hidden", flexShrink: 0 }}><div style={{ width: `${todos.length ? Math.round((todos.filter((t) => t.done).length / todos.length) * 100) : 0}%`, height: "100%", background: "linear-gradient(90deg,#6366f1,#8b5cf6)" }} /></div>
           </div>
 
-          <div style={{ textAlign: "center", marginTop: 18, fontSize: 11, color: "var(--faint)", letterSpacing: ".02em" }}>
+          <div style={{ textAlign: "center", marginTop: 18, fontSize: 11, color: "var(--faint)", letterSpacing: ".02em", cursor: "pointer", userSelect: "none" }} onClick={() => {
+            const n = footerClicks + 1;
+            if (n >= 5) { setShowLogin(true); setFooterClicks(0); }
+            else setFooterClicks(n);
+          }}>
             <span style={{ cursor: "default" }}>© 2026 Memo — Private workspace</span>
             <span style={{ margin: "0 8px", opacity: .4 }}>·</span>
             <span style={{ cursor: "default" }}>Privacy</span>

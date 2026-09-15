@@ -2257,9 +2257,9 @@ async function runCrawlAllBatch() {
       broadcastCrawlAll();
       const queue = await readQueueFile();
       const pend = Array.isArray(queue.pending) ? queue.pending : [];
-      const byFolder = {};
-      for (const p of pend) { const f = String(p.folder || ""); (byFolder[f] = byFolder[f] || []).push(p.url); }
-      for (const [f, us] of Object.entries(byFolder)) await selfPost("/queue/add", { urls: us, folder: f });
+      const byKey = {};
+      for (const p of pend) { const f = String(p.folder || ""); const a = normalizeAccountName(p.account || "default"); const key = `${f}|||${a}`; (byKey[key] = byKey[key] || []).push(p.url); }
+      for (const [key, us] of Object.entries(byKey)) { const [f, a] = key.split("|||"); await selfPost("/queue/add", { urls: us, folder: f, account: a }); }
       for (const p of pend) await selfPost("/sync-queue/pending/remove", { url: p.url });
       console.log(`[crawl-all] queued ${pend.length} item(s) for download`);
     }
@@ -2386,6 +2386,7 @@ app.post("/sync-queue/pending/add", async (req, res) => {
       return res.status(400).json({ ok: false, error: "Field 'urls' is required (array of URLs)." });
     }
     const folder = String(body.folder || "").trim();
+    const account = normalizeAccountName(body.account || body.profile || "");
     const result = await withQueueFile(async () => {
       const queue = await readQueueFile();
       const pendingSet = new Set();
@@ -2401,7 +2402,7 @@ app.post("/sync-queue/pending/add", async (req, res) => {
           continue;
         }
         pendingSet.add(normalized);
-        queue.pending.push({ url: rawUrl, folder, addedAt: new Date().toISOString() });
+        queue.pending.push({ url: rawUrl, folder, account, addedAt: new Date().toISOString() });
         added += 1;
       }
       await writeQueueFile(queue);

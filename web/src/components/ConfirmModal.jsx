@@ -21,7 +21,7 @@ export default function ConfirmModal({ open, title = "Confirm", message, confirm
     <div
       data-testid="confirm-modal"
       onClick={onCancel && !singleButton ? onCancel : undefined}
-      style={{ position: "fixed", inset: 0, zIndex: 90, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, background: "rgba(6,8,18,0.55)", backdropFilter: "blur(6px)" }}
+      style={{ position: "fixed", inset: 0, zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, background: "rgba(6,8,18,0.55)", backdropFilter: "blur(6px)" }}
     >
       <div
         onClick={(e) => e.stopPropagation()}
