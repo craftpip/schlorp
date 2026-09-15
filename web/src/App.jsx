@@ -396,7 +396,7 @@ export default function App() {
       <div className="app-pane" style={{ width: "100%", maxWidth: 860, padding: "0 var(--pane-pad, 18px)", boxSizing: "border-box" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <img src="/logo.png" alt="schlorp logo" style={{ height: 36, width: "auto", display: "block", borderRadius: 10 }} />
+            <img src="/logo.png" alt="schlorp logo" style={{ height: 36, width: "auto", display: "block", borderRadius: 10, transform: "translateY(-3px)" }} />
             <div>
               <div style={{ fontWeight: 700, fontSize: 16, letterSpacing: "-.02em", color: "var(--text)", lineHeight: 1 }}>schlorp</div>
               <div style={{ fontSize: 10, color: "var(--muted)", letterSpacing: ".2em", textTransform: "uppercase", fontWeight: 600, marginTop: 2 }}>Private workspace</div>

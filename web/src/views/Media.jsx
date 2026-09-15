@@ -306,11 +306,18 @@ export default function Media() {
       dirs.sort((a, b) => col.compare(a.name, b.name));
       if (customOrderMap.size) {
         const keyOf = (it) => (isFlat ? it.rel || it.name : it.name);
-        files.sort((a, b) => {
-          const ai = customOrderMap.has(keyOf(a)) ? customOrderMap.get(keyOf(a)) : Infinity;
-          const bi = customOrderMap.has(keyOf(b)) ? customOrderMap.get(keyOf(b)) : Infinity;
-          return ai - bi;
-        });
+        const ordered = [];
+        const unordered = [];
+        for (const it of files) (customOrderMap.has(keyOf(it)) ? ordered : unordered).push(it);
+        ordered.sort((a, b) => customOrderMap.get(keyOf(a)) - customOrderMap.get(keyOf(b)));
+        // New files (not in saved order) should appear first, latest to oldest
+        unordered.sort((a, b) => new Date(b.created || b.mtime || 0) - new Date(a.created || a.mtime || 0));
+        return [...dirs, ...unordered, ...ordered];
+      }
+      // No custom order yet — inside a collection (folder) show latest to oldest,
+      // so new downloads naturally prepend.
+      if (folder) {
+        files.sort((a, b) => new Date(b.created || b.mtime || 0) - new Date(a.created || a.mtime || 0));
       }
       return [...dirs, ...files];
     }
