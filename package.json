@@ -5,6 +5,9 @@
   "main": "scan-videos.js",
   "scripts": {
     "test": "node --test",
+    "test:cov": "node --test --experimental-test-coverage test/",
+    "test:ui": "npm --prefix web test",
+    "test:all": "node --test test/ && npm --prefix web test",
     "api": "node api-server.js",
     "start": "node api-server.js",
     "start:local": "node api-server.js",

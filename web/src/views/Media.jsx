@@ -171,6 +171,26 @@ export default function Media() {
     const next = k || "";
     if (next !== selKey) setParam("sel", next);
   };
+  // Atomic selection+spread URL write (plan 019). Pile entry/exit changes
+  // BOTH ?s= and ?spread= in one gesture; writing them with two separate
+  // setSearchParams calls (selection now, ?spread= a tick later in the sync
+  // effect) races and the later write clobbers ?s= from a stale snapshot —
+  // the double-keypress-to-enter/leave-a-pile bug. One functional updater
+  // writing both params makes the deferred effect see cur===want and no-op.
+  // Mirrors setParam's sel encoding (?s= base64, legacy ?sel= deleted).
+  const setSelectedKeyAndSpread = (k, spread) => {
+    const next = k || "";
+    const wantSpread = spread || "";
+    if (next === selKey && wantSpread === (spreadStackIdRef.current || "")) return;
+    setSearchParams((prev) => {
+      const ns = new URLSearchParams(prev);
+      const enc = next ? encB64(next) : "";
+      if (enc) ns.set("s", enc); else ns.delete("s");
+      ns.delete("sel");
+      if (wantSpread) ns.set("spread", wantSpread); else ns.delete("spread");
+      return ns;
+    }, { replace: true });
+  };
   const isCoarsePointer = () => {
     try { return !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches); }
     catch { return false; }
@@ -272,6 +292,7 @@ export default function Media() {
   // user closes, never to navigation resets or ?spread= restore.
   const spreadFromRectRef = useRef(null);
   const userCloseRef = useRef(false);
+  const animatedClosingSpreadRef = useRef(null);
   // Per-stack rects kept alive until the pile reforms (used by roll-in).
   const rollRectsRef = useRef(null);
   // Per-member source rects captured from the pile's own peeked tiles at click
@@ -320,16 +341,15 @@ export default function Media() {
   }, [folderStacks, spreadStackId]);
   useEffect(() => {
     // Keep ?spread= in sync (replace: no history spam on open/close).
-    // Deferred a tick: selection changes committed in the same batch write
-    // the URL first; writing here immediately would snapshot a stale URL
-    // and clobber ?s= (react-router bases every same-batch updater on the
-    // render-time location).
+    // Deferred a tick so a same-gesture selection write lands first. Read the
+    // live URL in the callback: React Router's updater can otherwise receive
+    // the render-time location and overwrite that new ?s= value.
     const cur = searchParams.get("spread") || "";
     const want = spreadStackId || "";
     if (cur === want) return;
     const t = setTimeout(() => {
-      setSearchParams((prev) => {
-        const ns = new URLSearchParams(prev);
+      setSearchParams(() => {
+        const ns = new URLSearchParams(window.location.search);
         if (spreadStackId) ns.set("spread", spreadStackId);
         else ns.delete("spread");
         return ns;
@@ -800,10 +820,17 @@ export default function Media() {
     // move together so no stale multi-selection (ghost outlines) survives.
     const selectSingleKey = (k) => {
       if (!k) return;
+      // Atomic URL write (plan 019): the collapse above changes ?spread= in
+      // the same gesture as ?s= — write both in one updater (same membership
+      // test as collapseSpreadUnlessMember so URL and state agree).
+      const spread = spreadStackIdRef.current;
+      const st = spread ? (folderStacksRef.current || []).find((s) => s.id === spread) : null;
+      const items = st && Array.isArray(st.items) ? st.items : [];
+      const keep = spread && items.includes(String(k).split("/").pop()) ? spread : null;
       collapseSpreadUnlessMember(k);
       setSelKeys(new Set([k]));
       setAnchorKey(k);
-      setSelectedKey(k);
+      setSelectedKeyAndSpread(k, keep);
     };
     const landOn = (el, dir) => {
       if (el.getAttribute("data-testid") === "media-tile-pile") {
@@ -817,7 +844,9 @@ export default function Media() {
           const fk = rowKey(m);
           setSelKeys(new Set([fk]));
           setAnchorKey(fk);
-          setSelectedKey(fk);
+          // Atomic URL write (plan 019): pile entry changes ?s= and ?spread=
+          // together. Locked mode touches no spread (keep URL as-is, no race).
+          setSelectedKeyAndSpread(fk, stacksModeRef.current === "locked" ? spreadStackIdRef.current : entry.stackId);
         }
         return;
       }
@@ -1136,7 +1165,9 @@ export default function Media() {
                 const fk = rowKey(entry.members[0]);
                 setSelKeys(new Set([fk]));
                 setAnchorKey(fk);
-                setSelectedKey(fk);
+                // Atomic URL write (plan 019): pile entry changes ?s= and
+                // ?spread= together so the deferred spread sync can't clobber.
+                setSelectedKeyAndSpread(fk, pileId);
                 return;
               }
             }
@@ -1825,6 +1856,7 @@ export default function Media() {
   // (user clicks/keys), never on ?spread= restore or folder navigation
   // (spreadFromRectRef stays null there) — those render statically.
   useLayoutEffect(() => {
+    if (!closingSpreadId) animatedClosingSpreadRef.current = null;
     const container = gridRef.current;
     if (!container || !isGrid) return;
     const tiles = [...container.querySelectorAll('[data-testid="media-tile-file"]')];
@@ -1856,7 +1888,11 @@ export default function Media() {
         el.style.transition = `transform .34s cubic-bezier(.22,.8,.36,1) ${idx * 45}ms, opacity .25s ease ${idx * 45}ms`;
         el.style.transform = 'translate(0, 0) scale(1)';
         el.style.opacity = '1';
-        const clean = () => { el.style.transition = ''; el.style.transform = ''; el.style.opacity = ''; el.style.transformOrigin = ''; el.style.zIndex = ''; el.removeEventListener('transitionend', clean); };
+        const clean = (event) => {
+          if (event.target !== el || event.propertyName !== 'transform') return;
+          el.style.transition = ''; el.style.transform = ''; el.style.opacity = ''; el.style.transformOrigin = ''; el.style.zIndex = '';
+          el.removeEventListener('transitionend', clean);
+        };
         el.addEventListener('transitionend', clean);
       }
       return;
@@ -1864,6 +1900,10 @@ export default function Media() {
     // ROLL-IN (close): each card folds back to its own pile slot. Only runs
     // for user-initiated closes.
     if (closingSpreadId) {
+      // The ?spread= cleanup rerenders the grid while this window is still
+      // open. Do not restart the same FLIP animation from the new DOM nodes.
+      if (animatedClosingSpreadRef.current === closingSpreadId) return;
+      animatedClosingSpreadRef.current = closingSpreadId;
       const rects = rollRectsRef.current && rollRectsRef.current.stackId === closingSpreadId ? rollRectsRef.current.rects : null;
       const total = closingVisualOrder.size || 1;
       for (const el of tiles) {
@@ -1888,8 +1928,8 @@ export default function Media() {
         el.style.transition = `transform .3s cubic-bezier(.4,0,.6,1) ${rev * 40}ms, opacity .28s ease ${rev * 40 + 120}ms`;
         el.style.transform = `translate(${dx}px, ${dy}px) scale(${target.width / cur.width}, ${target.height / cur.height})`;
         el.style.opacity = '0';
-        const clean = () => { el.style.transition = ''; el.style.transform = ''; el.style.opacity = ''; el.style.transformOrigin = ''; el.style.zIndex = ''; el.removeEventListener('transitionend', clean); };
-        el.addEventListener('transitionend', clean);
+        // These cards unmount when the closing window ends. Retain their
+        // folded state until then; clearing it first briefly reveals them.
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1909,7 +1949,8 @@ export default function Media() {
         if (!pilesLocked) { capturePileRect(entry.stackId); setSpreadStackId(entry.stackId); }
         setSelKeys(new Set(ks));
         setAnchorKey(ks[0]);
-        setSelectedKey(ks[0]);
+        // Atomic URL write (plan 019). Locked mode changes no spread.
+        setSelectedKeyAndSpread(ks[0], pilesLocked ? spreadStackId : entry.stackId);
       } else { setSelKeys(new Set([k])); setAnchorKey(k); setSelectedKey(k); }
       return;
     }
@@ -1939,8 +1980,11 @@ export default function Media() {
         return next;
       });
       setAnchorKey(cellKeys[0]);
-      setSelectedKey(cellKeys[0]);
+      // Atomic URL write (plan 019): the conditional spread below lands in
+      // the same ?s= navigation instead of racing it a tick later.
+      const wantCtrlSpread = (isPile && !spreadStackId && !pilesLocked) ? entry.stackId : (spreadStackId || null);
       if (isPile && !spreadStackId && !pilesLocked) { capturePileRect(entry.stackId); setSpreadStackId(entry.stackId); }
+      setSelectedKeyAndSpread(cellKeys[0], wantCtrlSpread);
       return;
     }
     // Plain click
@@ -1957,7 +2001,8 @@ export default function Media() {
       setSpreadStackId(entry.stackId);
       setSelKeys(new Set([cellKeys[0]]));
       setAnchorKey(cellKeys[0]);
-      setSelectedKey(cellKeys[0]);
+      // Atomic URL write (plan 019).
+      setSelectedKeyAndSpread(cellKeys[0], entry.stackId);
       return;
     }
     // Collapse any spread stack when clicking outside it (clicking a
@@ -1969,12 +2014,17 @@ export default function Media() {
       if (spreadStackId && isSpreadMember(k)) closeSpread();
       setSelKeys(new Set());
       setAnchorKey(null);
-      setSelectedKey("");
+      // Atomic URL write (plan 019): a spread collapse (above or inside this
+      // branch) always ends with spread state null — drop ?spread= together
+      // with ?s= so the deferred sync can't clobber the deselect.
+      setSelectedKeyAndSpread("", null);
       return;
     }
     setSelKeys(new Set([k]));
     setAnchorKey(k);
-    setSelectedKey(k);
+    // Atomic URL write (plan 019): keep ?spread= only when k stays a member
+    // of the open pile, matching the closeSpread() call above.
+    setSelectedKeyAndSpread(k, (spreadStackId && isSpreadMember(k)) ? spreadStackId : null);
   };
   const gridClickRef = useRef(gridClickHandler);
   gridClickRef.current = gridClickHandler;

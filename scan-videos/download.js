@@ -25,6 +25,56 @@ function parsePositiveIntEnv(name, fallback) {
 
 // Extension chosen from what the server actually sent, not the URL:
 // Reddit preview URLs end in `.gif` while returning MP4 bytes (and vice versa).
+const VIDEO_EXTS = new Set([
+  "mp4", "m4v", "mov", "mkv", "webm", "avi", "mpg", "mpeg", "3gp", "flv", "ts", "m2ts", "wmv", "ogv",
+]);
+
+function posterPathFor(videoPath) {
+  return path.extname(videoPath)
+    ? videoPath.replace(/\.[a-z0-9]+$/i, "-poster.jpg")
+    : `${videoPath}-poster.jpg`;
+}
+
+// Best-effort: extract a representative frame next to the video as
+// `<stem>-poster.jpg`. Never throws — a failed thumbnail is not a failed download.
+async function generatePosterThumbnail(videoPath) {
+  try {
+    const ext = path.extname(videoPath).slice(1).toLowerCase();
+    if (!VIDEO_EXTS.has(ext)) return null;
+    if (!(await hasFfmpeg())) return null;
+    const posterPath = posterPathFor(videoPath);
+    if (posterPath === videoPath) return null;
+    try { await fs.access(posterPath); return posterPath; } catch {}
+
+    // Thumbnail frame timestamp: the exact middle of the video (t = duration/2).
+    const durationSeconds = await probeDurationSeconds(videoPath);
+    const seekMs = Number.isFinite(durationSeconds) ? (durationSeconds * 1000) / 2 : 0;
+
+    const args = ["-y"];
+    if (seekMs > 0) args.push("-i", videoPath, "-ss", String(seekMs / 1000));
+    else args.push("-i", videoPath);
+    args.push("-vf", "scale=320:-2", "-frames:v", "1", "-q:v", "2", posterPath);
+    await execFileAsync("ffmpeg", args, { timeout: 60000 });
+    return posterPath;
+  } catch {
+    return null;
+  }
+}
+
+async function probeDurationSeconds(filePath) {
+  try {
+    const { stdout } = await execFileAsync(
+      "ffprobe",
+      ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", filePath],
+      { timeout: FFPROBE_TIMEOUT_MS }
+    );
+    const duration = Number(String(stdout || "").trim());
+    return Number.isFinite(duration) && duration > 0 ? duration : null;
+  } catch {
+    return null;
+  }
+}
+
 const CONTENT_TYPE_EXT = {
   "video/mp4": "mp4",
   "video/webm": "webm",
@@ -296,6 +346,8 @@ async function downloadStreamingManifest(url, outDir, headers = {}, filePrefix =
     throw error;
   }
 
+  await generatePosterThumbnail(filePath);
+
   return { filePath, url: finalInputUrl };
 }
 
@@ -408,6 +460,9 @@ async function downloadMedia(url, outDir, headers = {}, filePrefix = "media", op
       // anything else here is best-effort verification — keep the file.
       if (/placeholder; trying next candidate/i.test(error && error.message)) throw error;
     }
+
+    await generatePosterThumbnail(finalPath);
+
     return { filePath: finalPath, url: targetUrl };
   } catch (error) {
     // Don't leave partial/failed payloads behind as fake successes.

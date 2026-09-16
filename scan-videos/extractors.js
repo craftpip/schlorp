@@ -905,8 +905,68 @@ async function extractRedditMediaData(page) {
   return { urls, redgifsIds, imageUrls };
 }
 
-async function fetchRedgifsMediaUrls(page, redgifsId) {
-  if (!redgifsId) return [];
+// Pornhub's flashvars mediaDefinitions carry one extensionless
+// `/video/get_media` entry (format "mp4") alongside the HLS variants.
+// Fetched with the page's cookies it resolves to the target video's direct
+// mp4 URLs — the correct mp4 fallback when HLS fails. Without this the only
+// mp4 candidates on the page are ad creatives.
+async function expandPornhubGetMediaUrls(page, urls) {
+  const targets = Array.isArray(urls) ? urls.filter((u) => /\/video\/get_media\b/i.test(String(u || ""))).slice(0, 3) : [];
+  if (!targets.length) return { urls: [], qualityByUrl: new Map() };
+
+  let entries = [];
+  try {
+    entries = await page.evaluate(async (getMediaUrls) => {
+      const out = [];
+      for (const getMediaUrl of getMediaUrls) {
+        try {
+          const response = await fetch(getMediaUrl, { method: "GET", credentials: "include" });
+          if (!response.ok) continue;
+          const payload = await response.json().catch(() => null);
+          const list = Array.isArray(payload) ? payload : payload && Array.isArray(payload.mediaDefinitions) ? payload.mediaDefinitions : [];
+          for (const item of list) {
+            if (!item || typeof item !== "object") continue;
+            const videoUrl = item.videoUrl || item.url || item.src || item.file || "";
+            if (!videoUrl) continue;
+            out.push({
+              url: String(videoUrl),
+              height: Number(item.height || 0) || 0,
+              width: Number(item.width || 0) || 0,
+              quality: String(item.quality || ""),
+              label: String(item.label || ""),
+            });
+          }
+        } catch {
+          // ignore per-URL failures; HLS candidates still stand
+        }
+      }
+      return out;
+    }, targets);
+  } catch {
+    entries = [];
+  }
+
+  const resultUrls = [];
+  const qualityByUrl = new Map();
+  const seen = new Set();
+
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const cleaned = stripByteRangeParams(entry && entry.url ? entry.url : "");
+    if (!cleaned) continue;
+
+    const score = metadataQualityScore(entry);
+    const current = Number(qualityByUrl.get(cleaned) || 0);
+    if (score > current) qualityByUrl.set(cleaned, score);
+
+    if (seen.has(cleaned)) continue;
+    seen.add(cleaned);
+    resultUrls.push(cleaned);
+  }
+
+  return { urls: resultUrls, qualityByUrl };
+}
+
+async function fetchRedgifsMediaUrls(page, redgifsId) {  if (!redgifsId) return [];
   try {
     const result = await page.evaluate(async (id) => {
       const urls = new Set();
@@ -985,6 +1045,7 @@ module.exports = {
   extractXhamsterMediaData,
   extractXvideosMediaUrls,
   extractPornhubMediaData,
+  expandPornhubGetMediaUrls,
   getInstagramUsername,
   getInstagramUsernameFromOembed,
   extractInstagramPhotoData,

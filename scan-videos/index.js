@@ -10,6 +10,8 @@ const {
 } = require("./config");
 const {
   isLikelyVideoUrl,
+  isAdVideoUrl,
+  isPreviewClipUrl,
   stripByteRangeParams,
   getInstagramAssetId,
   isInstagramAudioOnlyUrl,
@@ -21,6 +23,8 @@ const {
   isRedgifsUrl,
   isGifUrl,
   isPhotoUrl,
+  isDirectFileUrl,
+  isStreamingManifestUrl,
   extractQualityHint,
   sanitizeFileToken,
 } = require("./media-utils");
@@ -28,6 +32,7 @@ const {
   extractInstagramShortcode,
   isInstagramReelTargetUrl,
   extractInstagramUsernameFromJsonText,
+  extractInstagramUsernameFromSsrScripts,
   extractInstagramMediaHintsFromJsonText,
   extractInstagramImageHintsFromJsonText,
   dedupeInstagramPhotos,
@@ -44,6 +49,7 @@ const {
   extractXhamsterMediaData,
   extractXvideosMediaUrls,
   extractPornhubMediaData,
+  expandPornhubGetMediaUrls,
   getInstagramUsername,
   getInstagramUsernameFromOembed,
   extractRedditMediaData,
@@ -631,8 +637,13 @@ async function run(options = {}) {
               /redgifs\.com\/(?:watch|ifr)\//i.test(url) ||
               /v\.redd\.it\//i.test(url)
             ) {
-              if (!networkVideos.has(url)) lastMediaSignalAt = Date.now();
-              networkVideos.add(url);
+              if (isAdVideoUrl(url) || isPreviewClipUrl(url)) {
+                // ad creative or pornhub preview clip, never the target video — ignore it so a
+                // failed main-stream download can't fall through to an ad or preview
+              } else {
+                if (!networkVideos.has(url)) lastMediaSignalAt = Date.now();
+                networkVideos.add(url);
+              }
             }
 
             if (
@@ -851,6 +862,8 @@ async function run(options = {}) {
                 const elCenterY = rect.top + rect.height / 2;
                 const dist = Math.hypot(elCenterX - centerX, elCenterY - centerY);
 
+                if (elCenterY < viewportHeight * 0.25 || elCenterY > viewportHeight * 0.75) continue;
+
                 const visibleRatio = visibleArea / Math.max(1, width * height);
                 const viewportCoverage = visibleArea / Math.max(1, viewportArea);
 
@@ -891,6 +904,21 @@ async function run(options = {}) {
         let pornhubData = { urls: [], qualityByUrl: new Map() };
         if (isPornhubTarget) {
           pornhubData = await extractPornhubMediaData(page);
+          // Resolve the player `/video/get_media` entry to the target
+          // video's direct mp4s (correct fallback when HLS fails).
+          try {
+            const expanded = await expandPornhubGetMediaUrls(page, pornhubData.urls);
+            for (const url of expanded.urls) {
+              if (!pornhubData.urls.includes(url)) pornhubData.urls.push(url);
+            }
+            for (const [url, score] of expanded.qualityByUrl) {
+              const current = Number(pornhubData.qualityByUrl.get(url) || 0);
+              if (score > current) pornhubData.qualityByUrl.set(url, score);
+            }
+            if (expanded.urls.length) log(`Pornhub get_media expanded to ${expanded.urls.length} direct mp4 URL(s)`);
+          } catch (err) {
+            log(`Pornhub get_media expansion failed: ${err.message}`);
+          }
         }
 
         let extractedXvideosUrls = [];
@@ -1133,14 +1161,30 @@ async function run(options = {}) {
         };
 
         let filePrefix = "media";
+        let useUrlFilename = false;
         if (!isInstagramTarget && !isRedditTarget) {
-          const title = await page.evaluate(() => document.title || "");
-          const normalized = sanitizeFileToken(title) || "media";
-          filePrefix = normalized;
+          let urlFileToken = "";
+          try {
+            if (isDirectFileUrl(targetUrl) || isStreamingManifestUrl(targetUrl) || isLikelyVideoUrl(targetUrl)) {
+              const urlPath = new URL(targetUrl).pathname;
+              const base = path.basename(urlPath);
+              const stem = base.replace(/\.[^.]+$/, "");
+              urlFileToken = sanitizeFileToken(stem);
+            }
+          } catch {}
+          if (urlFileToken) {
+            filePrefix = urlFileToken;
+            useUrlFilename = true;
+          } else {
+            const title = await page.evaluate(() => document.title || "");
+            const normalized = sanitizeFileToken(title) || "media";
+            filePrefix = normalized;
+          }
         }
         if (isInstagramTarget) {
           const username =
             instagramUsernameFromApi ||
+            (await extractInstagramUsernameFromSsrScripts(page, instagramShortcode)) ||
             (await getInstagramUsernameFromOembed(page, targetUrl)) ||
             (await getInstagramUsername(page));
           const postId = instagramShortcode || "post";
@@ -1206,7 +1250,7 @@ async function run(options = {}) {
             assetStats.set(assetId, current);
           }
 
-          const distinctVideoAssetCount = assetStats.size;
+          const distinctVideoAssetCount = [...assetStats.values()].filter((s) => s.bestVideo !== -Infinity).length;
           if (distinctVideoAssetCount > 1) {
             hasMultipleInstagramVideos = true;
             const groupsMap = new Map();
@@ -1352,6 +1396,20 @@ async function run(options = {}) {
             }
           }
         } else if (candidatesToTry.length) {
+          if (isPornhubTarget) {
+            log(
+              `Pornhub candidate try-order: ${candidatesToTry
+                .map((c) => {
+                  try {
+                    const u = new URL(c);
+                    return `${u.host}${u.pathname}${u.search.includes("master.m3u8") ? "?master" : ""}`;
+                  } catch {
+                    return c;
+                  }
+                })
+                .join("\n  ")}`
+            );
+          }
           for (const candidate of candidatesToTry) {
             try {
               const headers = await buildDownloadHeaders(candidate);
@@ -1363,7 +1421,7 @@ async function run(options = {}) {
                   headers,
                   filePrefix,
                   {
-                    includeTimestamp: !isInstagramTarget && !isRedditTarget,
+                    includeTimestamp: !isInstagramTarget && !isRedditTarget && !useUrlFilename,
                     onProgress: (p) => onProgress({ ...p, stage: p.stage || "downloading", candidate }),
                   }
                 );
@@ -1381,6 +1439,7 @@ async function run(options = {}) {
               break;
             } catch (err) {
               lastError = err;
+              log(`Candidate failed: ${err.message}`);
             }
           }
         }

@@ -34,7 +34,7 @@ function isReservedInstagramName(value) {
 function extractInstagramShortcode(url) {
   try {
     const u = new URL(url);
-    const match = u.pathname.match(/^(?:\/[^/]+)?\/(?:p|reel|tv)\/([^/?#]+)\/?/i);
+    const match = u.pathname.match(/^(?:\/[^/]+)?\/(?:p|reel|reels|tv)\/([^/?#]+)\/?/i);
     return match ? match[1] : "";
   } catch {
     return "";
@@ -176,7 +176,7 @@ function extractInstagramMediaHintsFromJsonText(rawText, shortcode) {
     if (assetId) assetIds.add(assetId);
   };
 
-  const scanMedia = (node) => {
+  const scanMedia = (node, skipForeignMedia = true) => {
     if (mediaScanned >= maxMediaScan) return;
     mediaScanned += 1;
 
@@ -193,6 +193,14 @@ function extractInstagramMediaHintsFromJsonText(rawText, shortcode) {
     if (Array.isArray(node)) {
       for (const item of node) scanMedia(item);
       return;
+    }
+
+    // Skip child objects that are separate media nodes (rail/recommended).
+    // A node with its own "code" or "shortcode" field that differs from the
+    // target is a different post — never part of the download target.
+    if (skipForeignMedia) {
+      const nodeCode = node.code || node.shortcode || "";
+      if (nodeCode && nodeCode !== shortcode) return;
     }
 
     if (node.xpv_asset_id != null) {
@@ -476,12 +484,37 @@ function filterInstagramCandidatesForTarget(
   return urls;
 }
 
+async function extractInstagramUsernameFromSsrScripts(page, shortcode) {
+  if (!page || !shortcode) return "";
+  try {
+    const username = await page.evaluate((sc) => {
+      const scripts = Array.from(document.querySelectorAll("script"));
+      for (const script of scripts) {
+        const text = script.textContent || "";
+        if (!text || !text.includes(sc)) continue;
+        const idx = text.indexOf(`"code":"${sc}"`);
+        if (idx < 0) continue;
+        const window_ = text.slice(idx, idx + 4000);
+        const m = window_.match(/"user"\s*:\s*\{[\s\S]*?"username"\s*:\s*"([a-zA-Z0-9._]+)"/);
+        if (m && m[1]) return m[1];
+      }
+      return "";
+    }, shortcode);
+    const normalized = String(username || "").trim();
+    if (!normalized || isReservedInstagramName(normalized)) return "";
+    return sanitizeFileToken(normalized);
+  } catch {
+    return "";
+  }
+}
+
 module.exports = {
   isReservedInstagramName,
   extractInstagramShortcode,
   isInstagramReelTargetUrl,
   isInstagramAvatarUrl,
   extractInstagramUsernameFromJsonText,
+  extractInstagramUsernameFromSsrScripts,
   extractInstagramMediaHintsFromJsonText,
   extractInstagramImageHintsFromJsonText,
   dedupeInstagramPhotos,

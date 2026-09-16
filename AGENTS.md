@@ -102,7 +102,7 @@ scan-videos/config.js        → { shouldRunHeadless, shouldAutoContinuePrompts,
 scan-videos/download.js      → { hasFfmpeg, muxVideoAndAudio, mediaHasAudio, downloadMedia }
 scan-videos/extractors.js    → { extractXhamsterMediaData, extractXvideosMediaUrls, extractPornhubMediaData, getInstagramUsername, getInstagramUsernameFromOembed }
 scan-videos/instagram-utils.js → { isReservedInstagramName, extractInstagramShortcode, extractInstagramUsernameFromJsonText, extractInstagramMediaHintsFromJsonText, filterInstagramCandidatesForTarget }
-scan-videos/media-utils.js   → { isLikelyVideoUrl, stripByteRangeParams, isStreamingManifestUrl, isDirectFileUrl, extractQualityHint, metadataQualityScore, isInstagramAudioOnlyUrl, getInstagramAssetId, scoreDownloadCandidate, prioritizeInstagramCandidates, extractDownloadableVideoUrls, prioritizeXhamsterCandidates, sanitizeFileToken }
+scan-videos/media-utils.js   → { isLikelyVideoUrl, stripByteRangeParams, isStreamingManifestUrl, isDirectFileUrl, extractQualityHint, metadataQualityScore, isInstagramAudioOnlyUrl, getInstagramAssetId, scoreDownloadCandidate, prioritizeInstagramCandidates, extractDownloadableVideoUrls, prioritizeXhamsterCandidates, isAdVideoUrl, isPreviewClipUrl, sanitizeFileToken }
 scan-videos/scan-saved.js    → { scanSavedPage({ browser, targetUrl, endUrls?, waitMs?, exitWaitMs?, maxIterations?, log? }) }
 ```
 
@@ -186,7 +186,15 @@ scan-videos/scan-saved.js    → { scanSavedPage({ browser, targetUrl, endUrls?,
 ## Notes for agents
 - All source files use CommonJS (`require`/`module.exports`)
 - No TypeScript, no build step
-- No test framework or test files exist
+
+### Tests
+- Backend/API tests live in `test/` and run with `node --test` (`npm test`); coverage via `npm run test:cov` (`--experimental-test-coverage`).
+- Web UI tests live in `web/test/` and run with Vitest + Testing Library (`npm run test:ui`, `npm --prefix web test`); coverage via `npm run test:ui -- --coverage`.
+- Everything: `npm run test:all` (root + web).
+- Tests never require a live browser, Docker, ffmpeg, or VNC — browser/ffmpeg behavior is stubbed or gated behind `XDL_LIVE=1` (skipped by default).
+- Two test-only prod hooks exist and must NOT be removed or "cleaned up":
+  - `QUEUE_STUB_RUNNER=1` in `api-server.js` (gated env branch with a stub job runner for browser-less `/queue` contract tests; off by default).
+  - `sync-saved-downloads.js` guards main with `if (require.main === module)` and exports its internals for unit tests.
 - `package-lock.json` exists; use `npm ci` for deterministic installs (as Dockerfile does)
 - ffmpeg must be installed for HLS/DASH support; checked at runtime via `hasFfmpeg()`
 - `.dockerignore` excludes `node_modules`, `media`, `docker-compose*.yml`

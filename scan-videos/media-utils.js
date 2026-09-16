@@ -42,6 +42,34 @@ function isPhotoUrl(url) {
   return isImageUrl(url);
 }
 
+// Ad/tracker networks whose video creatives are captured as network <video>
+// responses on tube pages (e.g. Pornhub preroll/sidebar ads) but are never
+// the page's target video. Downloading one of these is the classic
+// "wrong video" failure when the real stream candidates fail.
+function isAdVideoUrl(url) {
+  let host = "";
+  try {
+    host = new URL(String(url || "")).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return (
+    /(^|\.)adtng\.com$/i.test(host) ||
+    /(^|\.)trafficjunky\.(net|com|org)$/i.test(host)
+  );
+}
+
+// Pornhub preview/trailer clips (mobile preview "pre_videos" on the phncdn
+// CDN) are short teasers, never the page's full video. If the real video's
+// candidates all fail, falling back to one of these silently downloads "the
+// wrong video". Treat them like ads: never a download candidate.
+function isPreviewClipUrl(url) {
+  return (
+    /phncdn\.com/i.test(String(url || "")) &&
+    /\/pre_videos\//i.test(String(url || ""))
+  );
+}
+
 function stripByteRangeParams(rawUrl) {
   try {
     const u = new URL(rawUrl);
@@ -202,6 +230,8 @@ function extractDownloadableVideoUrls(videoUrls, options = {}) {
 
     const cleaned = stripByteRangeParams(url);
     const forceIncluded = forceIncludeUrls.has(cleaned);
+    if (!forceIncluded && isAdVideoUrl(cleaned)) continue;
+    if (!forceIncluded && isPreviewClipUrl(cleaned)) continue;
     if (!forceIncluded && !isDirectFileUrl(cleaned) && !isStreamingManifestUrl(cleaned)) continue;
 
     const metadataScore = Number(qualityByUrl.get(cleaned) || 0);
@@ -318,6 +348,8 @@ function prioritizeRedditCandidates(urls, qualityByUrl = new Map()) {
 
 module.exports = {
   isLikelyVideoUrl,
+  isAdVideoUrl,
+  isPreviewClipUrl,
   isRedgifsUrl,
   extractRedgifsId,
   isRedditMediaUrl,
