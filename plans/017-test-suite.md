@@ -57,7 +57,6 @@ Constraints: Node `v20.20.2`, CommonJS at root, ESM in `web/`, no test tooling t
       reddit-utils.test.js
       download.test.js
       extractors.test.js
-      queue.test.js
       sync-daemon.test.js
       index-args.test.js
     api/
@@ -133,8 +132,8 @@ Constraints: Node `v20.20.2`, CommonJS at root, ESM in `web/`, no test tooling t
 - `parseCliArgs` (extend existing): all flags, combined, `--`, unknown flags.
 - FilePrefix construction for IG (`username-shortcode`) and Reddit (`subreddit-postid`).
 
-### `queue.js` (injectable deps) — `test/unit/queue.test.js`
-- `loadQueue`/`saveQueue` (ENOENT defaults, 200 trim), `snapshot`, `addItems` dedupe, `removeActive`, `removeCompleted`, `retryCompleted`, `retryActiveFailed`, `clearCompleted` (keeps `running`), `clearActiveDone`, `processItem` stage→progress map; `ensureWorker` with stubbed deps → queued→running→done/error transitions, completed cap, `media:changed` emit.
+### `queue.js` — ~~`test/unit/queue.test.js`~~ **SKIPPED (user decision 2026-09-16)**
+Nothing imports the root `queue.js` (orphaned dead code; api-server has its own inline web queue); its queue-file path is hardcoded with no env override, so a unit test would require a 3rd unapproved prod-code hook. Real queue behavior is covered by `test/api/queue.test.js` (`/queue*`, `/sync-queue/*`, `/ws`) + web QueueContext tests under `QUEUE_STUB_RUNNER`.
 
 ### `sync-saved-downloads.js` (refactor approved) — `test/unit/sync-daemon.test.js`
 - `require.main` guard + exported internals: `randomBetween`, `randomChoice`, `normalizeUrl`, `enqueueUrls` (newest-first, dedupe vs pending+completed+lastSeen), `saveQueue` trim, `ApiError.status/retryable`, `postJson` classification (429/503), `isRateLimitMessage`/`isRateLimitError`, `withRetries` backoff + non-retryable on rate limit, `extractApiProcessFailureMessage`, rate bounds, `loadState` sanitization.
@@ -259,7 +258,7 @@ Gated behind `XDL_LIVE=1`; Docker + VNC + ffmpeg only: `buildBrowserFromLocalPro
 ## Implementation order
 
 1. Backend pure units — `config`, `media-utils`, `instagram-utils`, `reddit-utils` (fixtures incl. DdSewIihI-K regressions).
-2. Engine units — `queue.js` (injectable), `download.js` (fixture server), `extractors.js` (fake-page), `scan-saved`, `index` args.
+2. Engine units — ~~`queue.js` (injectable)~~ skipped (orphaned, user decision), `download.js` (fixture server), `extractors.js` (fake-page), `scan-saved`, `index` args.
 3. **sync-daemon refactor (approved) + tests.**
 4. **API harness (incl. `QUEUE_STUB_RUNNER`, approved)** + route suites → `health/auth` → `media` → `config/accounts` → `queue/ws`.
 5. web/ foundation — vitest setup, `lib.test.js`, `app.test.jsx` (auth machine).
@@ -269,7 +268,7 @@ Gated behind `XDL_LIVE=1`; Docker + VNC + ffmpeg only: `buildBrowserFromLocalPro
 
 ## Acceptance criteria
 - `npm test` green with zero browser/ffmpeg/network requirements; `npm run test:all` green (root + web).
-- Coverage ≥70% lines on `config`, `media-utils`, `instagram-utils`, `reddit-utils`, `queue`, `download` (non-ffmpeg), `api-server` route layer, and the web store/lib/auth layers.
+- Coverage ≥70% lines on `config`, `media-utils`, `instagram-utils`, `reddit-utils`, `download` (non-ffmpeg), `api-server` route layer, and the web store/lib/auth layers.
 - Fixture-based regressions for all four DdSewIihI-K fixes (foreign-shortcode subtree skip, SSR username, viewport-band filter, audio-only exclusion).
 - Auth/decoy/logout state machine, WS backoff, and `#chunk#`/`#field#` stream parsing have dedicated tests; FileViewer matrix fully asserted.
 - Prod changes limited to the 2 approved touches: `sync-saved-downloads.js` `require.main` guard + exports; gated `QUEUE_STUB_RUNNER` branch in `api-server.js`.

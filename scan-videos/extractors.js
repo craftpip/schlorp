@@ -749,8 +749,8 @@ async function extractInstagramPhotoData(page) {
   return { imageUrls: clean(domImages), metaImages: clean(metaImages) };
 }
 
-async function extractRedditMediaData(page) {
-  const entries = await page.evaluate(() => {
+async function extractRedditMediaData(page, postId) {
+  const entries = await page.evaluate((targetPostId) => {
     const out = new Set();
     const imageOut = new Set();
     const toAbs = (value) => {
@@ -781,47 +781,148 @@ async function extractRedditMediaData(page) {
       }
     };
 
+    // General avatar/profile-pic guard (no hardcoded URLs): author avatars,
+    // comment avatars and community icons are never the post's media.
+    const isAvatarImg = (el) => {
+      if (!el) return false;
+      try {
+        if (
+          typeof el.closest === "function" &&
+          el.closest(
+            'faceplate-avatar,[data-testid*="avatar" i],.avatar,[class*="avatar" i],[id*="avatar" i]'
+          )
+        )
+          return true;
+      } catch {}
+      try {
+        const alt =
+          String(el.alt || "") ||
+          String((el.getAttribute && el.getAttribute("alt")) || "");
+        if (/avatar|profile\s*pic|user\s*pic|snoo/i.test(alt)) return true;
+      } catch {}
+      try {
+        const r =
+          typeof el.getBoundingClientRect === "function"
+            ? el.getBoundingClientRect()
+            : null;
+        // Avatars render tiny (16-48px); post media renders far larger.
+        if (r && r.width > 0 && r.width < 64 && r.height > 0 && r.height < 64)
+          return true;
+      } catch {}
+      return false;
+    };
+
     const toAbsImg = (value) => toAbs(value);
-    const pushIfImage = (value) => {
+    const pushIfImage = (value, el) => {
       const url = toAbsImg(value);
       if (!url) return;
       if (/\.gif(\?|$)/i.test(url)) return; // gif via video flow
       if (/\.(jpe?g|png|webp|avif|bmp)(\?|$)/i.test(url)) {
+        if (el && isAvatarImg(el)) return;
         imageOut.add(url);
       }
     };
 
-    // shreddit-post content-href
-    document.querySelectorAll("shreddit-post[content-href]").forEach((el) => {
-      const href = el.getAttribute("content-href");
-      if (href) {
-        pushIfVideo(href);
-        pushIfImage(href);
+    // Scope DOM scraping to the target post element. Page-wide scans pick up
+    // sidebar/related-post/comment content (avatars, other posts' media).
+    let scope = null;
+    try {
+      const wanted = String(targetPostId || "")
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, "");
+      if (wanted) {
+        const posts = Array.from(
+          document.querySelectorAll("shreddit-post[permalink]") || []
+        );
+        const re = new RegExp("/comments/" + wanted + "([/?#]|$)");
+        for (const p of posts) {
+          const pl = String(
+            (p.getAttribute && p.getAttribute("permalink")) || ""
+          ).toLowerCase();
+          if (pl && re.test(pl)) {
+            scope = p;
+            break;
+          }
+        }
       }
-      // also permalink not needed
-    });
+    } catch {}
+    const scoped = !!scope;
+    const qsa = (root, sel) => {
+      try {
+        return Array.from((root || document).querySelectorAll(sel) || []);
+      } catch {
+        return [];
+      }
+    };
 
-    // videos and sources
-    document.querySelectorAll("video, video source, source[src]").forEach((el) => {
-      pushIfVideo(el.src || el.currentSrc || el.getAttribute("src"));
-    });
-    document.querySelectorAll('a[href*="redgifs"], a[href*="redd.it"], a[href*="v.redd"] ').forEach((el) => {
-      const href = el.getAttribute("href") || el.href;
-      pushIfVideo(href);
-      pushIfImage(href);
-    });
-    document.querySelectorAll('img[src*="preview.redd.it"]').forEach((el) => {
-      const src = el.getAttribute("src") || el.src;
-      if (src && /format=mp4/i.test(src)) pushIfVideo(src);
-    });
-    // still images (gallery / single): i.redd.it, preview.redd.it, external-preview
-    document.querySelectorAll("img[src]").forEach((el) => {
-      const src = el.getAttribute("src") || el.src || "";
-      if (!src) return;
-      if (/i\.redd\.it\//i.test(src) || /preview\.redd\.it\//i.test(src) || /external-preview\.redd\.it\//i.test(src)) {
-        pushIfImage(src);
-      }
-    });
+    const collectDom = (root) => {
+      // the scope element's own content-href (descendant query misses self)
+      try {
+        if (
+          root &&
+          root !== document &&
+          root.getAttribute &&
+          root.getAttribute("content-href")
+        ) {
+          const href = root.getAttribute("content-href");
+          pushIfVideo(href);
+          pushIfImage(href, null);
+        }
+      } catch {}
+      // shreddit-post content-href
+      qsa(root, "shreddit-post[content-href]").forEach((el) => {
+        let href = null;
+        try {
+          href = el.getAttribute("content-href");
+        } catch {}
+        if (href) {
+          pushIfVideo(href);
+          pushIfImage(href, null);
+        }
+      });
+
+      // videos and sources
+      qsa(root, "video, video source, source[src]").forEach((el) => {
+        let src = "";
+        try {
+          src = el.src || el.currentSrc || el.getAttribute("src") || "";
+        } catch {}
+        pushIfVideo(src);
+      });
+      qsa(root, 'a[href*="redgifs"], a[href*="redd.it"], a[href*="v.redd"] ').forEach((el) => {
+        let href = "";
+        try {
+          href = el.getAttribute("href") || el.href || "";
+        } catch {}
+        pushIfVideo(href);
+        pushIfImage(href, el);
+      });
+      qsa(root, 'img[src*="preview.redd.it"]').forEach((el) => {
+        let src = "";
+        try {
+          src = el.getAttribute("src") || el.src || "";
+        } catch {}
+        if (src && /format=mp4/i.test(src)) pushIfVideo(src);
+      });
+      // still images (gallery / single): i.redd.it, preview.redd.it, external-preview
+      qsa(root, "img[src]").forEach((el) => {
+        let src = "";
+        try {
+          src = el.getAttribute("src") || el.src || "";
+        } catch {}
+        if (!src) return;
+        if (/i\.redd\.it\//i.test(src) || /preview\.redd\.it\//i.test(src) || /external-preview\.redd\.it\//i.test(src)) {
+          pushIfImage(src, el);
+        }
+      });
+    };
+
+    collectDom(scope || document);
+    // Scoped element found but yielded no media (unusual layout): fall back to
+    // page-wide so we never do worse than the old unscoped behavior.
+    const scopedOk = !scoped || out.size > 0 || imageOut.size > 0;
+    if (!scopedOk) collectDom(document);
 
     // scripts regex
     const scripts = Array.from(document.querySelectorAll("script"));
@@ -866,8 +967,8 @@ async function extractRedditMediaData(page) {
       if (window.__PRELOADED_STATE__) scan(window.__PRELOADED_STATE__);
     } catch {}
 
-    return { videos: Array.from(out), images: Array.from(imageOut) };
-  });
+    return { videos: Array.from(out), images: Array.from(imageOut), scoped: scopedOk && scoped };
+  }, postId);
 
   const rawVideos = Array.isArray(entries?.videos) ? entries.videos : Array.isArray(entries) ? entries : [];
   const rawImages = Array.isArray(entries?.images) ? entries.images : [];
@@ -902,7 +1003,7 @@ async function extractRedditMediaData(page) {
     }
   }
   // also scan all urls again for watch ids in page content via separate evaluate already covered, but keep
-  return { urls, redgifsIds, imageUrls };
+  return { urls, redgifsIds, imageUrls, scoped: entries?.scoped === true };
 }
 
 // Pornhub's flashvars mediaDefinitions carry one extensionless

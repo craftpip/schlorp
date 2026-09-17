@@ -623,6 +623,7 @@ async function run(options = {}) {
         const redditRedgifsIds = new Set();
         const redditImageHintUrls = new Set();
         let redditIsVideoPost = null; // null=unknown, true=video, false=photo-only
+        let redditJsonImageCount = 0; // post-scoped photos from .json (preferred over unscoped DOM images)
 
         page.on("response", async (response) => {
           try {
@@ -785,6 +786,7 @@ async function run(options = {}) {
               for (const id of hints.redgifsIds) redditRedgifsIds.add(id);
               const imgHints = extractRedditImageHintsFromJsonText(jsonText, redditPostId);
               for (const u of imgHints.imageUrls) redditImageHintUrls.add(stripByteRangeParams(u));
+              redditJsonImageCount = imgHints.imageUrls.length;
               if (hints.isVideo === false && !imgHints.imageUrls.length) log(`Reddit .json indicates photo-only for ${redditPostId}`);
               else log(`Reddit .json hints: ${hints.urls.length} url(s), ${hints.redgifsIds.length} redgifs, ${imgHints.imageUrls.length} photo(s)`);
             }
@@ -938,14 +940,18 @@ async function run(options = {}) {
         let instagramOrderedImages = [];
         if (isRedditTarget) {
           try {
-            redditData = await extractRedditMediaData(page);
+            redditData = await extractRedditMediaData(page, redditPostId);
             for (const id of redditData.redgifsIds || []) {
               if (redditRedgifsIds.has(id)) continue;
               redditRedgifsIds.add(id);
             }
             for (const u of redditData.imageUrls || []) {
+              if (redditJsonImageCount) continue; // .json gave post-scoped photos — DOM images are page chrome (avatars, related posts)
               const cleaned = stripByteRangeParams(u);
               if (cleaned && !redditImageHintUrls.has(cleaned)) redditImageHintUrls.add(cleaned);
+            }
+            if (redditJsonImageCount && (redditData.imageUrls || []).length) {
+              log(`Reddit .json provided ${redditJsonImageCount} photo(s) — ignoring ${(redditData.imageUrls || []).length} unscoped DOM image(s).`);
             }
           } catch {}
           // merge intercepted hints
@@ -974,7 +980,14 @@ async function run(options = {}) {
           redditOrderedImages = dedupeRedditPhotos(
             Array.from(redditImageHintUrls).filter((u) => isPhotoUrl(u))
           );
-          log(`Reddit hints: ${redditData.urls.length} URL(s), ${redditData.redgifsIds.length} redgifs id(s), ${redgifsResolvedUrls.length} resolved, ${redditOrderedImages.length} photo(s)`);
+          if (redditIsVideoPost === true && redditOrderedImages.length) {
+            // Video post: the .json image hints are intentionally empty for
+            // video (poster only) — any photo URLs here are unscoped DOM
+            // images (avatars, related-post thumbnails), not the post itself.
+            log(`Reddit video post — skipping ${redditOrderedImages.length} photo(s) (page chrome, not the post).`);
+            redditOrderedImages = [];
+          }
+          log(`Reddit hints: ${redditData.urls.length} URL(s), ${redditData.redgifsIds.length} redgifs id(s), ${redgifsResolvedUrls.length} resolved, ${redditOrderedImages.length} photo(s), DOM ${redditData.scoped ? "post-scoped" : "page-wide"}`);
         }
 
         // Instagram photos: JSON hints (display_url, sidecar order) win when present;
@@ -1313,6 +1326,18 @@ async function run(options = {}) {
           candidatesToTry = [];
           hasMultipleInstagramVideos = false;
           instagramVideoGroups = [];
+        }
+        // Reddit photo-only post (.json verdict): video candidates are
+        // unscoped page chrome (sidebar/related-post videos) — skip video,
+        // download photos only. Post-scoped JSON hints still count as the post.
+        if (
+          isRedditTarget &&
+          redditIsVideoPost === false &&
+          redditOrderedImages.length &&
+          !redditHintUrls.size
+        ) {
+          log("Reddit photo post — skipping unscoped video candidates.");
+          candidatesToTry = [];
         }
         if (isInstagramTarget && hasMultipleInstagramVideos && instagramVideoGroups.length) {
           log(`Instagram carousel: ${instagramVideoGroups.length} video(s) detected for ${filePrefix}`);

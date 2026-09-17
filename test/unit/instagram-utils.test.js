@@ -49,12 +49,16 @@ test("isInstagramReelTargetUrl: reel/tv true, photo false", () => {
   assert.equal(isInstagramReelTargetUrl("https://www.instagram.com/p/AbC/"), false);
 });
 
-test("isInstagramAvatarUrl: profile efg tag and s150 crop detected", () => {
+test("isInstagramAvatarUrl: profile efg tag and stp crop detected", () => {
   const avatarEfg = efgUrl({ vencode_tag: "profile_pic_560" });
   assert.equal(isInstagramAvatarUrl(avatarEfg), true);
   assert.equal(
-    isInstagramAvatarUrl("https://scontent.cdninstagram.com/v/t51.1/a_s150x150.jpg"),
+    isInstagramAvatarUrl("https://scontent.cdninstagram.com/v/t51.1/a.jpg?stp=s150x150"),
     true
+  );
+  assert.equal(
+    isInstagramAvatarUrl("https://scontent.cdninstagram.com/v/t51.1/a.jpg?stp=s640x640"),
+    false
   );
   assert.equal(isInstagramAvatarUrl("https://scontent.cdninstagram.com/v/t51.1/a.jpg"), false);
 });
@@ -140,7 +144,7 @@ test("extractInstagramMediaHintsFromJsonText: target video only, foreign rail ex
   assert.deepEqual(assetIds, []);
 });
 
-test("extractInstagramMediaHintsFromJsonText: video key priority + asset ids", () => {
+test("extractInstagramMediaHintsFromJsonText: collects all video-url keys + asset ids", () => {
   const raw = JSON.stringify({
     data: {
       xdt_shortcode_media: {
@@ -154,6 +158,7 @@ test("extractInstagramMediaHintsFromJsonText: video key priority + asset ids", (
   const { urls, assetIds } = extractInstagramMediaHintsFromJsonText(raw, "DdSewIihI-K");
   assert.deepEqual(urls, [
     "https://scontent.cdninstagram.com/v/t50.1/full.mp4",
+    "https://scontent.cdninstagram.com/v/t50.1/play.mp4",
     "https://scontent.cdninstagram.com/v/t50.1/audio.m3u8",
   ]);
   assert.deepEqual(assetIds, []);
@@ -246,12 +251,29 @@ test("extractInstagramImageHintsFromJsonText: sidecar children in order, videos 
 
 test("dedupeInstagramPhotos: merges CDN origins by pathname, prefers full-size", () => {
   const urls = [
-    "https://scontent.cdninstagram.com/v/t51.1/x_s640x640.jpg",
+    "https://scontent.cdninstagram.com/v/t51.1/x.jpg?stp=s640x640",
     "https://scontent.xx.fbcdn.net/v/t51.1/x.jpg",
     "https://scontent.cdninstagram.com/v/t51.1/y.jpg",
   ];
   const out = dedupeInstagramPhotos(urls);
-  assert.deepEqual(out, ["https://scontent.xx.fbcdn.net/v/t51.1/x.jpg", "https://scontent.cdninstagram.com/v/t51.1/y.jpg"]);
+  assert.deepEqual(out, [
+    "https://scontent.xx.fbcdn.net/v/t51.1/x.jpg",
+    "https://scontent.cdninstagram.com/v/t51.1/y.jpg",
+  ]);
+});
+
+test("dedupeInstagramPhotos: different pathname crops (s640 vs full) kept separate", () => {
+  const urls = [
+    "https://scontent.cdninstagram.com/v/t51.1/x_s640x640.jpg",
+    "https://scontent.cdninstagram.com/v/t51.1/x.jpg",
+    "https://scontent.xx.fbcdn.net/v/t51.1/y.jpg",
+  ];
+  const out = dedupeInstagramPhotos(urls);
+  assert.deepEqual(out, [
+    "https://scontent.cdninstagram.com/v/t51.1/x_s640x640.jpg",
+    "https://scontent.cdninstagram.com/v/t51.1/x.jpg",
+    "https://scontent.xx.fbcdn.net/v/t51.1/y.jpg",
+  ]);
 });
 
 test("dedupeInstagramPhotos: drops avatar urls", () => {
