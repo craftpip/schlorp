@@ -9,6 +9,7 @@ import ConfirmModal from "../components/ConfirmModal.jsx";
 import PromptModal from "../components/PromptModal.jsx";
 import AlertModal from "../components/AlertModal.jsx";
 import MediaContextMenu from "../components/MediaContextMenu.jsx";
+import { moveKeys, pileLandMember, planDetach, planJoin } from "../lib/stackDrag.js";
 
 function fmtSize(bytes) {
   if (bytes == null) return "";
@@ -564,15 +565,11 @@ export default function Media() {
   // Move a block of file keys (a pile's members) as one unit to before/after
   // a target file key in the visible custom order.
   const moveCustomKeys = (dragKeys, targetKey, after = false) => {
-    const set = new Set(dragKeys || []);
-    if (!set.size || !targetKey || set.has(targetKey)) return;
     const vis = filtered.filter((it) => !it.dir).map((it) => rowKey(it));
-    if (!vis.includes(targetKey) || ![...set].every((k) => vis.includes(k))) return;
-    const orderedDrag = vis.filter((k) => set.has(k));
-    const next = vis.filter((k) => !set.has(k));
-    const idx = next.indexOf(targetKey) + (after ? 1 : 0);
-    next.splice(idx, 0, ...orderedDrag);
-    setSelectedKey(orderedDrag[0]);
+    const next = moveKeys(vis, dragKeys, targetKey, after);
+    if (!next) return;
+    const set = new Set(dragKeys || []);
+    setSelectedKey(vis.filter((k) => set.has(k))[0]);
     saveCustomOrder(next);
   };
   // Is this key a member of the currently spread pile? (Same basename
@@ -836,10 +833,10 @@ export default function Media() {
       if (el.getAttribute("data-testid") === "media-tile-pile") {
         const entry = gridVisibleRef.current.find((ve) => ve.kind === "pile" && ve.stackId === el.getAttribute("data-filename"));
         if (entry && entry.members && entry.members.length) {
-          // Land on the nearest edge: entering from left/above (moving
-          // right/down) starts at the FIRST member; from right/below ends
-          // at the LAST member.
-          const m = (dir === "left" || dir === "up") ? entry.members[entry.members.length - 1] : entry.members[0];
+          // Locked piles stay collapsed: always land on the first member.
+          // Unlocked piles spread open: land on the nearest edge (first
+          // from left/above, last from right/below).
+          const m = pileLandMember(entry.members, dir, stacksModeRef.current === "locked");
           if (stacksModeRef.current !== "locked") { capturePileRect(entry.stackId); setSpreadStackId(entry.stackId); }
           const fk = rowKey(m);
           setSelKeys(new Set([fk]));
@@ -1116,7 +1113,7 @@ export default function Media() {
           const edge = after ? mem[mem.length - 1] : mem[0];
           if (edge === dk) return;
           moveCustomKeys([dk], edge, after);
-          if (!mem.includes(dk)) {
+          if (!mem.includes(dk) && stacksModeRef.current !== "locked") {
             addStackItems(sid, [dk], folder).then(() => {
               detachIfOutsideSpread([dk], edge);
               refreshStacksAndAnnotate();
@@ -2140,9 +2137,23 @@ export default function Media() {
           try {
             const data = JSON.parse(e.dataTransfer.getData("application/x-xdl-stack") || "null");
             if (Array.isArray(data) && data.length && stackId) {
-              // Dropped onto another pile: join it, leaving the open pile.
+              // Dropped onto a pile: join it at the drop position (not just
+              // append), leaving the open pile. Locked mode stays locked
+              // (both helpers no-op there).
               detachIfOutsideSpread(data, null);
-              addStackItems(stackId, data, folder).then(() => refreshStacksAndAnnotate()).catch(() => {});
+              const r = e.currentTarget.getBoundingClientRect();
+              const join = planJoin({
+                keys: data,
+                stackId,
+                pilesLocked,
+                customReorder: isCustomReorder,
+                x: e.clientX - r.left,
+                width: r.width,
+                membersOf: (sid) => pileMemberKeys(sid),
+              });
+              if (!join) return;
+              if (join.move) moveCustomKeys(join.addKeys, join.move.target, join.move.after);
+              addStackItems(stackId, join.addKeys, folder).then(() => refreshStacksAndAnnotate()).catch(() => {});
             }
           } catch {}
         }}
@@ -2233,13 +2244,23 @@ export default function Media() {
   };
   // A member dragged out of the open (spread) pile leaves the stack.
   // Dropping inside the open pile (infoKey is a fellow member) keeps it.
+  // Locked mode keeps stacks locked: no detach via drag.
   const detachIfOutsideSpread = (keys, infoKey) => {
-    if (!spreadStackId) return;
-    const mem = pileMemberKeys(spreadStackId);
-    const dragged = (keys || []).filter((k) => mem.includes(k));
-    if (!dragged.length) return;
-    if (infoKey && mem.includes(infoKey)) return;
-    removeStackItems(spreadStackId, dragged, folder).then(() => refreshStacksAndAnnotate()).catch(() => {});
+    const plans = planDetach({
+      keys,
+      infoKey,
+      pilesLocked,
+      spreadStackId,
+      stacksMode,
+      stackOf: (k) => {
+        const it = filtered.find((x) => rowKey(x) === k);
+        return it && Array.isArray(it.stacks) && it.stacks[0] ? it.stacks[0].id : null;
+      },
+      membersOf: (sid) => pileMemberKeys(sid),
+    });
+    for (const p of plans) {
+      removeStackItems(p.stackId, p.keys, folder).then(() => refreshStacksAndAnnotate()).catch(() => {});
+    }
   };
   const handleStackPromptConfirm = async (v) => {
     const id = promptState.id;
@@ -2415,7 +2436,8 @@ export default function Media() {
                         detachIfOutsideSpread([dk], info.key);
                         // Outsider dropped inside the open pile joins it (at the
                         // drop index via the reorder below).
-                        if (spreadStackId) {
+                        // Locked mode keeps stacks locked: no join via drag.
+                        if (spreadStackId && !pilesLocked) {
                           const mem = pileMemberKeys(spreadStackId);
                           if (mem.includes(info.key) && !mem.includes(dk)) {
                             addStackItems(spreadStackId, [dk], folder).then(() => refreshStacksAndAnnotate()).catch(() => {});
