@@ -1654,7 +1654,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
           try { e.dataTransfer.setData("application/x-xdl-stack", JSON.stringify(carry)); } catch {}
         }}
         onDragEnd={() => { dragKeyRef.current = null; dragKeysRef.current = null; if (dropInfo) setDropInfo(null); }}
-        style={{ position: "relative", flex: isDir ? "0 0 auto" : "0 0 auto", width: w, height: h, overflow: (menuOpen || isDropTarget) ? "visible" : "hidden", zIndex: menuOpen ? 60 : "auto", borderRadius: 0, background: isDir ? "var(--surface-2)" : "var(--surface-2)", outline: highlight ? "4px solid #fff" : (stackColor ? `3px solid ${stackColor}` : "none"), cursor: dragEnabled ? "grab" : "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, contentVisibility: menuOpen ? "visible" : "auto", containIntrinsicSize: `${w}px ${h}px`, animation: anim || undefined }}
+        style={{ position: "relative", flex: isDir ? "0 0 auto" : "0 0 auto", width: w, height: h, overflow: (menuOpen || isDropTarget) ? "visible" : "hidden", zIndex: menuOpen ? 60 : "auto", borderRadius: highlight || stackColor ? 10 : 0, background: isDir ? "var(--surface-2)" : "var(--surface-2)", outline: highlight ? "4px solid #fff" : (stackColor ? `3px solid ${stackColor}` : "none"), cursor: dragEnabled ? "grab" : "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, contentVisibility: menuOpen ? "visible" : "auto", containIntrinsicSize: `${w}px ${h}px`, animation: anim || undefined }}
       >
         {src ? (
           <span style={{ position: "relative", width: "100%", height: "100%", flex: 1, display: "block", background: "#000", minHeight: 0 }}>
@@ -2277,7 +2277,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
           } catch {}
         }}
         title={isCustomReorder ? `${stackName} — ${count} files — drag to reorder` : `${stackName} — ${count} files`}
-        style={{ position: "relative", display: "flex", flexDirection: "row", alignItems: "stretch", width: memberW + PEEK * (members.length - 1), height: GRID_TARGET_H, flex: "0 0 auto", cursor: isCustomReorder ? "grab" : "pointer", outline: pileOutline }}
+        style={{ position: "relative", display: "flex", flexDirection: "row", alignItems: "stretch", width: memberW + PEEK * (members.length - 1), height: GRID_TARGET_H, flex: "0 0 auto", cursor: isCustomReorder ? "grab" : "pointer", borderRadius: 10, outline: pileOutline }}
       >
         {pileDropSide && (
           <div style={{ position: "absolute", top: 0, bottom: 0, [pileDropSide]: -3, width: 4, borderRadius: 2, background: "var(--accent)", zIndex: 10, pointerEvents: "none" }} />
