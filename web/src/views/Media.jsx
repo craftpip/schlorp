@@ -2544,7 +2544,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     const vibrate = () => { try { if (navigator.vibrate) navigator.vibrate(20); } catch { /* no haptics */ } };
     const clearGhost = () => {
       if (ctl.el) {
-        try { ctl.el.style.transform = ""; ctl.el.style.boxShadow = ""; } catch { /* detached */ }
+        try { ctl.el.style.transform = ""; ctl.el.style.boxShadow = ""; ctl.el.style.position = ""; ctl.el.style.zIndex = ""; } catch { /* detached */ }
         ctl.el = null;
       }
     };
@@ -2645,9 +2645,17 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
             clearGhost();
             return;
           }
-          // Drag engaged on motion: lift the tile + haptic tick.
+          // Drag engaged on motion: lift the tile + haptic tick. The tile
+          // must also paint ABOVE the tiles that come later in the DOM
+          // (position:relative raises it out of static flow, and a high
+          // z-index lets it overlap them while translating).
           if (ctl.el) {
-            try { ctl.el.style.transform = "scale(1.05)"; ctl.el.style.boxShadow = "0 12px 32px rgba(0,0,0,.45)"; } catch { /* detached */ }
+            try {
+              ctl.el.style.position = "relative";
+              ctl.el.style.zIndex = 500;
+              ctl.el.style.transform = "scale(1.05)";
+              ctl.el.style.boxShadow = "0 12px 32px rgba(0,0,0,.45)";
+            } catch { /* detached */ }
           }
           vibrate();
         }
