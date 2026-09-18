@@ -2086,6 +2086,24 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spreadStackId, closingSpreadId, gridVisible]);
+  // Toggle an entry (file tile or pile container) in/out of the selection —
+  // desktop Ctrl+click and the mobile two-finger tap both land here.
+  const toggleSelection = (entry) => {
+    const k = entry.key;
+    const isPile = entry.kind === "pile";
+    const cellKeys = isPile ? entry.members.map((m) => rowKey(m)) : [k];
+    setSelKeys((prev) => {
+      const next = new Set(prev);
+      for (const ck of cellKeys) { if (next.has(ck)) next.delete(ck); else next.add(ck); }
+      return next;
+    });
+    setAnchorKey(cellKeys[0]);
+    // Atomic URL write (plan 019): the conditional spread below lands in
+    // the same ?s= navigation instead of racing it a tick later.
+    const wantCtrlSpread = (isPile && !spreadStackId && !pilesLocked) ? entry.stackId : (spreadStackId || null);
+    if (isPile && !spreadStackId && !pilesLocked) { capturePileRect(entry.stackId); setSpreadStackId(entry.stackId); }
+    setSelectedKeyAndSpread(cellKeys[0], wantCtrlSpread);
+  };
   // Grid click handler: Shift/Ctrl-aware multi-select (replaces tapItem for grid tiles).
   const gridClickHandler = (entry, e) => {
     if (!isGrid) { tapItem(entry.kind === "file" ? entry.it : entry.members[0]); return; }
@@ -2125,18 +2143,9 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
       return;
     }
     if (ctrl) {
-      // Toggle clicked in/out of selection
-      setSelKeys((prev) => {
-        const next = new Set(prev);
-        for (const ck of cellKeys) { if (next.has(ck)) next.delete(ck); else next.add(ck); }
-        return next;
-      });
-      setAnchorKey(cellKeys[0]);
-      // Atomic URL write (plan 019): the conditional spread below lands in
-      // the same ?s= navigation instead of racing it a tick later.
-      const wantCtrlSpread = (isPile && !spreadStackId && !pilesLocked) ? entry.stackId : (spreadStackId || null);
-      if (isPile && !spreadStackId && !pilesLocked) { capturePileRect(entry.stackId); setSpreadStackId(entry.stackId); }
-      setSelectedKeyAndSpread(cellKeys[0], wantCtrlSpread);
+      // Toggle clicked in/out of selection (shared with the mobile two-finger
+      // tap via toggleSelection).
+      toggleSelection(entry);
       return;
     }
     // Plain click
@@ -2507,7 +2516,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     filtered, spreadStackId, pilesLocked, folder, rowKey,
     nearestDropInfo, sameDropInfo, moveCustomKey, detachIfOutsideSpread,
     addStackItems, refreshStacksAndAnnotate, pileMemberKeys, openContextMenu,
-    setDropInfo,
+    setDropInfo, toggleSelection,
   };
   const touchTileFromTarget = (target) => {
     if (!target || !target.closest) return null;
@@ -2574,18 +2583,23 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         return;
       }
       if (e.touches.length === 2 && ctl.mode === "pending" && ctl.pending) {
-        // Second finger: files engage the two-finger drag; piles don't drag
-        // on mobile ("no multiple drags") — long-press pile = context menu.
+        // Second finger: files engage the two-finger reorder drag; piles
+        // never drag (plan 022). The sequence stays grabbed (preventDefault)
+        // so pinch/pan can't start, but its outcome is decided by motion: a
+        // static two-finger release is a TAP that toggles selection (plan
+        // 024). Ghost + vibrate apply only once the midpoint actually moves.
         clearHold();
         const p = ctl.pending;
         ctl.pending = null;
-        if (p.pile) { ctl.mode = "idle"; return; }
         const list = [...e.touches];
         const first = list.find((t) => t.identifier === p.id) || list[0];
         const second = list.find((t) => t.identifier !== p.id) || list[1] || list[0];
         ctl.mode = "drag";
         ctl.drag = {
           key: p.key,
+          pile: !!p.pile,
+          allowDrag: !p.pile,
+          moved: false,
           ids: [p.id, second.identifier],
           sx: (first.clientX + second.clientX) / 2,
           sy: (first.clientY + second.clientY) / 2,
@@ -2594,13 +2608,6 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         };
         try { e.preventDefault(); } catch { /* passive fallback */ }
         ctl.el = grid.querySelector(touchSel(p.key));
-        if (ctl.el) {
-          try {
-            ctl.el.style.transform = "scale(1.05)";
-            ctl.el.style.boxShadow = "0 12px 32px rgba(0,0,0,.45)";
-          } catch { /* detached */ }
-        }
-        vibrate();
       }
     };
     const onTouchMove = (e) => {
@@ -2625,31 +2632,71 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         const my = (a.clientY + b.clientY) / 2;
         ctl.drag.mx = mx;
         ctl.drag.my = my;
-        if (ctl.el) {
-          try { ctl.el.style.transform = `translate(${mx - ctl.drag.sx}px, ${my - ctl.drag.sy}px) scale(1.05)`; } catch { /* detached */ }
+        if (!ctl.drag.moved) {
+          // Two-finger tap phase: while the midpoint stays within slop both
+          // outcomes (tap => toggle selection, moved => reorder drag) remain
+          // reachable — no ghost, no haptic yet.
+          if (Math.hypot(mx - ctl.drag.sx, my - ctl.drag.sy) <= TOUCH_SLOP_PX) return;
+          ctl.drag.moved = true;
+          if (!ctl.drag.allowDrag) {
+            // Moved two-finger over a pile: piles never drag — cancel.
+            ctl.mode = "idle";
+            ctl.drag = null;
+            clearGhost();
+            return;
+          }
+          // Drag engaged on motion: lift the tile + haptic tick.
+          if (ctl.el) {
+            try { ctl.el.style.transform = "scale(1.05)"; ctl.el.style.boxShadow = "0 12px 32px rgba(0,0,0,.45)"; } catch { /* detached */ }
+          }
+          vibrate();
         }
-        if (my < 70) window.scrollBy(0, -14);
-        else if (my > window.innerHeight - 70) window.scrollBy(0, 14);
-        if (rafId) return;
-        rafId = requestAnimationFrame(() => {
-          rafId = 0;
-          if (ctl.mode !== "drag" || !ctl.drag) return;
-          const info = L.nearestDropInfo(grid, ctl.drag.mx, ctl.drag.my, ctl.drag.key);
-          if (!L.sameDropInfo(dropInfoRef.current, info)) L.setDropInfo(info);
-        });
+        if (ctl.drag.allowDrag) {
+          if (ctl.el) {
+            try { ctl.el.style.transform = `translate(${mx - ctl.drag.sx}px, ${my - ctl.drag.sy}px) scale(1.05)`; } catch { /* detached */ }
+          }
+          if (my < 70) window.scrollBy(0, -14);
+          else if (my > window.innerHeight - 70) window.scrollBy(0, 14);
+          if (rafId) return;
+          rafId = requestAnimationFrame(() => {
+            rafId = 0;
+            if (ctl.mode !== "drag" || !ctl.drag) return;
+            const info = L.nearestDropInfo(grid, ctl.drag.mx, ctl.drag.my, ctl.drag.key);
+            if (!L.sameDropInfo(dropInfoRef.current, info)) L.setDropInfo(info);
+          });
+        }
       }
     };
-    // Desktop single-file commit block, driven by the release point.
+    const tapEntryFor = (d) => {
+      const L = touchLiveRef.current;
+      if (d.pile) {
+        const ve = gridVisibleRef.current.find((e) => e.kind === "pile" && e.stackId === d.key);
+        if (ve && ve.members && ve.members.length) return ve;
+        return null;
+      }
+      const it = (L.filtered || []).find((x) => !x.dir && L.rowKey(x) === d.key);
+      return it ? { kind: "file", it, key: d.key } : null;
+    };
+    // Desktop single-file commit block, driven by the release point. A
+    // two-finger release with no motion is a TAP (plan 024): toggle the tile
+    // under the fingers in/out of selection instead of moving it.
     const finishDrag = () => {
       const L = touchLiveRef.current;
       const d = ctl.drag;
       ctl.drag = null;
       ctl.mode = "idle";
       clearGhost();
-      const info = d ? L.nearestDropInfo(grid, d.mx, d.my, d.key) : null;
+      const info = (d && d.moved && d.allowDrag) ? L.nearestDropInfo(grid, d.mx, d.my, d.key) : null;
       L.setDropInfo(null);
       timers.suppressUntil = Date.now() + 600;
-      if (d && info && info.key !== d.key) {
+      if (!d) return;
+      if (!d.moved) {
+        const entry = tapEntryFor(d);
+        if (entry) L.toggleSelection(entry);
+        return;
+      }
+      if (!d.allowDrag) return;
+      if (info && info.key !== d.key) {
         L.detachIfOutsideSpread([d.key], info.key);
         if (L.spreadStackId && !L.pilesLocked) {
           const mem = L.pileMemberKeys(L.spreadStackId);
@@ -2707,6 +2754,120 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     // bind the listeners after the container appears.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [touchGate, filtered.length]);
+
+  // --- Two-finger tap toggling OUTSIDE the drag gate (plan 024) ---
+  // Passive listeners (never preventDefault): one-finger scroll and two-finger
+  // pinch-zoom stay fully native. Two fingers down on a tile and up without
+  // moving past slop = toggle selection (desktop Ctrl+click parity). Runs only
+  // when the drag controller is off, so no sequence is double-handled.
+  const tapTwoRef = useRef({ mode: "idle", pending: null, ids: null, key: null, pile: false, sx: 0, sy: 0 });
+  const tapGate = isGrid && !touchGate;
+  const tapGateRef = useRef(tapGate);
+  tapGateRef.current = tapGate;
+  useEffect(() => {
+    if (!tapGate) return undefined;
+    const grid = gridFilesRef.current;
+    if (!grid) return undefined;
+    const two = tapTwoRef.current;
+    const reset = () => {
+      if (two.mode !== "idle") {
+        two.mode = "idle";
+        two.pending = null;
+        two.ids = null;
+        two.key = null;
+      }
+    };
+    const onTouchStart = (e) => {
+      if (!tapGateRef.current) return;
+      if (two.mode === "two") return;
+      if (e.touches.length === 1) {
+        const hit = touchTileFromTarget(e.target);
+        if (!hit || hit.folder) return;
+        const t = e.touches[0];
+        two.mode = "armed";
+        two.pending = { id: t.identifier, key: hit.key, pile: !!hit.pile, sx: t.clientX, sy: t.clientY };
+        return;
+      }
+      if (e.touches.length === 2) {
+        const list = [...e.touches];
+        const mx = (list[0].clientX + list[1].clientX) / 2;
+        const my = (list[0].clientY + list[1].clientY) / 2;
+        let key = two.mode === "armed" && two.pending ? two.pending.key : null;
+        let pile = two.mode === "armed" && two.pending ? !!two.pending.pile : false;
+        if (!key) {
+          // First finger wasn't on a tile: midpoint hit-test fallback.
+          const at = document.elementFromPoint(mx, my);
+          const hit = at ? touchTileFromTarget(at) : null;
+          if (!hit || hit.folder) { reset(); return; }
+          key = hit.key;
+          pile = !!hit.pile;
+        }
+        two.mode = "two";
+        two.ids = list.map((t) => t.identifier);
+        two.key = key;
+        two.pile = pile;
+        two.sx = mx;
+        two.sy = my;
+      }
+    };
+    const onTouchMove = (e) => {
+      if (!tapGateRef.current || two.mode === "idle") return;
+      if (two.mode === "armed" && two.pending) {
+        const t = [...e.touches].find((x) => x.identifier === two.pending.id);
+        if (!t) return;
+        if (Math.hypot(t.clientX - two.pending.sx, t.clientY - two.pending.sy) > TOUCH_SLOP_PX) reset();
+        return;
+      }
+      if (two.mode === "two" && two.ids) {
+        const a = [...e.touches].find((x) => x.identifier === two.ids[0]);
+        const b = [...e.touches].find((x) => x.identifier === two.ids[1]);
+        if (!a || !b) return;
+        const mx = (a.clientX + b.clientX) / 2;
+        const my = (a.clientY + b.clientY) / 2;
+        if (Math.hypot(mx - two.sx, my - two.sy) > TOUCH_SLOP_PX) reset();
+      }
+    };
+    const onTouchEnd = (e) => {
+      if (!tapGateRef.current) return;
+      if (two.mode === "armed" && two.pending) {
+        const gone = ![...e.touches].some((t) => t.identifier === two.pending.id);
+        if (gone) reset(); // plain one-finger tap; click runs
+        return;
+      }
+      if (two.mode !== "two" || !two.ids) return;
+      const still = [...e.touches].map((t) => t.identifier);
+      if (still.includes(two.ids[0]) || still.includes(two.ids[1])) return; // one finger still down
+      const d = { key: two.key, pile: two.pile };
+      reset();
+      if (!d.key) return;
+      const L = touchLiveRef.current;
+      let entry = null;
+      if (d.pile) {
+        const ve = gridVisibleRef.current.find((e2) => e2.kind === "pile" && e2.stackId === d.key);
+        if (!ve || !ve.members || !ve.members.length) return;
+        entry = ve;
+      } else {
+        const it = (L.filtered || []).find((x) => !x.dir && L.rowKey(x) === d.key);
+        if (!it) return;
+        entry = { kind: "file", it, key: d.key };
+      }
+      try { if (navigator.vibrate) navigator.vibrate(20); } catch { /* no haptics */ }
+      L.toggleSelection(entry);
+    };
+    const onTouchCancel = () => { if (tapGateRef.current) reset(); };
+    grid.addEventListener("touchstart", onTouchStart, { passive: true });
+    grid.addEventListener("touchmove", onTouchMove, { passive: true });
+    grid.addEventListener("touchend", onTouchEnd, { passive: true });
+    grid.addEventListener("touchcancel", onTouchCancel, { passive: true });
+    return () => {
+      reset();
+      grid.removeEventListener("touchstart", onTouchStart);
+      grid.removeEventListener("touchmove", onTouchMove);
+      grid.removeEventListener("touchend", onTouchEnd);
+      grid.removeEventListener("touchcancel", onTouchCancel);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tapGate, filtered.length]);
 
   return (
     <div data-testid="media-page" className="media-page">
@@ -2780,7 +2941,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                     <span style={{ flex: 1 }} />
                     <button className="btn btn-sm btn-outline-secondary" onClick={closePlaylist} title="Back to Media"><i className="bi bi-arrow-90deg-up" /> Back</button>
                   </div>
-                  <div data-testid="media-grid-files" style={{ display: "flex", flexWrap: "wrap", gap: GRID_GAP }}>
+                  <div data-testid="media-grid-files" ref={gridFilesRef} style={{ display: "flex", flexWrap: "wrap", gap: GRID_GAP }}>
                     {fileRows.map((row) => renderTile(row.it, row.i, row.w, row.h))}
                   </div>
                 </div>
