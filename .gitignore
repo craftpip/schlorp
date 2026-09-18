@@ -10,3 +10,4 @@ node_modules/
 .saved-sync-state.json.bak.*
 .env
 .docker-volumes.backup
+demo/

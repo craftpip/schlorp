@@ -579,8 +579,8 @@ app.use(express.urlencoded({ extended: false }));
 
 // ---- Public: landing page (goofy) + SPA assets (must load before auth check) ----
 const fsSync = require("fs");
-app.use("/landing", express.static(landingDir));
-app.get("/landing", (_req, res) => {
+app.use("/website", express.static(landingDir));
+app.get("/website", (_req, res) => {
   const idx = path.join(landingDir, "index.html");
   if (fsSync.existsSync(idx)) return res.sendFile(idx);
   return res.status(404).send("landing not built");
@@ -684,7 +684,7 @@ app.use((req, res, next) => {
   const expected = String(process.env.UI_PANEL_PASSWORD || process.env.ADMIN_PASSWORD || UI_PANEL_PASSWORD || "").trim();
   if (!expected) return next();
   // Public endpoints
-  if (req.path === "/api/auth/status" || req.path === "/api/auth" || req.path === "/health" || req.path.startsWith("/health") || req.path === "/vnc/status" || req.path === "/landing" || req.path.startsWith("/landing/")) return next();
+  if (req.path === "/api/auth/status" || req.path === "/api/auth" || req.path === "/health" || req.path.startsWith("/health") || req.path === "/vnc/status" || req.path === "/website" || req.path.startsWith("/website/")) return next();
   // Check header auth, query param, or session cookie
   const provided = String(req.headers["x-panel-password"] || req.headers["x-admin-password"] || req.headers["x-admin-token"] || req.query?.password || "");
   if (provided === expected) return next();

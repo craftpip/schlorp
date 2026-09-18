@@ -1,4 +1,4 @@
-export default function MediaContextMenu({ menu, onClose, stacks, selCount, onStack, onOpen, onDelete, onAddToStack, onRename, onUnstack, onRemoveFromStack }) {
+export default function MediaContextMenu({ menu, onClose, stacks, selCount, onStack, onOpen, onDelete, onAddToStack, onRename, onUnstack, onRemoveFromStack, noStacks }) {
   if (!menu) return null;
   const { entry, stackId } = menu;
   const isPile = entry && entry.kind === "pile";
@@ -21,28 +21,23 @@ export default function MediaContextMenu({ menu, onClose, stacks, selCount, onSt
       data-testid="media-context-menu"
       ref={undefined}
       onClick={(e) => e.stopPropagation()}
-      style={{ position: "fixed", left: menu.x, top: menu.y, zIndex: 100, minWidth: 180, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, boxShadow: "0 12px 32px rgba(0,0,0,.35)", padding: 4, fontSize: 13 }}
+      style={{ position: "fixed", left: menu.x, top: menu.y, zIndex: 100, minWidth: 200, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, boxShadow: "0 12px 32px rgba(0,0,0,.35)", padding: 4, fontSize: 13 }}
     >
-      <MenuItem data-testid="media-ctx-stack-create" label={`Stack ${fileCount} item${fileCount === 1 ? "" : "s"}`} icon="bi-layers" disabled={fileCount < 2} onClick={() => { onClose(); onStack(); }} />
-      {own.map((s) => (
-        <MenuItem key={s.id} data-testid="media-ctx-add-stack" label={`${memberOf.has(s.id) ? "✓ " : ""}${s.name}`} icon={memberOf.has(s.id) ? "bi-check-lg" : "bi-layers"} disabled={fileCount < 1} onClick={() => { onClose(); onAddToStack(s.id, s.name); }}>
-          <span style={{ marginLeft: "auto", color: "var(--muted)", fontSize: 11 }}>{s.count ?? s.items?.length ?? 0}</span>
-        </MenuItem>
-      ))}
-      {rest.length > 0 && (
-        <>
-          <Divider />
-          {restShown.map((s) => (
-            <MenuItem key={s.id} data-testid="media-ctx-add-stack" label={s.name} icon={memberOf.has(s.id) ? "bi-check-lg" : "bi-layers"} disabled={fileCount < 1} onClick={() => { onClose(); onAddToStack(s.id, s.name); }}>
-              <span style={{ marginLeft: "auto", color: "var(--muted)", fontSize: 11 }}>{s.count ?? s.items?.length ?? 0}</span>
-            </MenuItem>
+      {!noStacks && <MenuItem data-testid="media-ctx-stack-create" label={`Stack ${fileCount} item${fileCount === 1 ? "" : "s"}`} icon="bi-layers" disabled={fileCount < 2} onClick={() => { onClose(); onStack(); }} />}
+      {!noStacks && (own.length > 0 || restShown.length > 0) && (
+        <div data-testid="media-ctx-stack-grid" style={{ display: "grid", gridTemplateColumns: "repeat(3, 60px)", gap: 6, padding: "6px 6px 0" }}>
+          {own.map((s) => (
+            <StackCell key={s.id} s={s} member disabled={fileCount < 1} onClick={() => { onClose(); onAddToStack(s.id, s.name); }} />
           ))}
-        </>
+          {restShown.map((s) => (
+            <StackCell key={s.id} s={s} disabled={fileCount < 1} onClick={() => { onClose(); onAddToStack(s.id, s.name); }} />
+          ))}
+        </div>
       )}
-      <Divider />
+      {!noStacks && <Divider />}
       <MenuItem label="Open" icon="bi-box-arrow-up-right" onClick={() => { onClose(); onOpen(); }} />
       <MenuItem label="Delete" icon="bi-trash" danger onClick={() => { onClose(); onDelete(); }} />
-      {isPile && (
+      {!noStacks && isPile && (
         <>
           <Divider />
           <MenuItem label="Rename stack" icon="bi-pencil" onClick={() => { onClose(); onRename(); }} />
@@ -50,7 +45,7 @@ export default function MediaContextMenu({ menu, onClose, stacks, selCount, onSt
           <MenuItem label="Remove from stack" icon="bi-dash-circle" onClick={() => { onClose(); onRemoveFromStack(); }} />
         </>
       )}
-      {!isPile && stackId && (
+      {!noStacks && !isPile && stackId && (
         <>
           <Divider />
           <MenuItem label="Remove from stack" icon="bi-dash-circle" onClick={() => { onClose(); onRemoveFromStack(); }} />
@@ -78,4 +73,29 @@ function MenuItem({ label, icon, danger, disabled, onClick, children, ...rest })
 
 function Divider() {
   return <div style={{ height: 1, background: "var(--border)", margin: "4px 6px" }} />;
+}
+
+function StackCell({ s, member, disabled, onClick }) {
+  return (
+    <div
+      data-testid="media-ctx-add-stack"
+      title={s.name}
+      onClick={disabled ? (e) => e.stopPropagation() : onClick}
+      onMouseEnter={(e) => { if (!disabled) e.currentTarget.style.borderColor = "var(--accent)"; }}
+      onMouseLeave={(e) => { e.currentTarget.style.borderColor = ""; }}
+      style={{ position: "relative", width: 60, height: 48, borderRadius: 6, overflow: "hidden", background: "#000", border: `1px solid ${member ? "var(--accent)" : "var(--border)"}`, cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.4 : 1 }}
+    >
+      {s.thumb ? (
+        <img src={s.thumb} alt="" loading="lazy" decoding="async" draggable={false} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+      ) : (
+        <span style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", background: "var(--surface-2)" }}>
+          <i className="bi bi-layers" style={{ fontSize: 16, color: "var(--muted)" }} />
+        </span>
+      )}
+      <span style={{ position: "absolute", top: 2, right: 2, fontSize: 9, fontWeight: 700, lineHeight: 1, color: "#fff", background: "rgba(0,0,0,.65)", padding: "2px 4px", borderRadius: 999, pointerEvents: "none" }}>{s.count ?? 0}</span>
+      {member && (
+        <span style={{ position: "absolute", top: 2, left: 2, fontSize: 10, lineHeight: 1, color: "#fff", background: "var(--accent)", padding: "2px 3px", borderRadius: 999, pointerEvents: "none" }}>✓</span>
+      )}
+    </div>
+  );
 }

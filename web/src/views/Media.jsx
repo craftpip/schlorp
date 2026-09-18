@@ -390,6 +390,9 @@ export default function Media() {
   // (all stacks spread) · "locked" (piles that never open on select/navigate).
   const [stacksMode, setStacksMode] = useState("stacked");
   const pilesLocked = stacksMode === "locked";
+  // Stacks are a Gallery (custom) sort feature. Name/Size/Time sorts show
+  // every file as a plain tile in its sorted order — no piles, no stack rings.
+  const stacksActive = isGrid && !inPlaylistView && sort === "custom";
   useEffect(() => {
     // Drop ?spread= ids that don't exist in this folder.
     if (spreadStackId && folderStacks.length && !folderStacks.some((s) => s.id === spreadStackId)) setSpreadStackId(null);
@@ -931,6 +934,37 @@ const collapseSpreadUnlessMember = (fid) => {
     const spatialBest = (dir, current, nodes) => {
       const cr = current.getBoundingClientRect();
       const cx = cr.left + cr.width / 2, cy = cr.top + cr.height / 2;
+      if (dir === "up" || dir === "down") {
+        // Vertical moves land on the nearest row's tile that horizontally
+        // overlaps the current one the most. Wide tiles below have off-center
+        // centers, so center alignment would skip them and jump sideways;
+        // horizontal overlap keeps the column relationship across rows and
+        // center distance only breaks exact ties.
+        const below = dir === "down";
+        let minGap = Infinity;
+        for (const el of nodes) {
+          if (el === current) continue;
+          const r = el.getBoundingClientRect();
+          const g = below ? r.top - cr.bottom : cr.top - r.bottom;
+          if (g >= 4 && g < minGap) minGap = g;
+        }
+        if (minGap === Infinity) return null;
+        let best = null, bestScore = Infinity;
+        for (const el of nodes) {
+          if (el === current) continue;
+          const r = el.getBoundingClientRect();
+          const g = below ? r.top - cr.bottom : cr.top - r.bottom;
+          if (g < 4 || g > minGap + 48) continue;
+          const x = r.left + r.width / 2;
+          const overlap = Math.min(cr.right, r.right) - Math.max(cr.left, r.left);
+          // Overlap class dominates; within a class the closest center wins.
+          const secondary = overlap > 0
+            ? -overlap * 1000 + Math.abs(x - cx)
+            : Math.max(cr.left - r.right, r.left - cr.right, 0) * 1000 + Math.abs(x - cx);
+          if (secondary < bestScore) { bestScore = secondary; best = el; }
+        }
+        return best;
+      }
       let best = null, bestScore = Infinity;
       for (const el of nodes) {
         if (el === current) continue;
@@ -943,7 +977,6 @@ const collapseSpreadUnlessMember = (fid) => {
         // instead of jumping to the far-right tile elsewhere on the page.
         if (dir === "left") { if (dx >= -4) continue; if (Math.abs(r.top - cr.top) >= 4) continue; primary = -dx; secondary = Math.abs(dy); }
         else if (dir === "right") { if (dx <= 4) continue; if (Math.abs(r.top - cr.top) >= 4) continue; primary = dx; secondary = Math.abs(dy); }
-        else if (dir === "up") { if (dy >= -4) continue; primary = -dy; secondary = Math.abs(dx); }
         else { if (dy <= 4) continue; primary = dy; secondary = Math.abs(dx); }
         const score = primary + secondary * 2.5;
         if (score < bestScore) { bestScore = score; best = el; }
@@ -1523,7 +1556,7 @@ const collapseSpreadUnlessMember = (fid) => {
         onClick={() => tapItem(it)}
         onDoubleClick={() => openItem(it)}
         title={`${displayName(it)} — click to select, double-click to open`}
-        style={{ width: FOLDER_CHIP_W, height: FOLDER_CHIP_H, flex: "0 0 auto", display: "flex", alignItems: "center", gap: 10, padding: "0 12px", overflow: "hidden", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)", outline: selected ? "4px solid var(--accent)" : "none", cursor: "pointer" }}
+        style={{ width: FOLDER_CHIP_W, height: FOLDER_CHIP_H, flex: "0 0 auto", display: "flex", alignItems: "center", gap: 10, padding: "0 12px", overflow: "hidden", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)", outline: selected ? "4px solid #fff" : "none", cursor: "pointer" }}
       >
         <i className="bi bi-folder-fill" style={{ fontSize: 24, color: "#f59e0b", flex: "0 0 auto" }} />
         <span style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{displayName(it)}</span>
@@ -1577,8 +1610,8 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     const isDir = !!it.dir;
     // Stack membership ring is the stack's own gradient color (independent of
     // selection): members of a stack always show their stack's ring; selection
-    // overrides with accent.
-    const inStack = !isDir && Array.isArray(it.stacks) && it.stacks.length > 0;
+    // overrides with accent. Ring is a Gallery-only feature (stacksActive).
+    const inStack = stacksActive && !isDir && Array.isArray(it.stacks) && it.stacks.length > 0;
     const stackColor = inStack ? stackBorderColor((it.stacks || [])[0].id) : null;
     // `.gif` files that are actually MP4 bytes (mislabeled at download time,
     // e.g. reddit saves) fail in <img> — the server sniffs them as video/mp4.
@@ -1657,16 +1690,16 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         style={{ position: "relative", flex: isDir ? "0 0 auto" : "0 0 auto", width: w, height: h, overflow: (menuOpen || isDropTarget) ? "visible" : "hidden", zIndex: menuOpen ? 60 : "auto", borderRadius: highlight || stackColor ? 10 : 0, background: isDir ? "var(--surface-2)" : "var(--surface-2)", outline: highlight ? "4px solid #fff" : (stackColor ? `3px solid ${stackColor}` : "none"), cursor: dragEnabled ? "grab" : "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, contentVisibility: menuOpen ? "visible" : "auto", containIntrinsicSize: `${w}px ${h}px`, animation: anim || undefined }}
       >
         {src ? (
-          <span style={{ position: "relative", width: "100%", height: "100%", flex: 1, display: "block", background: "#000", minHeight: 0 }}>
+          <span style={{ position: "relative", width: "100%", height: "100%", flex: 1, display: "block", background: "#000", borderRadius: highlight || stackColor ? 10 : 0, minHeight: 0 }}>
             {!loaded && (
               <span data-testid="media-thumb-loading" style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", pointerEvents: "none" }}>
                 <span className="xdl-thumb-spinner" />
               </span>
             )}
             {asVideo ? (
-              <video src={src} autoPlay muted loop playsInline preload="metadata" onLoadedData={markVideoLoaded} onError={markErr} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", background: "#000", opacity: loaded ? 1 : 0, transition: "opacity .45s ease" }} />
+              <video src={src} autoPlay muted loop playsInline preload="metadata" onLoadedData={markVideoLoaded} onError={markErr} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", background: "#000", borderRadius: highlight || stackColor ? 10 : 0, opacity: loaded ? 1 : 0, transition: "opacity .45s ease" }} />
             ) : (
-              <img src={src} alt="" loading="lazy" decoding="async" draggable={false} onLoad={markLoaded} onError={markErr} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", background: "#000", opacity: loaded ? 1 : 0, transition: "opacity .45s ease" }} />
+              <img src={src} alt="" loading="lazy" decoding="async" draggable={false} onLoad={markLoaded} onError={markErr} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", background: "#000", borderRadius: highlight || stackColor ? 10 : 0, opacity: loaded ? 1 : 0, transition: "opacity .45s ease" }} />
             )}
           </span>
         ) : isDir ? (
@@ -1829,6 +1862,11 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
       return filtered.filter((it) => !it.dir).map((it) => ({ kind: "file", it, key: rowKey(it), w: 0, h: GRID_TARGET_H }));
     }
     const files = filtered.filter((it) => !it.dir);
+    // Non-Gallery sorts (Name/Size/Time) show files flat, one per tile, in
+    // their sorted order — no pile grouping, no stacks UI.
+    if (!stacksActive) {
+      return files.map((it) => ({ kind: "file", it, key: rowKey(it), w: 0, h: GRID_TARGET_H }));
+    }
     // Count visible members per stack id
     const stackCount = new Map();
     for (const it of files) {
@@ -1858,7 +1896,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
       seq.push({ kind: "file", it, key: rowKey(it), w: 0, h: GRID_TARGET_H });
     }
     return seq;
-  }, [isGrid, gridW, filtered, inPlaylistView, spreadStackId, closingSpreadId, stacksMode, folderStacks]);
+  }, [isGrid, gridW, filtered, inPlaylistView, spreadStackId, closingSpreadId, stacksMode, folderStacks, stacksActive]);
   // Adjacency guarantee for stack border colors: side-by-side stacks must be
   // distinguishable, so any stack whose cached color is too close (along the
   // gradient) to the color of the stack rendered right beside it gets re-rolled.
@@ -2326,6 +2364,21 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     else if (selKey) s.add(selKey);
     return s;
   }, [selKeys, selKey]);
+  // Stack picker thumbnails (plan 021): resolve each stack's visually-first
+  // member from the current grid order (`filtered`, not `s.items[0]`) so the
+  // context-menu thumbnail matches the pile's front card. No memo needed —
+  // recomputes only when the menu is open and filtered list changes.
+  const stackMenuEntries = folderStacks.map((s) => {
+    const itemsArr = Array.isArray(s.items) ? s.items : [];
+    const membersSet = new Set(itemsArr);
+    const firstMember = filtered.find((x) => !x.dir && membersSet.has(String(rowKey(x)).split("/").pop()));
+    return {
+      id: s.id,
+      name: s.name,
+      count: s.count ?? itemsArr.length,
+      thumb: firstMember ? thrumb(firstMember) : null,
+    };
+  });
   const promptStackPropsFor = (id) => {
     const st = folderStacks.find((s) => s.id === id);
     return { title: "Rename stack", message: "", defaultValue: st ? st.name : "", placeholder: "Stack name" };
@@ -2430,6 +2483,231 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     }
   };
 
+  // --- Touch gestures (plan 022, mobile only) ---
+  // Tap = select only (existing coarse-tap behavior, untouched).
+  // Long-press (~500ms, stationary) = context menu at the press point
+  // (synthesized for iOS, unified with Android's native one).
+  // Two-finger touch = single-item reorder drag (no arm timer — two fingers
+  // are unambiguous against scroll/tap/open).
+  // All handlers are native ({passive:false} where preventDefault is needed)
+  // because React registers touch handlers passively at the root.
+  const gridFilesRef = useRef(null);
+  const touchCtlRef = useRef({ mode: "idle" }); // idle | pending | drag
+  const touchTimersRef = useRef({ hold: 0, suppressUntil: 0 });
+  const TOUCH_HOLD_MS = 500;
+  const TOUCH_SLOP_PX = 10;
+  const dropInfoRef = useRef(null);
+  dropInfoRef.current = dropInfo;
+  const touchGate = isGrid && !inPlaylistView && sort === "custom" && !filtersActive;
+  const touchGateRef = useRef(touchGate);
+  touchGateRef.current = touchGate;
+  // Fresh closures for the native listeners (attached once per gate value).
+  const touchLiveRef = useRef({});
+  touchLiveRef.current = {
+    filtered, spreadStackId, pilesLocked, folder, rowKey,
+    nearestDropInfo, sameDropInfo, moveCustomKey, detachIfOutsideSpread,
+    addStackItems, refreshStacksAndAnnotate, pileMemberKeys, openContextMenu,
+    setDropInfo,
+  };
+  const touchTileFromTarget = (target) => {
+    if (!target || !target.closest) return null;
+    const el = target.closest('[data-testid="media-tile-file"], [data-testid="media-tile-pile"], [data-testid="media-tile-folder"]');
+    if (!el) return null;
+    const tid = el.getAttribute("data-testid");
+    if (tid === "media-tile-folder") return { folder: true };
+    return { el, key: el.getAttribute("data-filename"), pile: tid === "media-tile-pile" };
+  };
+  const touchSel = (key) => {
+    try {
+      return `[data-filename="${typeof CSS !== "undefined" && CSS.escape ? CSS.escape(key) : key}"]`;
+    } catch {
+      return '[data-filename]';
+    }
+  };
+  useEffect(() => {
+    if (!touchGate) return undefined;
+    const grid = gridFilesRef.current;
+    if (!grid) return undefined;
+    const ctl = touchCtlRef.current;
+    const timers = touchTimersRef.current;
+    let rafId = 0;
+    const clearHold = () => { if (timers.hold) { clearTimeout(timers.hold); timers.hold = 0; } };
+    const vibrate = () => { try { if (navigator.vibrate) navigator.vibrate(20); } catch { /* no haptics */ } };
+    const clearGhost = () => {
+      if (ctl.el) {
+        try { ctl.el.style.transform = ""; ctl.el.style.boxShadow = ""; } catch { /* detached */ }
+        ctl.el = null;
+      }
+    };
+    // Long-press fired: open the existing context menu at the press point.
+    const fireHold = () => {
+      timers.hold = 0;
+      if (ctl.mode !== "pending" || !ctl.pending) return;
+      const p = ctl.pending;
+      ctl.mode = "idle";
+      ctl.pending = null;
+      const L = touchLiveRef.current;
+      let entry = null;
+      if (p.pile) {
+        entry = { kind: "pile", stackId: p.key };
+      } else {
+        const it = (L.filtered || []).find((x) => !x.dir && L.rowKey(x) === p.key);
+        if (!it) return;
+        entry = { kind: "file", it, key: p.key };
+      }
+      vibrate();
+      L.openContextMenu({ clientX: p.sx, clientY: p.sy, preventDefault() {}, stopPropagation() {} }, entry);
+      // Swallow the release click (desktop right-click changes no selection)
+      // and any late native contextmenu from Android.
+      timers.suppressUntil = Date.now() + 600;
+    };
+    const onTouchStart = (e) => {
+      if (!touchGateRef.current) return;
+      if (e.touches.length === 1 && ctl.mode === "idle") {
+        const hit = touchTileFromTarget(e.target);
+        if (!hit || hit.folder) return; // empty area / folder chips: untouched
+        const t = e.touches[0];
+        ctl.mode = "pending";
+        ctl.pending = { id: t.identifier, key: hit.key, pile: !!hit.pile, sx: t.clientX, sy: t.clientY };
+        clearHold();
+        timers.hold = setTimeout(fireHold, TOUCH_HOLD_MS);
+        return;
+      }
+      if (e.touches.length === 2 && ctl.mode === "pending" && ctl.pending) {
+        // Second finger: files engage the two-finger drag; piles don't drag
+        // on mobile ("no multiple drags") — long-press pile = context menu.
+        clearHold();
+        const p = ctl.pending;
+        ctl.pending = null;
+        if (p.pile) { ctl.mode = "idle"; return; }
+        const list = [...e.touches];
+        const first = list.find((t) => t.identifier === p.id) || list[0];
+        const second = list.find((t) => t.identifier !== p.id) || list[1] || list[0];
+        ctl.mode = "drag";
+        ctl.drag = {
+          key: p.key,
+          ids: [p.id, second.identifier],
+          sx: (first.clientX + second.clientX) / 2,
+          sy: (first.clientY + second.clientY) / 2,
+          mx: (first.clientX + second.clientX) / 2,
+          my: (first.clientY + second.clientY) / 2,
+        };
+        try { e.preventDefault(); } catch { /* passive fallback */ }
+        ctl.el = grid.querySelector(touchSel(p.key));
+        if (ctl.el) {
+          try {
+            ctl.el.style.transform = "scale(1.05)";
+            ctl.el.style.boxShadow = "0 12px 32px rgba(0,0,0,.45)";
+          } catch { /* detached */ }
+        }
+        vibrate();
+      }
+    };
+    const onTouchMove = (e) => {
+      if (!touchGateRef.current) return;
+      if (ctl.mode === "pending" && ctl.pending) {
+        const t = [...e.touches].find((x) => x.identifier === ctl.pending.id);
+        if (!t) return;
+        if (Math.hypot(t.clientX - ctl.pending.sx, t.clientY - ctl.pending.sy) > TOUCH_SLOP_PX) {
+          clearHold();
+          ctl.mode = "idle";
+          ctl.pending = null; // it was a scroll
+        }
+        return;
+      }
+      if (ctl.mode === "drag" && ctl.drag) {
+        try { e.preventDefault(); } catch { /* passive fallback */ }
+        const L = touchLiveRef.current;
+        const a = [...e.touches].find((x) => x.identifier === ctl.drag.ids[0]);
+        const b = [...e.touches].find((x) => x.identifier === ctl.drag.ids[1]);
+        if (!a || !b) return;
+        const mx = (a.clientX + b.clientX) / 2;
+        const my = (a.clientY + b.clientY) / 2;
+        ctl.drag.mx = mx;
+        ctl.drag.my = my;
+        if (ctl.el) {
+          try { ctl.el.style.transform = `translate(${mx - ctl.drag.sx}px, ${my - ctl.drag.sy}px) scale(1.05)`; } catch { /* detached */ }
+        }
+        if (my < 70) window.scrollBy(0, -14);
+        else if (my > window.innerHeight - 70) window.scrollBy(0, 14);
+        if (rafId) return;
+        rafId = requestAnimationFrame(() => {
+          rafId = 0;
+          if (ctl.mode !== "drag" || !ctl.drag) return;
+          const info = L.nearestDropInfo(grid, ctl.drag.mx, ctl.drag.my, ctl.drag.key);
+          if (!L.sameDropInfo(dropInfoRef.current, info)) L.setDropInfo(info);
+        });
+      }
+    };
+    // Desktop single-file commit block, driven by the release point.
+    const finishDrag = () => {
+      const L = touchLiveRef.current;
+      const d = ctl.drag;
+      ctl.drag = null;
+      ctl.mode = "idle";
+      clearGhost();
+      const info = d ? L.nearestDropInfo(grid, d.mx, d.my, d.key) : null;
+      L.setDropInfo(null);
+      timers.suppressUntil = Date.now() + 600;
+      if (d && info && info.key !== d.key) {
+        L.detachIfOutsideSpread([d.key], info.key);
+        if (L.spreadStackId && !L.pilesLocked) {
+          const mem = L.pileMemberKeys(L.spreadStackId);
+          if (mem.includes(info.key) && !mem.includes(d.key)) {
+            L.addStackItems(L.spreadStackId, [d.key], L.folder).then(() => L.refreshStacksAndAnnotate()).catch(() => {});
+          }
+        }
+        L.moveCustomKey(d.key, info.key, info.side === "after");
+      }
+    };
+    const onTouchEnd = (e) => {
+      if (!touchGateRef.current) return;
+      if (ctl.mode === "pending" && ctl.pending) {
+        const gone = ![...e.touches].some((t) => t.identifier === ctl.pending.id);
+        if (gone) { clearHold(); ctl.mode = "idle"; ctl.pending = null; } // plain tap; click runs
+        return;
+      }
+      if (ctl.mode === "drag" && ctl.drag) {
+        const still = [...e.touches].map((t) => t.identifier);
+        if (!still.includes(ctl.drag.ids[0]) || !still.includes(ctl.drag.ids[1])) finishDrag();
+      }
+    };
+    // Swallow clicks synthesized right after a menu open or drag release
+    // (they would otherwise reselect/open the tile).
+    const onClickCapture = (e) => {
+      if (Date.now() < timers.suppressUntil) { e.preventDefault(); e.stopPropagation(); }
+    };
+    // During (or just after) a touch gesture, kill the native context menu;
+    // otherwise pass through so desktop right-click keeps working.
+    const onContextMenu = (e) => {
+      if (ctl.mode !== "idle" || Date.now() < timers.suppressUntil) { e.preventDefault(); e.stopPropagation(); }
+    };
+    grid.addEventListener("touchstart", onTouchStart, { passive: false });
+    grid.addEventListener("touchmove", onTouchMove, { passive: false });
+    grid.addEventListener("touchend", onTouchEnd, { passive: true });
+    grid.addEventListener("touchcancel", onTouchEnd, { passive: true });
+    grid.addEventListener("contextmenu", onContextMenu);
+    grid.addEventListener("click", onClickCapture, true);
+    return () => {
+      clearHold();
+      if (rafId) cancelAnimationFrame(rafId);
+      clearGhost();
+      ctl.mode = "idle";
+      ctl.pending = null;
+      ctl.drag = null;
+      grid.removeEventListener("touchstart", onTouchStart);
+      grid.removeEventListener("touchmove", onTouchMove);
+      grid.removeEventListener("touchend", onTouchEnd);
+      grid.removeEventListener("touchcancel", onTouchEnd);
+      grid.removeEventListener("contextmenu", onContextMenu);
+      grid.removeEventListener("click", onClickCapture, true);
+    };
+    // Re-attach when the item count changes too: the grid container only
+    // mounts once items exist, so a first load into an empty folder must
+    // bind the listeners after the container appears.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [touchGate, filtered.length]);
+
   return (
     <div data-testid="media-page" className="media-page">
       <div className="media-page-title" style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
@@ -2475,10 +2753,10 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
           </span>
         )}
         {(folder || inPlaylistView) && <button data-testid="media-up" className="btn btn-sm btn-outline-secondary" onClick={goUp} style={{ marginLeft: 8 }}><i className="bi bi-arrow-90deg-up" /> Up</button>}
-        {isGrid && !inPlaylistView && <button data-testid="media-stacks-toggle" type="button" className={`btn btn-sm ${stacksMode === "open" ? "btn-primary" : "btn-outline-secondary"}`} onClick={cycleStacksMode} title={stacksMode === "locked" ? "stacked & locked — piles never open on select or navigation" : stacksMode === "open" ? "unstacked — all stacks spread open; click to lock" : "stacked — piles open on select/navigate; click to unstack"} style={{ height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6, marginLeft: "auto" }}>
-          <i className={`bi ${stacksMode === "locked" ? "bi-lock-fill" : stacksMode === "open" ? "bi-grid-3x3-gap-fill" : "bi-stack"}`} style={{ fontSize: 12 }} />
-        </button>}
-        <span data-testid="media-sort-bar" title="Sort (same as list header)" style={{ display: "inline-flex", alignItems: "center", gap: 2, border: "1px solid var(--border)", borderRadius: 8, padding: 2, background: "var(--surface-2)" }}>
+        <span data-testid="media-sort-bar" title="Sort (same as list header)" style={{ display: "inline-flex", alignItems: "center", gap: 2, border: "1px solid var(--border)", borderRadius: 8, padding: 2, background: "var(--surface-2)", marginLeft: "auto" }}>
+          {isGrid && !inPlaylistView && stacksActive && <button data-testid="media-stacks-toggle" type="button" className={`btn btn-sm ${stacksMode === "open" ? "btn-primary" : "btn-outline-secondary"}`} onClick={cycleStacksMode} title={stacksMode === "locked" ? "stacked & locked — piles never open on select or navigation" : stacksMode === "open" ? "unstacked — all stacks spread open; click to lock" : "stacked — piles open on select/navigate; click to unstack"} style={{ height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6 }}>
+            <i className={`bi ${stacksMode === "locked" ? "bi-lock-fill" : stacksMode === "open" ? "bi-grid-3x3-gap-fill" : "bi-stack"}`} style={{ fontSize: 12 }} />
+          </button>}
           {sortBarBtn("custom", "Gallery", "media-sortbar-custom")}
           {sortBarBtn("name", "Name", "media-sortbar-name")}
           {sortBarBtn("size", "Size", "media-sortbar-size")}
@@ -2522,7 +2800,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                   </div>
                 )}
                 {(gridVisibleWithWidths.length > 0 || (gridVisibleWithWidths.length === 0 && filtered.length === 0 && (folder || playlists.length === 0))) && (
-                  <div data-testid="media-grid-files" style={{ display: "flex", flexWrap: "wrap", gap: GRID_GAP }}
+                  <div data-testid="media-grid-files" ref={gridFilesRef} style={{ display: "flex", flexWrap: "wrap", gap: GRID_GAP }}
                     onContextMenu={(e) => {
                       // Empty-area context menu: keep selection, allow stack actions
                       if (e.target && e.target.closest && e.target.closest('[data-testid="media-tile-file"], [data-testid="media-tile-pile"], [data-testid="media-tile-folder"]')) return;
@@ -2753,8 +3031,9 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
       />
       <MediaContextMenu
         menu={ctxMenu}
-        stacks={folderStacks}
+        stacks={stackMenuEntries}
         selCount={selectedKeysForStack.size}
+        noStacks={!stacksActive}
         onClose={() => setCtxMenu(null)}
         onStack={() => stackSelectionNow()}
         onOpen={() => {

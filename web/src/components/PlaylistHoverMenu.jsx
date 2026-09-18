@@ -110,7 +110,7 @@ export default function PlaylistHoverMenu({ mediaKey, placement = "right", onCre
                 <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: member ? 600 : 500, fontSize: 12 }} title={pl.name}>
                   {pl.name}
                 </span>
-                <span style={{ fontSize: 10, color: "var(--muted)", flex: "0 0 auto" }}>· {pl.count ?? (pl.items ? pl.items.length : 0)}</span>
+                <span style={{ fontSize: 10, color: "var(--muted)", flex: "0 0 auto" }}>{pl.count ?? (pl.items ? pl.items.length : 0)}</span>
               </button>
             );
           })
