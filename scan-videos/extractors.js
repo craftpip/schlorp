@@ -813,10 +813,25 @@ async function extractRedditMediaData(page, postId) {
     };
 
     const toAbsImg = (value) => toAbs(value);
-    const pushIfImage = (value, el) => {
+    // In page-wide fallback mode there is no post scoping, so be strict:
+    // preview.redd.it sidebar/ad thumbnails carry tiny width params
+    // (width=320 and below) — never the post's own media. Skipping them
+    // beats downloading ads when the targeted .json lookup came up empty.
+    const isTinyPreviewThumb = (url) => {
+      try {
+        const u = new URL(url);
+        if (!/preview\.redd\.it$/i.test(u.hostname)) return false;
+        const w = Number(u.searchParams.get("width") || 0);
+        return w > 0 && w <= 320;
+      } catch {
+        return false;
+      }
+    };
+    const pushIfImage = (value, el, strict) => {
       const url = toAbsImg(value);
       if (!url) return;
       if (/\.gif(\?|$)/i.test(url)) return; // gif via video flow
+      if (strict && isTinyPreviewThumb(url)) return;
       if (/\.(jpe?g|png|webp|avif|bmp)(\?|$)/i.test(url)) {
         if (el && isAvatarImg(el)) return;
         imageOut.add(url);
@@ -856,7 +871,7 @@ async function extractRedditMediaData(page, postId) {
       }
     };
 
-    const collectDom = (root) => {
+    const collectDom = (root, strict) => {
       // the scope element's own content-href (descendant query misses self)
       try {
         if (
@@ -867,7 +882,7 @@ async function extractRedditMediaData(page, postId) {
         ) {
           const href = root.getAttribute("content-href");
           pushIfVideo(href);
-          pushIfImage(href, null);
+          pushIfImage(href, null, strict);
         }
       } catch {}
       // shreddit-post content-href
@@ -878,7 +893,7 @@ async function extractRedditMediaData(page, postId) {
         } catch {}
         if (href) {
           pushIfVideo(href);
-          pushIfImage(href, null);
+          pushIfImage(href, null, strict);
         }
       });
 
@@ -896,7 +911,7 @@ async function extractRedditMediaData(page, postId) {
           href = el.getAttribute("href") || el.href || "";
         } catch {}
         pushIfVideo(href);
-        pushIfImage(href, el);
+        pushIfImage(href, el, strict);
       });
       qsa(root, 'img[src*="preview.redd.it"]').forEach((el) => {
         let src = "";
@@ -913,16 +928,16 @@ async function extractRedditMediaData(page, postId) {
         } catch {}
         if (!src) return;
         if (/i\.redd\.it\//i.test(src) || /preview\.redd\.it\//i.test(src) || /external-preview\.redd\.it\//i.test(src)) {
-          pushIfImage(src, el);
+          pushIfImage(src, el, strict);
         }
       });
     };
 
-    collectDom(scope || document);
+    collectDom(scope || document, !scope);
     // Scoped element found but yielded no media (unusual layout): fall back to
     // page-wide so we never do worse than the old unscoped behavior.
     const scopedOk = !scoped || out.size > 0 || imageOut.size > 0;
-    if (!scopedOk) collectDom(document);
+    if (!scopedOk) collectDom(document, true);
 
     // scripts regex
     const scripts = Array.from(document.querySelectorAll("script"));
@@ -944,14 +959,17 @@ async function extractRedditMediaData(page, postId) {
       }
     }
 
-    // deep scan window objects if any reddit state leaked
+    // deep scan window objects if any reddit state leaked.
+    // Page-global state is unscoped, so apply the strict tiny-thumb filter
+    // whenever the DOM pass wasn't post-scoped.
+    const stateStrict = !scopedOk;
     try {
       const seen = new WeakSet();
       const scan = (node, depth = 0) => {
         if (depth > 6 || node == null) return;
         if (typeof node === "string") {
           pushIfVideo(node);
-          pushIfImage(node);
+          pushIfImage(node, null, stateStrict);
           return;
         }
         if (typeof node !== "object") return;

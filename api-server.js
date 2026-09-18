@@ -117,6 +117,11 @@ let queueLoaded = false;
 let queuePaused = false;
 let cancelRequestedId = null;
 let gapWaitState = null;
+// True once the on-disk queue was read successfully (or confirmed absent on a
+// fresh install). While false, saveWebQueue() refuses to write so a failed
+// load (e.g. reading the file mid-write during a restart) can never clobber
+// good on-disk state with an empty in-memory queue.
+let queueStateValid = false;
 
 function browserIsAlive(browser) {
   if (!browser) return false;
@@ -138,10 +143,33 @@ function browserIsAlive(browser) {
 
 // --- Web queue persistence ---
 async function loadWebQueue() {
-  try {
-    const raw = await fs.readFile(webQueueFile, "utf8");
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") throw new Error("invalid");
+  // The file may be mid-write from a dying process during restarts — retry
+  // before giving up instead of falling back to an empty queue on one bad read.
+  let parsed = null;
+  let missing = false;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const raw = await fs.readFile(webQueueFile, "utf8");
+      parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object") throw new Error("invalid");
+      break;
+    } catch (e) {
+      parsed = null;
+      if (e.code === "ENOENT") {
+        missing = true;
+        break;
+      }
+      console.error(`[queue] load attempt ${attempt + 1} failed:`, e.message);
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+  if (missing || parsed) {
+    queueStateValid = true;
+  } else {
+    console.error("[queue] load failed after retries — keeping in-memory state, saves suspended");
+    queueLoaded = true;
+    return;
+  }
     webQueue.active = Array.isArray(parsed.active) ? parsed.active : [];
     webQueue.completed = Array.isArray(parsed.completed) ? parsed.completed : [];
     const g = parsed.gap && typeof parsed.gap === "object" ? parsed.gap : {};
@@ -158,10 +186,6 @@ async function loadWebQueue() {
       }
     }
     if (changed) await saveWebQueue();
-  } catch (e) {
-    if (e.code !== "ENOENT") console.error("[queue] load failed:", e.message);
-    webQueue = { active: [], completed: [], gap: { minMs: 0, maxMs: 0 } };
-  }
   // move any done/error mistakenly in active to completed (migration)
   const stillActive = [];
   for (const it of webQueue.active) {
@@ -187,6 +211,10 @@ async function withQueueFile(fn) {
   return result;
 }
 async function saveWebQueue() {
+  if (!queueStateValid) {
+    console.error("[queue] refusing to save — on-disk state was never read successfully");
+    return;
+  }
   const snapshot = JSON.stringify(webQueue, null, 2);
   const dir = path.dirname(webQueueFile);
   const task = async () => {

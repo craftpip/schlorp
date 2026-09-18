@@ -1622,7 +1622,11 @@ async function run(options = {}) {
           log(`Downloaded ${photoResults.length} photo(s) for ${targetUrl}`);
         }
       } finally {
-        await page.close().catch(() => {});
+        // Never let a hung CDP close wedge the queue: cap it at 15s.
+        await Promise.race([
+          page.close().catch(() => {}),
+          new Promise((r) => setTimeout(r, 15000)),
+        ]);
       }
     }
 

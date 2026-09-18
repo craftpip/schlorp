@@ -219,9 +219,9 @@ export default function Dashboard() {
                 <button type="submit" className="btn btn-primary btn-block btn-lg" disabled={busy}><i className="bi bi-plus-lg" /> Add to queue</button>
                 {queuedCount > 0 && (
                   paused ? (
-                    <button type="button" className="btn btn-primary btn-lg" disabled={pauseBusy} onClick={onTogglePause} title="Resume queue — start next download"><i className="bi bi-play-fill" /> Resume</button>
+                    <button type="button" className="btn btn-primary btn-lg" disabled={pauseBusy} onClick={onTogglePause} title="Resume queue — start next download" aria-label="Resume queue"><i className="bi bi-play-fill" /></button>
                   ) : (
-                    <button type="button" className="btn btn-outline-secondary btn-lg" disabled={pauseBusy} onClick={onTogglePause} title="Pause after current file finishes"><i className="bi bi-pause-fill" /> Pause</button>
+                    <button type="button" className="btn btn-outline-secondary btn-lg" disabled={pauseBusy} onClick={onTogglePause} title="Pause after current file finishes" aria-label="Pause queue"><i className="bi bi-pause-fill" /></button>
                   )
                 )}
               </div>

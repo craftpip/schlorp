@@ -55,7 +55,8 @@ function isAdVideoUrl(url) {
   }
   return (
     /(^|\.)adtng\.com$/i.test(host) ||
-    /(^|\.)trafficjunky\.(net|com|org)$/i.test(host)
+    /(^|\.)trafficjunky\.(net|com|org)$/i.test(host) ||
+    /(^|\.)rlcdn\.com$/i.test(host)
   );
 }
 

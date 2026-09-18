@@ -433,6 +433,31 @@ test("extractRedditMediaData: scopes to target post, skips avatars and other pos
   assert.deepEqual(imageUrls, ["https://i.redd.it/gallery1.jpg"]);
 });
 
+test("extractRedditMediaData: page-wide fallback drops tiny preview thumbs", async () => {
+  const fakeImg = (src) => ({
+    getAttribute: (n) => (n === "src" ? src : null),
+    src,
+    alt: "",
+    closest: () => null,
+    getBoundingClientRect: () => ({ width: 500, height: 500 }),
+  });
+  const page = makeFakePage({
+    url: "https://www.reddit.com/r/x/comments/abc/slug/",
+    document: fakeDocument({
+      all: {
+        "img[src]": [
+          fakeImg("https://preview.redd.it/ad.png?width=320&height=241&auto=webp&s=aaa"),
+          fakeImg("https://preview.redd.it/full.jpg?width=1080&auto=webp&s=bbb"),
+        ],
+      },
+    }),
+  });
+  // no postId -> unscoped fallback, strict tiny-thumb filter applies
+  const { imageUrls, scoped } = await extractRedditMediaData(page);
+  assert.equal(scoped, false);
+  assert.deepEqual(imageUrls, ["https://preview.redd.it/full.jpg?width=1080&auto=webp&s=bbb"]);
+});
+
 test("fetchRedgifsMediaUrls: reads hd/sd from api.redgifs.com response", async () => {
   const page = makeFakePage({
     url: "https://www.reddit.com/r/x/comments/abc/",
