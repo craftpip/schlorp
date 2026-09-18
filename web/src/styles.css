@@ -612,6 +612,15 @@
         touch-action:pan-x pan-y;
       }
 
+      /* Context-menu popup (plan 024): centered modal card + stack grid */
+      .media-ctx-card{
+        width:min(520px,100%);
+        max-height:calc(100vh - 48px);
+        animation:media-ctx-in .12s ease-out;
+      }
+      @keyframes media-ctx-in{from{opacity:0;transform:scale(.98)}to{opacity:1;transform:scale(1)}}
+      .media-ctx-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(72px,1fr));gap:8px;padding:8px;max-height:min(60vh,560px);overflow-y:auto}
+
       /* Mobile */
       @media(max-width:900px){
         .sidenav{position:fixed;inset:0 auto 0 0;z-index:40;transform:translateX(-100%);transition:transform .25s ease;width:280px;max-width:88vw}
@@ -635,6 +644,8 @@
       }
       @media(max-width:560px){
         .view-title{font-size:24px}
+        .media-ctx-card{width:min(94vw,520px);max-height:72vh}
+        .media-ctx-grid{grid-template-columns:repeat(auto-fill,minmax(56px,1fr))}
       }
       /* Mobile fit — single central place for all small-screen rules */
       @media(max-width:640px){
