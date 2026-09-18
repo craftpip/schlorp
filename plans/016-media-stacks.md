@@ -1,7 +1,7 @@
 # Plan 016 — Media Stacks: Grid-only Visual Pile + Explorer Selection + Drag-Into
 
 **Date:** 2026-09-15
-**Status:** Draft (not implemented)
+**Status:** Done
 **Scope:** `api-server.js` (stacks storage + API + delete prune), `web/src/views/Media.jsx` (grid pile rendering, multi-select, context menu, drag-into), new `web/src/store/StacksContext.jsx`, new `web/src/components/MediaContextMenu.jsx`. List view untouched. No download/queue/scan change. Legacy `index.html` untouched.
 **Depends on:** Plan 011 (flat/sort/`rel`), Plan 012 (grid tiles), Plan 014 (key-based selection — extended to multi-select in grid only).
 **User request:** Stacks group sibling files. Explorer selection: `Shift+click` range, `Ctrl+click` toggle. Select → right-click → Stack. Add to existing stack by drag. List view shows all files normally (no stack behavior). Grid view: members pile on top of each other; clicking/selecting any card spreads the stack to normal tiles.

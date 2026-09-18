@@ -1,7 +1,7 @@
 # Plan 012 — Media Page: Thumbnail (Tile) View
 
 **Date:** 2026-09-02
-**Status:** Draft
+**Status:** Done
 **Owner:** xdl web panel (React app at `/`, `web/`)
 **Scope:** `web/src/views/Media.jsx`, `api-server.js` (`GET /api/media`). Depends on Plan 011 (flatten/sort/filters/poster-hide/player) — assumes 011 is implemented.
 

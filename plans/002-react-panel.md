@@ -1,7 +1,7 @@
 # Plan 002 — React Panel Rebuild (WebSocket + Sequential Queue)
 
 **Date:** 2026-08-22
-**Status:** Planned
+**Status:** Done
 **Scope:** Recreate `index.html` panel in React. Backend: add WebSocket live updates. Queue: add → queued → processed one-by-one. Current site moves to `/legacy`; new React app serves at `/`. Visible queue = queued + running; done/failed move to separate Completed queue.
 
 ## Goal

@@ -1,7 +1,7 @@
 # Plan 011 — Media Page: Flatten, Sorting, Type Filters, Player Changes
 
 **Date:** 2026-09-02
-**Status:** Draft
+**Status:** Done
 **Owner:** xdl web panel (React app served at `/`, `web/`)
 **Scope:** `web/src/views/Media.jsx`, `web/src/components/FileViewer.jsx`, `api-server.js` (`GET /api/media`)
 

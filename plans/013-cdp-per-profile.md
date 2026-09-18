@@ -1,7 +1,7 @@
 # Plan 013 — Per-Profile Custom CDP Endpoint
 
 **Date:** 2026-09-03
-**Status:** Draft (plan only — no code yet)
+**Status:** Done
 **Scope:** Profiles/accounts → custom CDP URL per profile, live up/down status, used for downloads & collection crawls.
 **Owner:** xdl — `scan-videos/browser.js`, `scan-videos/config.js`, `api-server.js`, `web/src/views/Profiles.jsx` (+ Dashboard/Saved consumers)
 

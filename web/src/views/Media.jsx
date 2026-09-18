@@ -11,6 +11,50 @@ import AlertModal from "../components/AlertModal.jsx";
 import MediaContextMenu from "../components/MediaContextMenu.jsx";
 import { moveKeys, pileLandMember, planDetach, planJoin } from "../lib/stackDrag.js";
 
+// Each stack id gets a random color sampled from the theme's blue→purple→pink
+// family. The stop list spans 7 visually distinct variants of that family
+// (indigo → violet → purple → fuchsia → pink), all part of the app's Tailwind
+// palette — so any two stacks at least MIN_T_GAP apart along this path land on
+// clearly different colors. Random per stack; cached so colors stay stable
+// across renders. The render pass re-rolls any stack whose color lands too
+// close (along the gradient) to the stack shown beside it.
+const GRADIENT_STOPS_RGB = [
+  [79, 70, 229],   // indigo-600  #4f46e5 (accent-dark)
+  [99, 102, 241],  // indigo-500  #6366f1 (accent)
+  [139, 92, 246],  // violet-500  #8b5cf6 (accent-2)
+  [168, 85, 247],  // purple-500  #a855f7
+  [217, 70, 239],  // fuchsia-500 #d946ef
+  [236, 72, 153],  // pink-500    #ec4899
+  [244, 114, 182], // pink-400    #f472b6
+];
+const STACK_COLOR_MIN_T_GAP = 0.22;
+const stackColorCache = new Map(); // stackId → { color, t } (t: position along gradient)
+const sampleGradient = (t) => {
+  const u = t * (GRADIENT_STOPS_RGB.length - 1);
+  const seg = Math.min(Math.floor(u), GRADIENT_STOPS_RGB.length - 2);
+  const p = u - seg;
+  const [r1, g1, b1] = GRADIENT_STOPS_RGB[seg];
+  const [r2, g2, b2] = GRADIENT_STOPS_RGB[seg + 1];
+  const lerp = (a, b) => Math.round(a + (b - a) * p);
+  return `rgb(${lerp(r1, r2)},${lerp(g1, g2)},${lerp(b1, b2)})`;
+};
+const rollStackT = (avoidT) => {
+  for (let i = 0; i < 20; i++) {
+    const t = Math.random();
+    if (avoidT == null || Math.abs(t - avoidT) >= STACK_COLOR_MIN_T_GAP) return t;
+  }
+  return avoidT < 0.56 ? Math.min(avoidT + STACK_COLOR_MIN_T_GAP, 1) : Math.max(avoidT - STACK_COLOR_MIN_T_GAP, 0);
+};
+const stackColorFor = (stackId, avoidT, force = false) => {
+  let rec = stackColorCache.get(stackId);
+  if (!rec || force) {
+    const t = rollStackT(avoidT);
+    rec = { color: sampleGradient(t), t };
+    stackColorCache.set(stackId, rec);
+  }
+  return rec;
+};
+
 function fmtSize(bytes) {
   if (bytes == null) return "";
   const n = Number(bytes);
@@ -135,6 +179,10 @@ export default function Media() {
   const clampRatio = (r) => Math.min(2.2, Math.max(0.55, Number(r) || NaN));
   const GRID_GAP = 8;
   const GRID_TARGET_H = 240;
+  // Must match renderPile's PEEK (10): the closed pile shows a 10px strip of
+  // each under-card. The footprint collapse below uses it to rebuild the pile's
+  // exact PEEK offsets when the stack opens/closes.
+  const STACK_PEEK_PX = 10;
   useEffect(() => {
     if (!isGrid) return;
     const el = gridRef.current;
@@ -294,6 +342,13 @@ export default function Media() {
   const spreadFromRectRef = useRef(null);
   const userCloseRef = useRef(false);
   const animatedClosingSpreadRef = useRef(null);
+  // Safety net: clears leftover inline animation styles if a roll-out's
+  // transitionend never fires (hidden tab, interrupted transition) so the grid
+  // can't stay stuck in its collapsed layout.
+  const stackAnimTimerRef = useRef(null);
+  // transitionend handlers of the in-flight roll-out (keyed by element) so a
+  // fast open→close can't have a stale handler wipe the roll-in's styles.
+  const stackOpenCleanupsRef = useRef(new Map());
   // Per-stack rects kept alive until the pile reforms (used by roll-in).
   const rollRectsRef = useRef(null);
   // Per-member source rects captured from the pile's own peeked tiles at click
@@ -480,14 +535,35 @@ export default function Media() {
       const j = await r.json();
       if (!j.ok) throw new Error(j.error || "failed");
       const fresh = (j.items || []).filter((it) => it.dir || !isPosterFile(it.name));
+      const keyOf = (it) => (isFlat ? it.rel || it.name : it.name);
+      if (clear) {
+        setRatios({});
+        setImgErr({});
+        setThumbLoaded({});
+        setGifVideo({});
+      } else {
+        // Incremental refresh: mounted tiles keep their <img> src, so no new
+        // onLoad fires for them — wiping thumbnail state here would stick the
+        // spinner over already-loaded images forever. Prune only gone files.
+        const freshKeys = new Set(fresh.map(keyOf));
+        const pruneGone = (prev) => {
+          if (!prev || typeof prev !== "object") return prev;
+          let changed = false;
+          const next = {};
+          for (const k of Object.keys(prev)) {
+            if (freshKeys.has(k)) next[k] = prev[k];
+            else changed = true;
+          }
+          return changed ? next : prev;
+        };
+        setRatios(pruneGone);
+        setImgErr(pruneGone);
+        setThumbLoaded(pruneGone);
+        setGifVideo(pruneGone);
+      }
       setItems(fresh);
-      setRatios({});
-      setImgErr({});
-      setThumbLoaded({});
-      setGifVideo({});
       // Key-based restore: explicit pending key wins, then keep ?s if still present,
       // else select the first item (playlists first when in root, per user request).
-      const keyOf = (it) => (isFlat ? it.rel || it.name : it.name);
       const allKeys = new Set(fresh.map(keyOf));
       const isRootForSelect = !f && !activePlId;
       if (isRootForSelect) {
@@ -806,13 +882,13 @@ export default function Media() {
     // Piles ("media-tile-pile") are single cells: keyboard entering a pile
     // expands it with a SINGLE primary (first member) — never mass-selects.
     // Moving onto a file outside the spread pile collapses it again.
-    const collapseSpreadUnlessMember = (fid) => {
-      const spread = spreadStackIdRef.current;
-      if (!spread || !fid) return;
-      const st = (folderStacksRef.current || []).find((s) => s.id === spread);
-      const items = st && Array.isArray(st.items) ? st.items : [];
-      if (!items.includes(String(fid).split("/").pop())) setSpreadStackId(null);
-    };
+const collapseSpreadUnlessMember = (fid) => {
+        const spread = spreadStackIdRef.current;
+        if (!spread || !fid) return;
+        const st = (folderStacksRef.current || []).find((s) => s.id === spread);
+        const items = st && Array.isArray(st.items) ? st.items : [];
+        if (!items.includes(String(fid).split("/").pop())) closeSpread();
+      };
     // Keyboard motion is always single-select: primary + selKeys + anchor
     // move together so no stale multi-selection (ghost outlines) survives.
     const selectSingleKey = (k) => {
@@ -1485,6 +1561,7 @@ export default function Media() {
       </div>
     );
   };
+const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
   const renderTile = (it, fi, w, h, anim) => {
     const rk = rowKey(it);
     // A thumbnail URL that 404s (no poster sibling, no embedded cover art)
@@ -1498,9 +1575,11 @@ export default function Media() {
     const highlight = gridMulti && selKeys.size ? selKeys.has(rk) : isPrimary;
     const selected = isPrimary;
     const isDir = !!it.dir;
-    // Stack membership (gray) is independent of selection (accent): members
-    // of a stack always show the gray ring; selection overrides with accent.
+    // Stack membership ring is the stack's own gradient color (independent of
+    // selection): members of a stack always show their stack's ring; selection
+    // overrides with accent.
     const inStack = !isDir && Array.isArray(it.stacks) && it.stacks.length > 0;
+    const stackColor = inStack ? stackBorderColor((it.stacks || [])[0].id) : null;
     // `.gif` files that are actually MP4 bytes (mislabeled at download time,
     // e.g. reddit saves) fail in <img> — the server sniffs them as video/mp4.
     // Flip to a muted looping <video> on image error so they still preview.
@@ -1575,7 +1654,7 @@ export default function Media() {
           try { e.dataTransfer.setData("application/x-xdl-stack", JSON.stringify(carry)); } catch {}
         }}
         onDragEnd={() => { dragKeyRef.current = null; dragKeysRef.current = null; if (dropInfo) setDropInfo(null); }}
-        style={{ position: "relative", flex: isDir ? "0 0 auto" : "0 0 auto", width: w, height: h, overflow: (menuOpen || isDropTarget) ? "visible" : "hidden", zIndex: menuOpen ? 60 : "auto", borderRadius: 0, background: isDir ? "var(--surface-2)" : "var(--surface-2)", outline: highlight ? "4px solid var(--accent)" : (inStack ? "4px solid var(--muted)" : "none"), cursor: dragEnabled ? "grab" : "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, contentVisibility: menuOpen ? "visible" : "auto", containIntrinsicSize: `${w}px ${h}px`, animation: anim || undefined }}
+        style={{ position: "relative", flex: isDir ? "0 0 auto" : "0 0 auto", width: w, height: h, overflow: (menuOpen || isDropTarget) ? "visible" : "hidden", zIndex: menuOpen ? 60 : "auto", borderRadius: 0, background: isDir ? "var(--surface-2)" : "var(--surface-2)", outline: highlight ? "4px solid #fff" : (stackColor ? `3px solid ${stackColor}` : "none"), cursor: dragEnabled ? "grab" : "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, contentVisibility: menuOpen ? "visible" : "auto", containIntrinsicSize: `${w}px ${h}px`, animation: anim || undefined }}
       >
         {src ? (
           <span style={{ position: "relative", width: "100%", height: "100%", flex: 1, display: "block", background: "#000", minHeight: 0 }}>
@@ -1780,6 +1859,28 @@ export default function Media() {
     }
     return seq;
   }, [isGrid, gridW, filtered, inPlaylistView, spreadStackId, closingSpreadId, stacksMode, folderStacks]);
+  // Adjacency guarantee for stack border colors: side-by-side stacks must be
+  // distinguishable, so any stack whose cached color is too close (along the
+  // gradient) to the color of the stack rendered right beside it gets re-rolled.
+  // Consecutive members of the same stack share one color; a non-stack tile
+  // between two stacks breaks the adjacency (they are not side by side).
+  if (isGrid && gridVisible.length) {
+    let lastId = null;
+    let lastT = null;
+    for (const e of gridVisible) {
+      const id = e.kind === "pile" ? e.stackId : ((e.it.stacks || [])[0] || {}).id || null;
+      if (!id) { lastId = null; lastT = null; continue; }
+      if (lastId === id) continue;
+      const rec = stackColorCache.get(id);
+      if (rec && lastT != null && Math.abs(rec.t - lastT) < STACK_COLOR_MIN_T_GAP) {
+        stackColorFor(id, lastT, true);
+      } else if (!rec) {
+        stackColorFor(id, lastId != null ? lastT : null);
+      }
+      lastId = id;
+      lastT = stackColorCache.get(id).t;
+    }
+  }
   // Compute widths for gridVisible entries
   const gridVisibleWithWidths = useMemo(() => {
     if (!isGrid || !gridW) return [];
@@ -1842,91 +1943,107 @@ export default function Media() {
   stacksModeRef.current = stacksMode;
   const folderStacksRef = useRef(folderStacks);
   folderStacksRef.current = folderStacks;
-  // Pile-origin roll-out/roll-in: when a stack opens, each member card slides
-  // out FROM ITS OWN peeked slot inside the pile to its grid cell (FLIP).
-  // On close each card folds back to its own pile slot. Per-card rects prevent
-  // the stretch bug (no single-wide-rect scale) and z-index follows the pile's
-  // "one-under-another" stacking order: cover (visual idx 0) on top, each
-  // deeper card one step below (total - idx) — same ranking as renderPile's
-  // `zIndex: members.length - i`, so the under-card never pops above the cover.
-  // Runs ONLY for real spreadStackId changes driven by capturePileRect()
-  // (user clicks/keys), never on ?spread= restore or folder navigation
-  // (spreadFromRectRef stays null there) — those render statically.
+  // Pile-origin roll-out/roll-in. The user wants the stack's FOOTPRINT to be
+  // part of the animation: opening grows it (progressively pushing the grid
+  // items after the stack), closing shrinks it (pulling them back), while the
+  // member cards stay fully visible and slide between their closed pile slots
+  // and their grid cells — no fade in/out. The grid is `flex-wrap` so item
+  // margins are layout: animating each member's margin-left between the
+  // collapsed pile overlap (-(width + GRID_GAP - PEEK): right edges advance by
+  // exactly PEEK, matching renderPile) and its natural 0 makes the browser
+  // reflow following items every frame. Runs ONLY for real user-initiated
+  // opens/closes (spreadFromRectRef / closingSpreadId); ?spread= restore and
+  // folder navigation render statically.
   useLayoutEffect(() => {
     if (!closingSpreadId) animatedClosingSpreadRef.current = null;
     const container = gridRef.current;
     if (!container || !isGrid) return;
     const tiles = [...container.querySelectorAll('[data-testid="media-tile-file"]')];
-    // ROLL-OUT (open): each card flies from its own pile slot to its grid tile.
+    // ROLL-OUT (open): each card starts at its pile slot (negative marginLeft
+    // shrinks the laid-out footprint to pile size), then spreads to its grid
+    // cell as the margin animates to 0, growing the footprint and pushing the
+    // items after the stack.
     const from = spreadFromRectRef.current;
     if (from && spreadStackId === from.stackId) {
       spreadFromRectRef.current = null;
-      const { rects } = from;
-      const total = spreadVisualOrder.size || 1;
+      const order = spreadVisualOrder;
+      const total = order.size || 1;
+      const active = [];
       for (const el of tiles) {
         const key = el.getAttribute('data-filename');
-        if (!key || !spreadVisualOrder.has(key)) continue;
-        const idx = spreadVisualOrder.get(key);
-        const fr = rects.get(key);
-        if (!fr) continue;
-        const cur = el.getBoundingClientRect();
-        if (!cur.width || !cur.height) continue;
+        if (!key || !order.has(key)) continue;
+        const idx = order.get(key);
         // Pile stacking order: cover (idx 0) on top, each deeper card one step
         // below — same as renderPile's `zIndex: members.length - i`.
         el.style.zIndex = total - idx;
-        if (!idx) continue; // front cover already visible as the pile cover
-        const dx = fr.left - cur.left;
-        const dy = fr.top - cur.top;
-        if (dx === 0 && dy === 0) continue;
-        el.style.transformOrigin = 'top left';
-        el.style.transform = `translate(${dx}px, ${dy}px) scale(${fr.width / cur.width}, ${fr.height / cur.height})`;
-        el.style.transition = 'transform 0s, opacity 0s';
-        el.getBoundingClientRect();
-        el.style.transition = `transform .34s cubic-bezier(.22,.8,.36,1) ${idx * 45}ms, opacity .25s ease ${idx * 45}ms`;
-        el.style.transform = 'translate(0, 0) scale(1)';
-        el.style.opacity = '1';
-        const clean = (event) => {
-          if (event.target !== el || event.propertyName !== 'transform') return;
-          el.style.transition = ''; el.style.transform = ''; el.style.opacity = ''; el.style.transformOrigin = ''; el.style.zIndex = '';
-          el.removeEventListener('transitionend', clean);
-        };
-        el.addEventListener('transitionend', clean);
+        if (!idx) continue;
+        const w = el.getBoundingClientRect().width;
+        const shift = w > STACK_PEEK_PX ? w + GRID_GAP - STACK_PEEK_PX : 0;
+        if (!shift) continue;
+        active.push({ el, idx, shift });
+      }
+      if (active.length) {
+        for (const { el, shift } of active) {
+          el.style.transition = 'margin-left 0s';
+          el.style.marginLeft = `-${shift}px`;
+        }
+        void container.offsetWidth;
+        for (const { el, idx, shift } of active) {
+          el.style.transition = `margin-left .34s cubic-bezier(.22,.8,.36,1) ${idx * 45}ms`;
+          el.style.marginLeft = '';
+          const clean = (event) => {
+            if (event.target !== el || event.propertyName !== 'margin-left') return;
+            stackOpenCleanupsRef.current.delete(el);
+            el.style.transition = ''; el.style.marginLeft = ''; el.style.zIndex = '';
+            el.removeEventListener('transitionend', clean);
+          };
+          el.addEventListener('transitionend', clean);
+          stackOpenCleanupsRef.current.set(el, clean);
+        }
+        if (stackAnimTimerRef.current) clearTimeout(stackAnimTimerRef.current);
+        stackAnimTimerRef.current = setTimeout(() => {
+          for (const { el } of active) {
+            const clean = stackOpenCleanupsRef.current.get(el);
+            if (clean) el.removeEventListener('transitionend', clean);
+            stackOpenCleanupsRef.current.delete(el);
+            el.style.transition = ''; el.style.marginLeft = ''; el.style.zIndex = '';
+          }
+        }, 400 + (total - 2) * 45);
       }
       return;
     }
-    // ROLL-IN (close): each card folds back to its own pile slot. Only runs
-    // for user-initiated closes.
+    // ROLL-IN (close): margins animate 0 → -(width + GRID_GAP - PEEK), sliding
+    // each card back under its predecessor into its pile slot while the
+    // footprint shrinks and pulls following items along. Opacity stays 1 and
+    // the trailing swap to the static pile is visually identical to this end
+    // state, so the pile just "is there" when the closing window ends.
     if (closingSpreadId) {
       // The ?spread= cleanup rerenders the grid while this window is still
-      // open. Do not restart the same FLIP animation from the new DOM nodes.
+      // open. Do not restart the same roll-in from the new DOM nodes.
       if (animatedClosingSpreadRef.current === closingSpreadId) return;
       animatedClosingSpreadRef.current = closingSpreadId;
-      const rects = rollRectsRef.current && rollRectsRef.current.stackId === closingSpreadId ? rollRectsRef.current.rects : null;
-      const total = closingVisualOrder.size || 1;
+      // Drop any in-flight roll-out state: a fast open→close reuses the same
+      // DOM nodes, so detach the open's transitionend handlers and cancel its
+      // safety timer before driving the margins back in.
+      if (stackAnimTimerRef.current) { clearTimeout(stackAnimTimerRef.current); stackAnimTimerRef.current = null; }
+      for (const [el, clean] of stackOpenCleanupsRef.current) {
+        el.removeEventListener('transitionend', clean);
+      }
+      stackOpenCleanupsRef.current.clear();
+      const order = closingVisualOrder;
+      const total = order.size || 1;
       for (const el of tiles) {
         const key = el.getAttribute('data-filename');
-        if (!key || !closingVisualOrder.has(key)) continue;
-        const idx = closingVisualOrder.get(key);
-        const target = rects ? rects.get(key) : null;
-        if (!target) continue;
-        const cur = el.getBoundingClientRect();
-        if (!cur.width || !cur.height) continue;
-        // Keep the pile's stacking order while folding in.
+        if (!key || !order.has(key)) continue;
+        const idx = order.get(key);
         el.style.zIndex = total - idx;
-        if (!idx) continue; // front cover folds back to its own slot (already there)
-        const dx = target.left - cur.left;
-        const dy = target.top - cur.top;
-        el.style.transformOrigin = 'top left';
-        el.style.transition = 'transform 0s, opacity 0s';
-        el.style.transform = 'translate(0, 0) scale(1)';
-        el.style.opacity = '1';
-        el.getBoundingClientRect();
+        if (!idx) continue;
+        const w = el.getBoundingClientRect().width;
+        const shift = w > STACK_PEEK_PX ? w + GRID_GAP - STACK_PEEK_PX : 0;
+        if (!shift) continue;
         const rev = total - idx - 1;
-        el.style.transition = `transform .3s cubic-bezier(.4,0,.6,1) ${rev * 40}ms, opacity .28s ease ${rev * 40 + 120}ms`;
-        el.style.transform = `translate(${dx}px, ${dy}px) scale(${target.width / cur.width}, ${target.height / cur.height})`;
-        el.style.opacity = '0';
-        // These cards unmount when the closing window ends. Retain their
-        // folded state until then; clearing it first briefly reveals them.
+        el.style.transition = `margin-left .3s cubic-bezier(.4,0,.6,1) ${rev * 40}ms`;
+        el.style.marginLeft = `-${shift}px`;
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2079,6 +2196,8 @@ export default function Media() {
     const max = Math.max(gridW - GRID_GAP * 2, 80);
     if (memberW > max) memberW = max;
     const inSel = selKeys.size ? members.some((m) => selKeys.has(rowKey(m))) : false;
+    const stackColor = stackBorderColor(stackId);
+    const pileOutline = inSel ? "4px solid #fff" : `3px solid ${stackColor}`;
     const shift = Math.max(memberW - PEEK, 0);
     // Custom manual order: the whole pile drags as one block. Dropping onto
     // another pile inserts before/after it (by half); dropping files onto a
@@ -2119,10 +2238,10 @@ export default function Media() {
         }}
         onDragEnd={() => { dragKeysRef.current = null; dragKeyRef.current = null; if (dropInfo) setDropInfo(null); }}
         onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = "move"; e.currentTarget.style.outline = "3px solid var(--accent)"; }}
-        onDragLeave={(e) => { e.currentTarget.style.outline = inSel ? "4px solid var(--accent)" : "none"; }}
+        onDragLeave={(e) => { e.currentTarget.style.outline = pileOutline; }}
         onDrop={(e) => {
           e.preventDefault(); e.stopPropagation();
-          e.currentTarget.style.outline = inSel ? "4px solid var(--accent)" : "none";
+          e.currentTarget.style.outline = pileOutline;
           if (dragKeysRef.current && dragKeysRef.current.length) {
             // Reorder: drop the dragged pile block before/after this pile.
             const r = e.currentTarget.getBoundingClientRect();
@@ -2158,7 +2277,7 @@ export default function Media() {
           } catch {}
         }}
         title={isCustomReorder ? `${stackName} — ${count} files — drag to reorder` : `${stackName} — ${count} files`}
-        style={{ position: "relative", display: "flex", flexDirection: "row", alignItems: "stretch", width: memberW + PEEK * (members.length - 1), height: GRID_TARGET_H, flex: "0 0 auto", cursor: isCustomReorder ? "grab" : "pointer", outline: inSel ? "4px solid var(--accent)" : "none" }}
+        style={{ position: "relative", display: "flex", flexDirection: "row", alignItems: "stretch", width: memberW + PEEK * (members.length - 1), height: GRID_TARGET_H, flex: "0 0 auto", cursor: isCustomReorder ? "grab" : "pointer", outline: pileOutline }}
       >
         {pileDropSide && (
           <div style={{ position: "absolute", top: 0, bottom: 0, [pileDropSide]: -3, width: 4, borderRadius: 2, background: "var(--accent)", zIndex: 10, pointerEvents: "none" }} />

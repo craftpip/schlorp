@@ -1,7 +1,7 @@
 # Plan 010 — Reddit Saved + Post Download Support
 
 **Date:** 2026-08-25
-**Status:** Draft → In Progress
+**Status:** Done
 **Owner:** elk profile (`/data/account-elk`) already logged into reddit as `craftpip`
 **Trigger:** User added `https://www.reddit.com/user/craftpip/saved` → `folder: reddit`, `account: elk`, `schedule: manual` to `.saved-sync-state.json` and requested scraping + downloading reddit posts.
 
