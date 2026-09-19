@@ -612,6 +612,9 @@
         touch-action:pan-x pan-y;
       }
 
+      /* Type filter: icons hidden on desktop (text-only buttons) */
+      [data-testid="media-type-filter"] .media-type-icon{display:none}
+
       /* Context-menu popup (plan 024): centered modal card + stack grid */
       .media-ctx-card{
         width:min(520px,100%);
@@ -667,9 +670,11 @@
         .media-toolbar{gap:6px !important}
         .media-filter{flex:1 1 100% !important;max-width:none !important}
         .media-sticky{margin-left:0 !important;margin-right:0 !important}
-        /* Media list: Name + bookmark + Actions, Size/Time hidden */
+        /* Media list: Name + bookmark + Size + Actions, Time hidden */
         .media-lib-card .card-body{gap:0 8px !important}
-        .mrow .mcol-size,.mrow .mcol-time{display:none !important}
+        /* Media list view: full-bleed — override the generic card-body padding */
+        [data-testid="media-list-card"] .card-body{padding:0 !important}
+        .mrow .mcol-time{display:none !important}
         /* Media grid tiles: folder chips go full-width, no overflow */
         .media-grid-tiles [data-testid="media-tile-folder"]{width:100% !important}
         /* Saved + Profiles forms: fields share rows, wrap cleanly */
@@ -684,6 +689,10 @@
         .media-hint{display:none !important}
         /* Refresh + Flatten are icon-only on mobile */
         .media-btn-label{display:none !important}
+        /* Type filter: icon-only buttons on mobile */
+        [data-testid="media-type-filter"] .media-type-icon{display:inline-flex !important}
+        [data-testid="media-type-filter"] .media-type-label{display:none !important}
+        [data-testid="media-type-filter"] .btn{padding:0 8px}
         /* Media library: full-bleed on mobile (break out of shell gutters) */
         .media-page{margin-left:-12px !important;margin-right:-12px !important}
         .media-page-title{padding-left:12px !important;padding-right:12px !important}
@@ -717,6 +726,33 @@
         .btn-sm{padding:6px 10px !important;font-size:12px !important}
         .console{padding:12px !important;font-size:11px !important}
         .sidenav{width:300px !important;max-width:86vw !important}
+      }
+      @media(max-width:640px){
+        /* Decoy — compact on mobile, no more huge cards */
+        .decoy-shell{padding:16px 10px !important}
+        .decoy-pane{padding:0 !important;max-width:100% !important}
+        .decoy-header{margin-bottom:14px !important; gap:8px !important; padding-top:0 !important}
+        .decoy-nav{gap:12px !important; font-size:12px !important}
+        .decoy-card{padding:12px !important; border-radius:12px !important}
+        .decoy-add-form{gap:6px !important; margin-top:10px !important}
+        .decoy-add-input{font-size:16px !important; flex:1 1 100% !important}
+        .decoy-group-select{flex:1 1 100% !important; font-size:16px !important}
+        .decoy-add-btn{flex:1 1 100% !important; justify-content:center !important; padding:10px 14px !important}
+        .decoy-groups{flex-direction:column !important; align-items:stretch !important; gap:10px !important}
+        .decoy-group-chips{gap:6px !important}
+        .decoy-new-group{width:100% !important; margin-left:0 !important}
+        .decoy-new-group .form-control{flex:1 !important; width:auto !important; font-size:16px !important}
+        .decoy-group-card .card-body{padding:12px !important}
+        .decoy-row{padding:8px 10px !important; gap:6px !important}
+        .decoy-row span{font-size:13px !important}
+        .decoy-foot{padding:10px 12px !important}
+      }
+      @media(max-width:480px){
+        .decoy-shell{padding:12px 8px !important}
+        .decoy-header{margin-bottom:12px !important}
+        .decoy-nav{display:none !important}
+        .decoy-card{padding:10px !important}
+        .decoy-chip{font-size:11px !important; padding:4px 9px !important}
       }
       @media(max-width:360px){
         .sidenav{width:100vw !important;max-width:100vw !important}

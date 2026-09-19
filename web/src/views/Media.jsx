@@ -99,7 +99,7 @@ const catIcon = {
   audio: "bi-file-earmark-music",
   other: "bi-file-earmark",
 };
-const TYPE_CHIPS = [["all", "All"], ["photo", "Img"], ["video", "Vid"], ["gif", "GIF"]];
+const TYPE_CHIPS = [["all", "All", "bi-grid"], ["photo", "Img", "bi-image"], ["video", "Vid", "bi-camera-video"], ["gif", "GIF", "bi-filetype-gif"], ["stacks", "Stacks", "bi-stack"]];
 
 // Obfuscated URL params: `?f=` = base64url(folder), `?s=` = base64url(selKey).
 // Legacy plaintext `?folder=` / `?sel=` still read (old bookmarks) but never written.
@@ -259,10 +259,13 @@ export default function Media() {
   const [fMenuKey, setFMenuKey] = useState(null);
   const fHeldRef = useRef(false);
   const [hoveredPlId, setHoveredPlId] = useState(null);
+  const [hoveredFolderKey, setHoveredFolderKey] = useState(null);
+  const [folderDel, setFolderDel] = useState(null); // { name, phase: 1 | 2 } — double confirmation before deleting a folder
   const [promptState, setPromptState] = useState({ open: false, id: null, value: "" });
   const [confirmState, setConfirmState] = useState({ open: false, id: null, name: "" });
   const [alertState, setAlertState] = useState({ open: false, title: "", message: "" });
   const [deleteTarget, setDeleteTarget] = useState(null);
+  const [multiDeleteTarget, setMultiDeleteTarget] = useState(null);
   const [yArmKey, setYArmKey] = useState(null);
   const lastYRef = useRef(0);
   const yArmRef = useRef(null);
@@ -444,7 +447,11 @@ export default function Media() {
         const hit = hay.includes(term);
         if (isNeg ? hit : !hit) return false;
       }
-      if (type !== "all" && fileCategory(it.name) !== type) return false;
+      if (type === "stacks") {
+        if (!(Array.isArray(it.stacks) && it.stacks.length > 0)) return false;
+      } else if (type !== "all" && fileCategory(it.name) !== type) {
+        return false;
+      }
       return true;
     });
     if (sort === "custom") {
@@ -873,7 +880,7 @@ export default function Media() {
   }, [selectedIdx]);
 
   useEffect(() => {
-    if (viewerOpen || confirmState.open || promptState.open || alertState.open || !!deleteTarget) return;
+    if (viewerOpen || confirmState.open || promptState.open || alertState.open || !!deleteTarget || !!folderDel || !!multiDeleteTarget) return;
     const moveSelection = (delta, smooth = true) => {
       if (!allSelectable.length) return;
       const base = selectedIdx !== -1 ? selectedIdx : (delta > 0 ? -1 : 0);
@@ -1064,7 +1071,21 @@ const collapseSpreadUnlessMember = (fid) => {
       }
     };
     const onKey = (e) => {
-      if (confirmState.open || promptState.open || alertState.open || !!deleteTarget) return;
+      // Q closes any open popup/modal instead of navigating up.
+      if ((e.key || "").toLowerCase() === "q" && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        const typing = e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable);
+        if (!typing) {
+          if (showHelp) { e.preventDefault(); setShowHelp(false); return; }
+          if (ctxMenu) { e.preventDefault(); setCtxMenu(null); return; }
+          if (confirmState.open) { e.preventDefault(); setConfirmState({ open: false, id: null, name: "" }); return; }
+          if (promptState.open) { e.preventDefault(); setPromptState({ open: false, id: null, value: "" }); return; }
+          if (alertState.open) { e.preventDefault(); setAlertState({ open: false, title: "", message: "" }); return; }
+          if (deleteTarget) { e.preventDefault(); setDeleteTarget(null); return; }
+          if (multiDeleteTarget) { e.preventDefault(); setMultiDeleteTarget(null); return; }
+          if (folderDel) { e.preventDefault(); setFolderDel(null); return; }
+        }
+      }
+      if (confirmState.open || promptState.open || alertState.open || !!deleteTarget || !!folderDel || !!multiDeleteTarget) return;
       if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable) return;
       const k = e.key;
       const isUp = k === "ArrowUp" || k === "w" || k === "W";
@@ -1092,7 +1113,7 @@ const collapseSpreadUnlessMember = (fid) => {
         return;
       }
       if (lowK === "g" && !e.ctrlKey && !e.altKey && !e.metaKey) { e.preventDefault(); setParam("view", isGrid ? "list" : ""); }
-      else if (lowK === "j" && !e.ctrlKey && !e.altKey && !e.metaKey) { e.preventDefault(); setParam("flat", isFlat ? "" : "1"); }
+      else if (lowK === "j" && !e.ctrlKey && !e.altKey && !e.metaKey) { e.preventDefault(); if (isFlat) setParam("flat", ""); else setConfirmState({ open: true, id: "flatten:", name: "" }); }
       else if (lowK === "t" && !e.ctrlKey && !e.altKey && !e.metaKey) {
         e.preventDefault();
         const order = TYPE_CHIPS.map((c) => c[0]);
@@ -1287,7 +1308,7 @@ const collapseSpreadUnlessMember = (fid) => {
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewerOpen, allSelectable, selectedIdx, searchParams, showHelp, confirmState.open, promptState.open, alertState.open, deleteTarget]);
+  }, [viewerOpen, allSelectable, selectedIdx, searchParams, showHelp, confirmState.open, promptState.open, alertState.open, deleteTarget, folderDel, multiDeleteTarget]);
 
   // Hold-F: while F is held, keep the save popup open for the selected file;
   // letter toggles the first matching list, 1-9 toggles extras by number.
@@ -1301,7 +1322,7 @@ const collapseSpreadUnlessMember = (fid) => {
       return it;
     };
     const onKeyDown = (e) => {
-      if (viewerOpen || confirmState.open || promptState.open || alertState.open || !!deleteTarget) return;
+      if (viewerOpen || confirmState.open || promptState.open || alertState.open || !!deleteTarget || !!folderDel || !!multiDeleteTarget) return;
       if (isEditable(e.target)) return;
       if (e.ctrlKey || e.altKey || e.metaKey) return;
       const k = e.key;
@@ -1370,12 +1391,12 @@ const collapseSpreadUnlessMember = (fid) => {
       window.removeEventListener("blur", onBlur);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewerOpen, allSelectable, selectedIdx, playlists, confirmState.open, promptState.open, alertState.open, deleteTarget]);
+  }, [viewerOpen, allSelectable, selectedIdx, playlists, confirmState.open, promptState.open, alertState.open, deleteTarget, folderDel, multiDeleteTarget]);
 
   // Follow selection while F is held (arrow keys move the popup with it).
   useEffect(() => {
     if (!fHeldRef.current) return;
-    if (viewerOpen || confirmState.open || promptState.open || alertState.open || !!deleteTarget) {
+    if (viewerOpen || confirmState.open || promptState.open || alertState.open || !!deleteTarget || !!folderDel || !!multiDeleteTarget) {
       fHeldRef.current = false;
       setFMenuKey(null);
       return;
@@ -1397,6 +1418,7 @@ const collapseSpreadUnlessMember = (fid) => {
     const ns = new URLSearchParams(searchParams);
     ns.set("f", encB64(folder ? `${folder}/${name}` : name));
     ns.delete("folder");
+    ns.delete("flat");
     setSearchParams(ns);
   };
   const goUp = () => {
@@ -1408,6 +1430,7 @@ const collapseSpreadUnlessMember = (fid) => {
     const ns = new URLSearchParams(searchParams);
     if (nf) ns.set("f", encB64(nf)); else ns.delete("f");
     ns.delete("folder");
+    ns.delete("flat");
     pendingSelectRef.current = cameFrom;
     setSearchParams(ns);
   };
@@ -1416,6 +1439,7 @@ const collapseSpreadUnlessMember = (fid) => {
     const ns = new URLSearchParams(searchParams);
     ns.set("f", encB64(nf));
     ns.delete("folder");
+    ns.delete("flat");
     setSearchParams(ns);
   };
   const delFile = (it) => {
@@ -1426,6 +1450,31 @@ const collapseSpreadUnlessMember = (fid) => {
     if (!it) return;
     setDeleteTarget(null);
     await runDeleteItem(it);
+  };
+  const renameFolder = async (name, newName) => {
+    try {
+      const r = await fetch("/api/media/rename", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ folder, name, newName }) });
+      const j = await r.json().catch(() => ({}));
+      if (!j.ok) throw new Error(j.error || "rename failed");
+      setPromptState({ open: false, id: null, value: "" });
+      refresh();
+    } catch (e) {
+      setPromptState({ open: false, id: null, value: "" });
+      setAlertState({ open: true, title: "Rename failed", message: e.message || String(e) });
+    }
+  };
+  const confirmDeleteFolder = async () => {
+    const name = folderDel && folderDel.name;
+    setFolderDel(null);
+    if (!name) return;
+    try {
+      const r = await fetch("/api/media/folder/delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ folder, name }) });
+      const j = await r.json().catch(() => ({}));
+      if (!j.ok) throw new Error(j.error || "delete failed");
+      refresh();
+    } catch (e) {
+      setAlertState({ open: true, title: "Delete failed", message: e.message || String(e) });
+    }
   };
   const runDeleteItem = async (it) => {
     if (!it) return;
@@ -1555,11 +1604,17 @@ const collapseSpreadUnlessMember = (fid) => {
         data-selected={selected}
         onClick={() => tapItem(it)}
         onDoubleClick={() => openItem(it)}
+        onMouseEnter={() => setHoveredFolderKey(rowKey(it))}
+        onMouseLeave={() => setHoveredFolderKey((cur) => (cur === rowKey(it) ? null : cur))}
         title={`${displayName(it)} — click to select, double-click to open`}
-        style={{ width: FOLDER_CHIP_W, height: FOLDER_CHIP_H, flex: "0 0 auto", display: "flex", alignItems: "center", gap: 10, padding: "0 12px", overflow: "hidden", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)", outline: selected ? "4px solid #fff" : "none", cursor: "pointer" }}
+        style={{ width: FOLDER_CHIP_W, height: FOLDER_CHIP_H, flex: "0 0 auto", display: "flex", alignItems: "center", gap: 10, padding: "0 12px", overflow: "hidden", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)", outline: selected ? "4px solid #fff" : "none", cursor: "pointer", position: "relative" }}
       >
         <i className="bi bi-folder-fill" style={{ fontSize: 24, color: "#f59e0b", flex: "0 0 auto" }} />
-        <span style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{displayName(it)}</span>
+        <span style={{ flex: 1, fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{displayName(it)}</span>
+        <span className="playlist-chip-actions" style={{ display: "flex", gap: 2, position: "absolute", right: 4, top: "50%", transform: "translateY(-50%)", opacity: hoveredFolderKey === rowKey(it) || selected ? 1 : 0, transition: "opacity .15s", background: "var(--surface-2)", paddingLeft: 6 }}>
+          <button data-testid={`folder-chip-edit-${rowKey(it)}`} title="Rename" onClick={(e) => { e.stopPropagation(); setPromptState({ open: true, id: `folder:${it.name}`, value: it.name }); }} style={{ background: "none", border: 0, padding: 4, cursor: "pointer", color: "var(--muted)" }}><i className="bi bi-pencil" /></button>
+          <button data-testid={`folder-chip-delete-${rowKey(it)}`} title="Delete folder" onClick={(e) => { e.stopPropagation(); setFolderDel({ name: it.name, phase: 1 }); }} style={{ background: "none", border: 0, padding: 4, cursor: "pointer", color: "#f87171" }}><i className="bi bi-trash" /></button>
+        </span>
       </div>
     );
   };
@@ -2087,7 +2142,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spreadStackId, closingSpreadId, gridVisible]);
   // Toggle an entry (file tile or pile container) in/out of the selection —
-  // desktop Ctrl+click and the mobile two-finger tap both land here.
+  // desktop Ctrl+click lands here. The mobile two-finger tap uses shiftSelectTo.
   const toggleSelection = (entry) => {
     const k = entry.key;
     const isPile = entry.kind === "pile";
@@ -2103,6 +2158,30 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     const wantCtrlSpread = (isPile && !spreadStackId && !pilesLocked) ? entry.stackId : (spreadStackId || null);
     if (isPile && !spreadStackId && !pilesLocked) { capturePileRect(entry.stackId); setSpreadStackId(entry.stackId); }
     setSelectedKeyAndSpread(cellKeys[0], wantCtrlSpread);
+  };
+  // Two-finger tap on a tile extends the selection like desktop Shift+click:
+  // range-select from the anchor (or last selection, or the tapped tile when
+  // nothing was selected) to the tapped tile; the anchor stays at its start.
+  const shiftSelectTo = (entry) => {
+    const k = entry.key;
+    const isPile = entry.kind === "pile";
+    const cellKeys = isPile ? entry.members.map((m) => rowKey(m)) : [k];
+    let fromKey = anchorKey && selKeys.has(anchorKey) ? anchorKey : (selKey || "");
+    if (!fromKey) fromKey = cellKeys[0];
+    const fromIdx = gridKeys.indexOf(fromKey);
+    const toIdx = gridKeys.indexOf(k);
+    const lo = Math.min(fromIdx !== -1 ? fromIdx : toIdx, toIdx);
+    const hi = Math.max(fromIdx !== -1 ? fromIdx : toIdx, toIdx);
+    const range = new Set();
+    for (let i = lo; i <= hi; i++) {
+      const ve = gridVisible[i];
+      if (!ve) continue;
+      if (ve.kind === "pile") { for (const mk of ve.members.map((m) => rowKey(m))) range.add(mk); }
+      else range.add(ve.key);
+    }
+    setSelKeys(range);
+    setAnchorKey(fromKey);
+    setSelectedKey(cellKeys[0]);
   };
   // Grid click handler: Shift/Ctrl-aware multi-select (replaces tapItem for grid tiles).
   const gridClickHandler = (entry, e) => {
@@ -2189,8 +2268,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
   };
   const gridClickRef = useRef(gridClickHandler);
   gridClickRef.current = gridClickHandler;
-  // Multi-delete state (batch delete with confirm)
-  const [multiDeleteTarget, setMultiDeleteTarget] = useState(null);
+  // Multi-delete state (batch delete with confirm) — see declaration above.
   const confirmMultiDelete = async () => {
     const targets = multiDeleteTarget;
     setMultiDeleteTarget(null);
@@ -2516,7 +2594,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     filtered, spreadStackId, pilesLocked, folder, rowKey,
     nearestDropInfo, sameDropInfo, moveCustomKey, detachIfOutsideSpread,
     addStackItems, refreshStacksAndAnnotate, pileMemberKeys, openContextMenu,
-    setDropInfo, toggleSelection,
+    setDropInfo, toggleSelection, shiftSelectTo,
   };
   const touchTileFromTarget = (target) => {
     if (!target || !target.closest) return null;
@@ -2686,8 +2764,9 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
       return it ? { kind: "file", it, key: d.key } : null;
     };
     // Desktop single-file commit block, driven by the release point. A
-    // two-finger release with no motion is a TAP (plan 024): toggle the tile
-    // under the fingers in/out of selection instead of moving it.
+    // two-finger release with no motion is a TAP (plan 024): range-select from
+    // the anchor to the tile under the fingers (desktop Shift+click parity)
+    // instead of moving it.
     const finishDrag = () => {
       const L = touchLiveRef.current;
       const d = ctl.drag;
@@ -2700,7 +2779,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
       if (!d) return;
       if (!d.moved) {
         const entry = tapEntryFor(d);
-        if (entry) L.toggleSelection(entry);
+        if (entry) L.shiftSelectTo(entry);
         return;
       }
       if (!d.allowDrag) return;
@@ -2763,11 +2842,12 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [touchGate, filtered.length]);
 
-  // --- Two-finger tap toggling OUTSIDE the drag gate (plan 024) ---
+  // --- Two-finger tap range select OUTSIDE the drag gate (plan 024) ---
   // Passive listeners (never preventDefault): one-finger scroll and two-finger
   // pinch-zoom stay fully native. Two fingers down on a tile and up without
-  // moving past slop = toggle selection (desktop Ctrl+click parity). Runs only
-  // when the drag controller is off, so no sequence is double-handled.
+  // moving past slop = range-select from the anchor to the tapped tile
+  // (desktop Shift+click parity). Runs only when the drag controller is off,
+  // so no sequence is double-handled.
   const tapTwoRef = useRef({ mode: "idle", pending: null, ids: null, key: null, pile: false, sx: 0, sy: 0 });
   const tapGate = isGrid && !touchGate;
   const tapGateRef = useRef(tapGate);
@@ -2860,7 +2940,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         entry = { kind: "file", it, key: d.key };
       }
       try { if (navigator.vibrate) navigator.vibrate(20); } catch { /* no haptics */ }
-      L.toggleSelection(entry);
+      L.shiftSelectTo(entry);
     };
     const onTouchCancel = () => { if (tapGateRef.current) reset(); };
     grid.addEventListener("touchstart", onTouchStart, { passive: true });
@@ -2881,28 +2961,25 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     <div data-testid="media-page" className="media-page">
       <div className="media-page-title" style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
         <div data-testid="media-title" style={{ fontWeight: 700, fontSize: 14 }}><i className="bi bi-collection-play" style={{ marginRight: 8 }} /> Media library</div>
-        <span data-testid="media-item-count" className="badge text-bg-secondary">{items.length} items</span>
+        <span data-testid="media-item-count" className="badge text-bg-secondary">{inPlaylistView ? (playlistItemsForView ? playlistItemsForView.length : 0) : items.length} items</span>
         {loading && items.length > 0 && <span data-testid="media-updating" className="small text-muted"><i className="bi bi-arrow-clockwise" /> Updating…</span>}
         <span className="small text-muted media-hint" style={{ marginLeft: 2 }}>Click to select · double-click to open</span>
       </div>
       <div data-testid="media-sticky" className="media-sticky" style={{ position: "sticky", top: 0, zIndex: 100, margin: "0 -10px", paddingTop: 6, paddingLeft: 10, paddingRight: 10, paddingBottom: 10, borderRadius: "0 0 10px 10px", background: "color-mix(in srgb, var(--bg) 60%, transparent)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)", borderBottom: err ? "none" : "1px solid var(--border)", marginBottom: 12, boxShadow: "0 6px 12px -8px rgba(0,0,0,.4)" }}>
       <div data-testid="media-toolbar" className="media-toolbar" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <input data-testid="media-filter" className="form-control form-control-sm media-filter" style={{ maxWidth: 200, height: 31 }} placeholder="Filter files…" value={filter} onChange={(e) => setFilter(e.target.value)} />
-        <button data-testid="media-refresh" className="btn btn-sm btn-outline-secondary" style={{ height: 31, display: "inline-flex", alignItems: "center" }} onClick={refresh} disabled={loading} title="Refresh"><i className="bi bi-arrow-clockwise" /> <span className="media-btn-label">Refresh</span></button>
+        <button data-testid="media-refresh" className="btn btn-sm btn-outline-secondary" style={{ height: 31, display: "inline-flex", alignItems: "center" }} onClick={refresh} disabled={loading} title="Refresh"><i className="bi bi-arrow-clockwise" /></button>
           <div data-testid="media-type-filter" style={{ display: "inline-flex", alignItems: "center", gap: 2, border: "1px solid var(--border)", borderRadius: 8, padding: 2, background: "var(--surface-2)" }} title="Type filter — press t to cycle">
-            {TYPE_CHIPS.map(([v, label]) => (
-              <button key={v} data-testid={`media-type-${v}`} type="button" className={`btn btn-sm ${type === v ? "btn-primary" : "btn-outline-secondary"}`} style={{ height: 25, padding: "0 10px", fontSize: 11, display: "inline-flex", alignItems: "center", borderRadius: 6 }} onClick={() => setType(v)}>{label}</button>
+            {TYPE_CHIPS.map(([v, label, icon]) => (
+              <button key={v} data-testid={`media-type-${v}`} type="button" className={`btn btn-sm ${type === v ? "btn-primary" : "btn-outline-secondary"}`} style={{ height: 25, padding: "0 10px", fontSize: 11, display: "inline-flex", alignItems: "center", gap: 5, borderRadius: 6 }} onClick={() => setType(v)}><i className={`bi ${icon} media-type-icon`} style={{ fontSize: 12 }} /><span className="media-type-label">{label}</span></button>
             ))}
           </div>
-        <div data-testid="media-view-toggle" style={{ display: "inline-flex", alignItems: "center", gap: 2, border: "1px solid var(--border)", borderRadius: 8, padding: 2, background: "var(--surface-2)" }}>
-          <button data-testid="media-view-list" type="button" className={`btn btn-sm ${isGrid ? "btn-outline-secondary" : "btn-primary"}`} style={{ height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6 }} onClick={() => setParam("view", "list")} title="List view (g)"><i className="bi bi-list-ul" /></button>
-          <button data-testid="media-view-grid" type="button" className={`btn btn-sm ${isGrid ? "btn-primary" : "btn-outline-secondary"}`} style={{ height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6 }} onClick={() => setParam("view", "")} title="Grid view (g)"><i className="bi bi-grid-3x3-gap-fill" /></button>
-        </div>
-        <button data-testid="media-flatten" type="button" className={`btn btn-sm ${isFlat ? "btn-primary" : "btn-outline-secondary"}`} onClick={() => setParam("flat", isFlat ? "" : "1")} title="Flatten: list all files recursively under this folder (j)" style={{ height: 31, display: "inline-flex", alignItems: "center", gap: 5 }}><i className="bi bi-layers" /> <span className="media-btn-label">Flatten</span></button>
+        <button data-testid="media-flatten" type="button" className={`btn btn-sm ${isFlat ? "btn-primary" : "btn-outline-secondary"}`} onClick={() => { if (isFlat) setParam("flat", ""); else setConfirmState({ open: true, id: "flatten:", name: "" }); }} title="Flatten: list all files recursively under this folder (j)" style={{ height: 31, display: "inline-flex", alignItems: "center", gap: 5 }}><i className="bi bi-layers" /> <span className="media-btn-label">Flatten</span></button>
       </div>
 
-      <div data-testid="media-breadcrumbs" style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
-        <button data-testid="media-breadcrumb-root" className="btn btn-sm btn-outline-secondary" onClick={() => { const ns = new URLSearchParams(searchParams); ns.delete("f"); ns.delete("folder"); ns.delete("pl"); ns.delete("p"); setSearchParams(ns); }} disabled={!folder && !inPlaylistView}><i className="bi bi-house" /> Media</button>
+      <div data-testid="media-breadcrumbs" style={{ display: "flex", gap: 6, flexWrap: "wrap", rowGap: 6, alignItems: "center", marginTop: 8 }}>
+        <div data-testid="media-breadcrumb-path" style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "nowrap", minWidth: 0, overflow: "hidden", flex: "1 1 auto" }}>
+        <button data-testid="media-breadcrumb-root" className="btn btn-sm btn-outline-secondary" onClick={() => { const ns = new URLSearchParams(searchParams); ns.delete("f"); ns.delete("folder"); ns.delete("pl"); ns.delete("p"); ns.delete("flat"); setSearchParams(ns); }} disabled={!folder && !inPlaylistView}><i className="bi bi-house" /> Media</button>
         {!inPlaylistView && crumbs.map((c, i) => (
           <span key={i} data-testid={`media-breadcrumb-${c}`} style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ color: "var(--muted)" }}>/</span>
@@ -2912,7 +2989,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         {inPlaylistView && activePlaylist && (
           <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ color: "var(--muted)" }}>/</span>
-            <span className="btn btn-sm btn-primary" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><i className="bi bi-collection-play-fill" /> {activePlaylist.name} · {activePlaylist.count ?? (activePlaylist.items ? activePlaylist.items.length : 0)}</span>
+            <span className="btn btn-sm btn-primary" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><i className="bi bi-collection-play-fill" /> {activePlaylist.name}</span>
           </span>
         )}
         {inPlaylistView && playlistDetail && !activePlaylist && (
@@ -2922,7 +2999,13 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
           </span>
         )}
         {(folder || inPlaylistView) && <button data-testid="media-up" className="btn btn-sm btn-outline-secondary" onClick={goUp} style={{ marginLeft: 8 }}><i className="bi bi-arrow-90deg-up" /> Up</button>}
-        <span data-testid="media-sort-bar" title="Sort (same as list header)" style={{ display: "inline-flex", alignItems: "center", gap: 2, border: "1px solid var(--border)", borderRadius: 8, padding: 2, background: "var(--surface-2)", marginLeft: "auto" }}>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "nowrap", marginLeft: "auto" }}>
+        <div data-testid="media-view-toggle" style={{ display: "inline-flex", alignItems: "center", gap: 2, border: "1px solid var(--border)", borderRadius: 8, padding: 2, background: "var(--surface-2)" }}>
+          <button data-testid="media-view-list" type="button" className={`btn btn-sm ${isGrid ? "btn-outline-secondary" : "btn-primary"}`} style={{ height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6 }} onClick={() => setParam("view", "list")} title="List view (g)"><i className="bi bi-list-ul" /></button>
+          <button data-testid="media-view-grid" type="button" className={`btn btn-sm ${isGrid ? "btn-primary" : "btn-outline-secondary"}`} style={{ height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6 }} onClick={() => setParam("view", "")} title="Grid view (g)"><i className="bi bi-grid-3x3-gap-fill" /></button>
+        </div>
+        <span data-testid="media-sort-bar" title="Sort (same as list header)" style={{ display: "inline-flex", alignItems: "center", gap: 2, border: "1px solid var(--border)", borderRadius: 8, padding: 2, background: "var(--surface-2)" }}>
           {isGrid && !inPlaylistView && stacksActive && <button data-testid="media-stacks-toggle" type="button" className={`btn btn-sm ${stacksMode === "open" ? "btn-primary" : "btn-outline-secondary"}`} onClick={cycleStacksMode} title={stacksMode === "locked" ? "stacked & locked — piles never open on select or navigation" : stacksMode === "open" ? "unstacked — all stacks spread open; click to lock" : "stacked — piles open on select/navigate; click to unstack"} style={{ height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6 }}>
             <i className={`bi ${stacksMode === "locked" ? "bi-lock-fill" : stacksMode === "open" ? "bi-grid-3x3-gap-fill" : "bi-stack"}`} style={{ fontSize: 12 }} />
           </button>}
@@ -2931,6 +3014,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
           {sortBarBtn("size", "Size", "media-sortbar-size")}
           {sortBarBtn("time", "Time", "media-sortbar-time")}
         </span>
+        </div>
       </div>
       </div>
 
@@ -3137,8 +3221,12 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         const isPlItem = !!it._isPlaylistItem;
         const viewerSrc = isPlItem ? "/media/" + String(keyName).split("/").filter(Boolean).map(encodeURIComponent).join("/") : toMediaUrl(folder, keyName);
         const viewerFilePath = isPlItem ? String(keyName) : (folder ? `${folder}/${keyName}` : keyName);
-        // Quit keeps the selection (already synced while browsing) and never scrolls.
-        const handleClose = () => setViewerKey(null);
+        const handleClose = () => {
+          setViewerKey(null);
+          setTimeout(() => scrollSelectionIntoView(true), 0);
+          setTimeout(() => scrollSelectionIntoView(), 900);
+          setTimeout(() => scrollSelectionIntoView(), 1700);
+        };
         return (
           <div data-testid="media-viewer">
             <FileViewer
@@ -3160,14 +3248,19 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
       {showHelp && !viewerOpen && <ShortcutsHelp active="library" onClose={() => setShowHelp(false)} />}
       <PromptModal
         open={promptState.open}
-        title={promptState.id && String(promptState.id).startsWith("stack:") ? "Rename stack" : "Rename playlist"}
-        message={promptState.id && String(promptState.id).startsWith("stack:") ? `Enter a new name for "${folderStacks.find((s) => s.id === String(promptState.id).slice(6))?.name || ""}"` : `Enter new name for "${playlists.find((p) => p.id === promptState.id)?.name || ""}"`}
+        title={(() => { const i = String(promptState.id || ""); return i.startsWith("stack:") ? "Rename stack" : i.startsWith("folder:") ? "Rename folder" : "Rename playlist"; })()}
+        message={(() => { const i = String(promptState.id || ""); return i.startsWith("stack:") ? `Enter a new name for "${folderStacks.find((s) => s.id === i.slice(6))?.name || ""}"` : i.startsWith("folder:") ? `Enter a new name for "${i.slice(7)}"` : `Enter new name for "${playlists.find((p) => p.id === promptState.id)?.name || ""}"`; })()}
         defaultValue={promptState.value}
-        placeholder={promptState.id && String(promptState.id).startsWith("stack:") ? "Stack name" : "Playlist name"}
+        placeholder={(() => { const i = String(promptState.id || ""); return i.startsWith("stack:") ? "Stack name" : i.startsWith("folder:") ? "Folder name" : "Playlist name"; })()}
         onCancel={() => setPromptState({ open: false, id: null, value: "" })}
         onConfirm={async (v) => {
-          if (promptState.id && String(promptState.id).startsWith("stack:")) {
+          const i = String(promptState.id || "");
+          if (i.startsWith("stack:")) {
             await handleStackPromptConfirm(v);
+            return;
+          }
+          if (i.startsWith("folder:")) {
+            await renameFolder(i.slice(7), v);
             return;
           }
           try {
@@ -3180,12 +3273,17 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
       />
       <ConfirmModal
         open={confirmState.open}
-        title={String(confirmState.id || "").startsWith("stack:") ? "Unstack" : "Delete playlist"}
-        message={String(confirmState.id || "").startsWith("stack:") ? `Delete stack "${confirmState.name}"? Files stay in Media.` : `Delete playlist "${confirmState.name}"? Files stay in Media.`}
-        confirmLabel="Delete"
-        danger
+        title={String(confirmState.id || "").startsWith("flatten:") ? "Flatten folder" : String(confirmState.id || "").startsWith("stack:") ? "Unstack" : "Delete playlist"}
+        message={String(confirmState.id || "").startsWith("flatten:") ? "Flatten this view — all files from the subfolders are listed together in one flat view. This may take a moment on larger libraries." : String(confirmState.id || "").startsWith("stack:") ? `Delete stack "${confirmState.name}"? Files stay in Media.` : `Delete playlist "${confirmState.name}"? Files stay in Media.`}
+        confirmLabel={String(confirmState.id || "").startsWith("flatten:") ? "Flatten" : "Delete"}
+        danger={!String(confirmState.id || "").startsWith("flatten:")}
         onCancel={() => setConfirmState({ open: false, id: null, name: "" })}
         onConfirm={async () => {
+          if (String(confirmState.id || "").startsWith("flatten:")) {
+            setParam("flat", "1");
+            setConfirmState({ open: false, id: null, name: "" });
+            return;
+          }
           if (String(confirmState.id || "").startsWith("stack:")) {
             await handleStackDeleteConfirm();
             return;
@@ -3210,6 +3308,16 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
           if (!entry) return;
           if (entry.kind === "file" && entry.it) openItem(entry.it);
           else if (entry.kind === "pile" && entry.members && entry.members.length) openViewer(entry.members[0]);
+        }}
+        onOpenStack={(stackId) => {
+          const pile = gridVisibleRef.current.find((ve) => ve.kind === "pile" && ve.stackId === stackId);
+          if (pile) { capturePileRect(stackId); setSpreadStackId(stackId); return; }
+          const st = folderStacks.find((s) => s.id === stackId);
+          const members = st && Array.isArray(st.items) ? st.items : [];
+          for (const it of filtered) {
+            if (it.dir || it._isPlaylist) continue;
+            if (members.includes(String(rowKey(it)).split("/").pop())) { openItem(it); return; }
+          }
         }}
         onDelete={() => {
           const entry = ctxMenu && ctxMenu.entry;
@@ -3302,6 +3410,24 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         danger
         onCancel={() => setMultiDeleteTarget(null)}
         onConfirm={confirmMultiDelete}
+      />
+      <ConfirmModal
+        open={!!folderDel && folderDel.phase === 1}
+        title="Delete folder"
+        message={folderDel ? `Delete folder "${folderDel.name}"? All files inside it will be removed.` : ""}
+        confirmLabel="Delete"
+        danger
+        onCancel={() => setFolderDel(null)}
+        onConfirm={() => setFolderDel({ name: folderDel.name, phase: 2 })}
+      />
+      <ConfirmModal
+        open={!!folderDel && folderDel.phase === 2}
+        title="Are you really sure?"
+        message={folderDel ? `This permanently deletes "${folderDel.name}" and ALL files inside it. This cannot be undone.` : ""}
+        confirmLabel="Delete forever"
+        danger
+        onCancel={() => setFolderDel(null)}
+        onConfirm={confirmDeleteFolder}
       />
       </div>
     </div>

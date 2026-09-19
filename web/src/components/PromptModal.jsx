@@ -13,6 +13,10 @@ export default function PromptModal({ open, title = "Enter value", message, plac
     const t = setTimeout(() => inputRef.current?.focus(), 50);
     const onKey = (e) => {
       if (e.key === "Escape" && onCancel) onCancel();
+      if ((e.key || "").toLowerCase() === "q" && onCancel) {
+        const typing = e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable);
+        if (!typing) onCancel();
+      }
     };
     document.addEventListener("keydown", onKey);
     const prev = document.body.style.overflow;

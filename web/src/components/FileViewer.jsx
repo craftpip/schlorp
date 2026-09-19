@@ -404,7 +404,15 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const handleTouchStart = (e) => {
     const t = e.touches[0];
     if (!t) return;
-    touchRef.current = { startX: t.clientX, startY: t.clientY, startTime: videoRef.current?.currentTime || 0, isSeeking: false, isHorizontal: null, startPan: { ...pan }, lastDx: 0 };
+    touchRef.current = { startX: t.clientX, startY: t.clientY, startTime: videoRef.current?.currentTime || 0, isSeeking: false, isHorizontal: null, startPan: { ...pan }, lastDx: 0, pinchActive: false, wasMultiTouch: false };
+    if (e.touches.length > 1) {
+      touchRef.current.wasMultiTouch = true;
+      if (!showImage && wasPlayingRef.current && videoRef.current) {
+        wasPlayingRef.current = false;
+        videoRef.current.play().catch(() => {});
+      }
+      return;
+    }
     if (!showImage && videoRef.current) {
       wasPlayingRef.current = !videoRef.current.paused;
       if (wasPlayingRef.current) videoRef.current.pause();
@@ -415,6 +423,48 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     if (!t) return;
     const dx = t.clientX - touchRef.current.startX;
     const dy = t.clientY - touchRef.current.startY;
+    if (e.touches.length >= 2) {
+      e.preventDefault();
+      const a = e.touches[0], b = e.touches[1];
+      const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+      const midX = (a.clientX + b.clientX) / 2, midY = (a.clientY + b.clientY) / 2;
+      const pr = touchRef.current;
+      if (!pr.pinchActive) {
+        pr.pinchActive = true;
+        pr.pinchPrevDist = dist;
+        pr.pinchPrevZoom = zoom;
+        pr.pinchPrevPan = { ...pan };
+        pr.pinchPrevMid = { x: midX, y: midY };
+      }
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (rect) {
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const newZoom = Math.min(4, Math.max(1, pr.pinchPrevZoom * (dist / pr.pinchPrevDist)));
+        let nextPan = { x: 0, y: 0 };
+        if (newZoom === 1) {
+          setZoom(1);
+          setPan({ x: 0, y: 0 });
+          setOrigin("50% 50%");
+        } else {
+          const ratio = newZoom / pr.pinchPrevZoom;
+          const ax = pr.pinchPrevMid.x - cx;
+          const ay = pr.pinchPrevMid.y - cy;
+          nextPan = {
+            x: (midX - cx) - (ax - pr.pinchPrevPan.x) * ratio,
+            y: (midY - cy) - (ay - pr.pinchPrevPan.y) * ratio,
+          };
+          setZoom(newZoom);
+          setPan(nextPan);
+          setOrigin("50% 50%");
+        }
+        pr.pinchPrevZoom = newZoom;
+        pr.pinchPrevPan = nextPan;
+        pr.pinchPrevMid = { x: midX, y: midY };
+        pr.pinchPrevDist = dist;
+      }
+      return;
+    }
     if (zoom > 1) {
       setPan({ x: touchRef.current.startPan.x + dx, y: touchRef.current.startPan.y + dy });
       e.preventDefault();
@@ -422,15 +472,15 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     }
     if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 8 && videoRef.current) {
       if (seekFrames) {
-        // per-frame: 24px = 1 frame, step one frame at a time without skipping
-        const frames = Math.trunc(dx / 24);
-        const lastFrames = Math.trunc((touchRef.current.lastDx || 0) / 24);
+        // per-frame: 8px = 1 frame, step one frame at a time without skipping
+        const frames = Math.trunc(dx / 8);
+        const lastFrames = Math.trunc((touchRef.current.lastDx || 0) / 8);
         const deltaFrames = frames - lastFrames;
         if (deltaFrames !== 0) {
           const nt = Math.max(0, Math.min(duration || 1e9, videoRef.current.currentTime + deltaFrames * (1/30)));
           videoRef.current.currentTime = nt;
           setCurrent(nt);
-          touchRef.current.lastDx = dx - (dx % 24);
+          touchRef.current.lastDx = dx - (dx % 8);
         }
       } else {
         const delta = dx * 0.06;
@@ -446,15 +496,24 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const handleTouchEnd = (e) => {
     const t = e.changedTouches[0];
     if (!t) return;
-    const dx = t.clientX - touchRef.current.startX;
-    const dy = t.clientY - touchRef.current.startY;
+    const pr = touchRef.current;
+    const dx = t.clientX - pr.startX;
+    const dy = t.clientY - pr.startY;
     const isRandom = endModeRef.current === "random";
-    const wasNav = Math.abs(dy) > 25 && Math.abs(dy) > Math.abs(dx) && (isRandom ? total > 1 : ((dy < 0 && hasNext) || (dy > 0 && hasPrev)));
+    const wasNav = zoom === 1 && !pr.wasMultiTouch && Math.abs(dy) > 25 && Math.abs(dy) > Math.abs(dx) && (isRandom ? total > 1 : ((dy < 0 && hasNext) || (dy > 0 && hasPrev)));
     if (wasNav) {
       wasPlayingRef.current = false;
       if (dy < 0) dispatchNextRef.current();
       else if (dy > 0) dispatchPrevRef.current();
       return;
+    }
+    if (pr.wasMultiTouch && e.touches && e.touches.length === 1) {
+      const r = e.touches[0];
+      pr.startX = r.clientX;
+      pr.startY = r.clientY;
+      pr.startTime = videoRef.current?.currentTime || 0;
+      pr.startPan = { ...pan };
+      pr.lastDx = 0;
     }
     if (wasPlayingRef.current && videoRef.current && !showImage) {
       const v = videoRef.current;

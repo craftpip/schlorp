@@ -1144,6 +1144,54 @@ app.delete("/api/media", async (req, res) => {
     return res.status(500).json({ ok: false, error: error.message });
   }
 });
+// Folder rename (folder chips): moves a subfolder within the same parent.
+app.post("/api/media/rename", async (req, res) => {
+  try {
+    const folder = String(req.body?.folder || "").trim();
+    const name = String(req.body?.name || "").trim();
+    const newName = String(req.body?.newName || "").trim();
+    if (!name || !newName) return res.status(400).json({ ok: false, error: "name and newName required" });
+    if (name.includes("/") || name.includes("\\") || newName.includes("/") || newName.includes("\\")) return res.status(400).json({ ok: false, error: "invalid name" });
+    if (newName.length > 200) return res.status(400).json({ ok: false, error: "name too long" });
+    const dir = resolveMediaOutputDir(folder);
+    const fullPath = path.join(dir, name);
+    const newPath = path.join(dir, newName);
+    const rel = path.relative(mediaDir, fullPath);
+    if (rel.startsWith("..") || path.isAbsolute(rel)) return res.status(400).json({ ok: false, error: "invalid path" });
+    const rel2 = path.relative(mediaDir, newPath);
+    if (rel2.startsWith("..") || path.isAbsolute(rel2)) return res.status(400).json({ ok: false, error: "invalid path" });
+    const stat = await fs.stat(fullPath).catch(() => null);
+    if (!stat) return res.status(404).json({ ok: false, error: "not found" });
+    if (!stat.isDirectory()) return res.status(400).json({ ok: false, error: "not a folder" });
+    if (newName === name) return res.json({ ok: true });
+    const exists = await fs.stat(newPath).catch(() => null);
+    if (exists) return res.status(400).json({ ok: false, error: "a folder with that name already exists" });
+    await fs.rename(fullPath, newPath);
+    return res.json({ ok: true });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+// Folder delete (folder chips): recursively removes a subfolder.
+app.post("/api/media/folder/delete", async (req, res) => {
+  try {
+    const folder = String(req.body?.folder || "").trim();
+    const name = String(req.body?.name || "").trim();
+    if (!name) return res.status(400).json({ ok: false, error: "name required" });
+    if (name.includes("/") || name.includes("\\")) return res.status(400).json({ ok: false, error: "invalid name" });
+    const dir = resolveMediaOutputDir(folder);
+    const fullPath = path.join(dir, name);
+    const rel = path.relative(mediaDir, fullPath);
+    if (rel.startsWith("..") || path.isAbsolute(rel)) return res.status(400).json({ ok: false, error: "invalid path" });
+    const stat = await fs.stat(fullPath).catch(() => null);
+    if (!stat) return res.status(404).json({ ok: false, error: "not found" });
+    if (!stat.isDirectory()) return res.status(400).json({ ok: false, error: "not a folder" });
+    await fs.rm(fullPath, { recursive: true, force: true });
+    return res.json({ ok: true });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
 // --- Playlists (.playlists.json) ---
 const playlistsFile = path.join(rootDir, ".playlists.json");
 let playlistsChain = Promise.resolve();

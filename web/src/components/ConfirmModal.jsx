@@ -4,7 +4,8 @@ export default function ConfirmModal({ open, title = "Confirm", message, confirm
   useEffect(() => {
     if (!open) return;
     const onKey = (e) => {
-      if (e.key === "Escape" && onCancel && !singleButton) { e.stopPropagation(); e.preventDefault(); onCancel(); }
+      const k = (e.key || "").toLowerCase();
+      if ((k === "escape" || k === "q") && onCancel && !singleButton) { e.stopPropagation(); e.preventDefault(); onCancel(); }
       if (e.key === "Enter" && onConfirm) { e.stopPropagation(); e.preventDefault(); onConfirm(); }
     };
     document.addEventListener("keydown", onKey);

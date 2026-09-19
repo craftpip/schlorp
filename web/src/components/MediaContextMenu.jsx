@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 
-export default function MediaContextMenu({ menu, onClose, stacks, selCount, onStack, onOpen, onDelete, onAddToStack, onRename, onUnstack, onRemoveFromStack, noStacks }) {
+export default function MediaContextMenu({ menu, onClose, stacks, selCount, onStack, onOpen, onOpenStack, onDelete, onAddToStack, onRename, onUnstack, onRemoveFromStack, noStacks }) {
   // Scroll lock while the popup is open (same as ConfirmModal) so the grid
   // behind the backdrop doesn't scroll (plan 024).
   useEffect(() => {
@@ -39,14 +39,20 @@ export default function MediaContextMenu({ menu, onClose, stacks, selCount, onSt
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 4, fontSize: 13 }}>
           {!noStacks && <MenuItem data-testid="media-ctx-stack-create" label={`Stack ${fileCount} item${fileCount === 1 ? "" : "s"}`} icon="bi-layers" disabled={fileCount < 2} onClick={() => { onClose(); onStack(); }} />}
           {!noStacks && (own.length > 0 || rest.length > 0) && (
-            <div data-testid="media-ctx-stack-grid" className="media-ctx-grid">
+            <>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 8px 4px" }}>
+                <i className="bi bi-layers" style={{ fontSize: 11, color: "var(--muted)" }} />
+                <span style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em" }}>Stacks in this folder</span>
+              </div>
+              <div data-testid="media-ctx-stack-grid" className="media-ctx-grid">
               {own.map((s) => (
-                <StackCell key={s.id} s={s} member disabled={fileCount < 1} onClick={() => { onClose(); onAddToStack(s.id, s.name); }} />
+                <StackCell key={s.id} s={s} member disabled={fileCount < 1} onOpen={() => { onClose(); onOpenStack(s.id); }} onClick={() => { onClose(); onAddToStack(s.id, s.name); }} />
               ))}
               {rest.map((s) => (
-                <StackCell key={s.id} s={s} disabled={fileCount < 1} onClick={() => { onClose(); onAddToStack(s.id, s.name); }} />
+                <StackCell key={s.id} s={s} disabled={fileCount < 1} onOpen={() => { onClose(); onOpenStack(s.id); }} onClick={() => { onClose(); onAddToStack(s.id, s.name); }} />
               ))}
             </div>
+            </>
           )}
           {!noStacks && <Divider />}
           <MenuItem label="Open" icon="bi-box-arrow-up-right" onClick={() => { onClose(); onOpen(); }} />
@@ -91,7 +97,7 @@ function Divider() {
   return <div style={{ height: 1, background: "var(--border)", margin: "4px 6px" }} />;
 }
 
-function StackCell({ s, member, disabled, onClick }) {
+function StackCell({ s, member, disabled, onClick, onOpen }) {
   return (
     <div
       data-testid="media-ctx-add-stack"
@@ -112,6 +118,14 @@ function StackCell({ s, member, disabled, onClick }) {
       {member && (
         <span style={{ position: "absolute", top: 3, left: 3, fontSize: 11, lineHeight: 1, color: "#fff", background: "var(--accent)", padding: "3px 4px", borderRadius: 999, pointerEvents: "none" }}>✓</span>
       )}
+      <button
+        type="button"
+        data-testid="media-ctx-open-stack"
+        onClick={(e) => { e.stopPropagation(); if (onOpen) onOpen(); }}
+        style={{ position: "absolute", bottom: 3, left: 3, fontSize: 10, fontWeight: 700, lineHeight: 1, color: "#fff", background: "rgba(20,22,40,.72)", border: "1px solid rgba(255,255,255,.18)", padding: "3px 6px", borderRadius: 999, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 3 }}
+      >
+        <i className="bi bi-box-arrow-up-right" style={{ fontSize: 9 }} /> Open
+      </button>
     </div>
   );
 }

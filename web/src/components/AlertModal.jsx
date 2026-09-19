@@ -4,7 +4,7 @@ export default function AlertModal({ open, title = "Notice", message, buttonLabe
   useEffect(() => {
     if (!open) return;
     const onKey = (e) => {
-      if (e.key === "Escape" || e.key === "Enter") { e.stopPropagation(); e.preventDefault(); onClose && onClose(); }
+      if ((e.key === "Escape" || e.key === "Enter" || (e.key || "").toLowerCase() === "q")) { e.stopPropagation(); e.preventDefault(); onClose && onClose(); }
     };
     document.addEventListener("keydown", onKey);
     const prev = document.body.style.overflow;
