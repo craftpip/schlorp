@@ -7,6 +7,7 @@ const fs = require("fs/promises");
 const { run } = require("./scan-videos/index");
 const { buildBrowserFromLocalProfile } = require("./scan-videos/browser");
 const { scanSavedPage } = require("./scan-videos/scan-saved");
+const { sanitizeMoveKey, isInsideMedia, mediaRelOf, resolveMoveSource, findCompanionPosters } = require("./scan-videos/media-move");
 const { loadAppConfig, normalizeAccountName, resolveAccountConfig, resolveProfileConfig, getStateFilePath, normalizeCdpUrl } = require("./scan-videos/config");
 const { WebSocketServer } = require("ws");
 const http = require("http");
@@ -38,7 +39,7 @@ const app = express();
 const rootDir = __dirname;
 const mediaDir = path.join(rootDir, "media");
 const webDistDir = path.join(rootDir, "web", "dist");
-const landingDir = path.join(rootDir, "landing");
+const websiteDir = path.join(rootDir, "website");
 const port = Number(process.env.PORT) || 6767;
 const apiJobTimeoutMs = parsePositiveInt(process.env.API_JOB_TIMEOUT_MS, 1800000);
 const VNC_FLAG_PATH = process.env.VNC_FLAG || "/data/browser/.vnc-enabled";
@@ -577,13 +578,13 @@ function ensureQueueWorker() {
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: false }));
 
-// ---- Public: landing page (goofy) + SPA assets (must load before auth check) ----
+// ---- Public: website page (goofy) + SPA assets (must load before auth check) ----
 const fsSync = require("fs");
-app.use("/website", express.static(landingDir));
+app.use("/website", express.static(websiteDir));
 app.get("/website", (_req, res) => {
-  const idx = path.join(landingDir, "index.html");
+  const idx = path.join(websiteDir, "index.html");
   if (fsSync.existsSync(idx)) return res.sendFile(idx);
-  return res.status(404).send("landing not built");
+  return res.status(404).send("website not built");
 });
 app.use(express.static(webDistDir));
 app.get("/", (_req, res) => {
@@ -1188,6 +1189,144 @@ app.post("/api/media/folder/delete", async (req, res) => {
     if (!stat.isDirectory()) return res.status(400).json({ ok: false, error: "not a folder" });
     await fs.rm(fullPath, { recursive: true, force: true });
     return res.json({ ok: true });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+// File move (media grid "Move files", plan 026): moves files within media.
+// Best-effort sidecar cleanup mirrors DELETE /api/media above.
+async function cleanupMoveSidecar(oldRel, newRel) {
+  // Playlists — rewrite item keys oldRel -> newRel
+  try {
+    await withPlaylistFile(async () => {
+      const data = await loadPlaylistsRaw();
+      let mutated = false;
+      for (const pl of data.playlists) {
+        for (const it of pl.items) {
+          if (it.key === oldRel) {
+            it.key = newRel;
+            mutated = true;
+            pl.updatedAt = new Date().toISOString();
+          }
+        }
+      }
+      if (mutated) await savePlaylistsRaw(data);
+    });
+  } catch {}
+  // Mediadims — migrate the cached entry oldRel -> newRel
+  try {
+    const dims = await loadMediadims();
+    if (dims[oldRel]) {
+      dims[newRel] = dims[oldRel];
+      delete dims[oldRel];
+      await saveMediadims();
+    }
+  } catch {}
+  // Mediaorder — folder scopes are keyed by basename, flat scopes by the
+  // media-relative key: prune the basename from the source folder scope and
+  // oldRel from every flat scope; append the basename to the target folder
+  // scope and newRel to flat scopes that contained oldRel.
+  try {
+    const oldParent = path.posix.dirname(oldRel);
+    const oldFolder = oldParent === "." ? "" : oldParent;
+    const newParent = path.posix.dirname(newRel);
+    const newFolder = newParent === "." ? "" : newParent;
+    const oldBase = path.posix.basename(oldRel);
+    const newBase = path.posix.basename(newRel);
+    const scopes = await loadMediaorder();
+    let mutated = false;
+    const srcScope = mediaorderScope(oldFolder, false);
+    if (Array.isArray(scopes[srcScope]) && scopes[srcScope].includes(oldBase)) {
+      scopes[srcScope] = scopes[srcScope].filter((k) => k !== oldBase);
+      mutated = true;
+    }
+    const dstScope = mediaorderScope(newFolder, false);
+    if (!Array.isArray(scopes[dstScope])) scopes[dstScope] = [];
+    if (!scopes[dstScope].includes(newBase)) {
+      scopes[dstScope].push(newBase);
+      mutated = true;
+    }
+    for (const [scope, arr] of Object.entries(scopes)) {
+      if (!scope.startsWith("flat:") || !Array.isArray(arr) || !arr.includes(oldRel)) continue;
+      scopes[scope] = arr.filter((k) => k !== oldRel);
+      if (!scopes[scope].includes(newRel)) scopes[scope].push(newRel);
+      mutated = true;
+    }
+    if (mutated) await saveMediaorder();
+  } catch {}
+  // Stacks — strip the moved basename from any .xdlstack in the source
+  // folder and dissolve stacks left with <=1 member (delete-path logic).
+  try {
+    const dir = path.dirname(resolveMoveSource(oldRel, mediaDir));
+    const movedBase = path.posix.basename(oldRel);
+    const stackFiles = await readStacksInFolder(dir);
+    await withStacksFile(dir, async () => {
+      for (const s of stackFiles) {
+        if (!s.items.includes(movedBase)) continue;
+        const full = path.join(dir, s.id);
+        const data = parseStackFile(await fs.readFile(full, "utf8"));
+        data.items = data.items.filter((x) => x !== movedBase);
+        if (data.items.length <= 1) await fs.unlink(full).catch(() => {});
+        else await fs.writeFile(full, JSON.stringify(data, null, 2), "utf8");
+      }
+    });
+  } catch {}
+}
+app.post("/api/media/move", async (req, res) => {
+  try {
+    const folder = String(req.body?.folder || "").trim();
+    const target = String(req.body?.target || "").trim();
+    const names = Array.isArray(req.body?.names) ? req.body.names.map((n) => String(n).trim()).filter(Boolean) : [];
+    if (!names.length) return res.status(400).json({ ok: false, error: "names required" });
+    let targetDir;
+    try {
+      targetDir = resolveMediaOutputDir(target);
+    } catch (e) {
+      return res.status(400).json({ ok: false, error: e.message });
+    }
+
+    const results = [];
+    let moved = 0;
+    for (const raw of names) {
+      const key = sanitizeMoveKey(raw, folder);
+      if (!key) { results.push({ name: raw, moved: false, error: "invalid name" }); continue; }
+      const src = resolveMoveSource(key, mediaDir);
+      if (!isInsideMedia(src, mediaDir)) { results.push({ name: raw, moved: false, error: "invalid path" }); continue; }
+      const stat = await fs.stat(src).catch(() => null);
+      if (!stat || stat.isDirectory()) { results.push({ name: path.posix.basename(key), from: key, moved: false, error: "not found" }); continue; }
+      const base = path.basename(src);
+      const dest = path.join(targetDir, base);
+      if (src === dest) { results.push({ name: base, from: key, to: target, moved: false, error: "same folder" }); continue; }
+      if (await fs.stat(dest).catch(() => null)) { results.push({ name: base, from: key, to: target, moved: false, error: "target exists" }); continue; }
+      await fs.mkdir(targetDir, { recursive: true });
+      await fs.rename(src, dest);
+      moved++;
+      const newRel = mediaRelOf(dest, mediaDir);
+      const targetRel = target.replace(/\\/g, "/").replace(/^\/+/, "");
+      const entry = { name: base, from: key, to: target, moved: true };
+      // Companion poster/thumbnail (<stem>-poster.<img>) travels with the
+      // file: same skip-on-collision policy, sidecar cleanup per poster.
+      try {
+        const siblings = await fs.readdir(path.dirname(src));
+        const posters = findCompanionPosters(siblings, base);
+        if (posters.length) entry.posters = [];
+        for (const poster of posters) {
+          const pSrc = path.join(path.dirname(src), poster);
+          const pDest = path.join(targetDir, poster);
+          const pStat = await fs.stat(pSrc).catch(() => null);
+          if (!pStat || pStat.isDirectory()) { entry.posters.push({ name: poster, moved: false, error: "not found" }); continue; }
+          if (await fs.stat(pDest).catch(() => null)) { entry.posters.push({ name: poster, moved: false, error: "target exists" }); continue; }
+          await fs.rename(pSrc, pDest);
+          entry.posters.push({ name: poster, moved: true });
+          const oldPRel = path.posix.join(path.posix.dirname(key), poster);
+          const newPRel = targetRel ? `${targetRel}/${poster}` : poster;
+          try { await cleanupMoveSidecar(oldPRel, newPRel); } catch {}
+        }
+      } catch {}
+      results.push(entry);
+      try { await cleanupMoveSidecar(key, newRel); } catch {}
+    }
+    return res.json({ ok: true, moved, results });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message });
   }

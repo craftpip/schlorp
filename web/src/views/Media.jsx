@@ -9,6 +9,7 @@ import ConfirmModal from "../components/ConfirmModal.jsx";
 import PromptModal from "../components/PromptModal.jsx";
 import AlertModal from "../components/AlertModal.jsx";
 import MediaContextMenu from "../components/MediaContextMenu.jsx";
+import MoveDialog from "../components/MoveDialog.jsx";
 import { moveKeys, pileLandMember, planDetach, planJoin } from "../lib/stackDrag.js";
 
 // Each stack id gets a random color sampled from the theme's blue→purple→pink
@@ -176,6 +177,7 @@ export default function Media() {
   const [gifVideo, setGifVideo] = useState({});
   const [gridW, setGridW] = useState(0);
   const gridRef = useRef(null);
+  const filterInputRef = useRef(null);
   const clampRatio = (r) => Math.min(2.2, Math.max(0.55, Number(r) || NaN));
   const GRID_GAP = 8;
   const GRID_TARGET_H = 240;
@@ -1105,6 +1107,12 @@ const collapseSpreadUnlessMember = (fid) => {
         setAnchorKey(selKey || null);
         if (hadSpread) return;
       }
+      // 1 focuses the search / filter bar.
+      if (k === "1" && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
+        e.preventDefault();
+        if (filterInputRef.current) filterInputRef.current.focus();
+        return;
+      }
       // Grid: X cycles the stacks mode — stacked → open → locked (same as the
       // toolbar stacks-toggle button).
       if (isGrid && !inPlaylistView && lowK === "x" && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
@@ -1114,7 +1122,7 @@ const collapseSpreadUnlessMember = (fid) => {
       }
       if (lowK === "g" && !e.ctrlKey && !e.altKey && !e.metaKey) { e.preventDefault(); setParam("view", isGrid ? "list" : ""); }
       else if (lowK === "j" && !e.ctrlKey && !e.altKey && !e.metaKey) { e.preventDefault(); if (isFlat) setParam("flat", ""); else setConfirmState({ open: true, id: "flatten:", name: "" }); }
-      else if (lowK === "t" && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      else if (k === "2" && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
         e.preventDefault();
         const order = TYPE_CHIPS.map((c) => c[0]);
         const i = order.indexOf(type);
@@ -1263,13 +1271,14 @@ const collapseSpreadUnlessMember = (fid) => {
         e.preventDefault();
         moveSelectionPage(lowK === "w" ? -1 : 1, !e.repeat);
       }
-      else if (isGrid && !e.ctrlKey && !e.altKey && !e.metaKey && (lowK === "w" || lowK === "a" || lowK === "s" || lowK === "d" || lowK === "q")) {
+      else if (isGrid && !e.ctrlKey && !e.altKey && !e.metaKey && (lowK === "w" || lowK === "a" || lowK === "s" || lowK === "d" || lowK === "q"
+        || (!e.shiftKey && (k === "ArrowUp" || k === "ArrowLeft" || k === "ArrowDown" || k === "ArrowRight")))) {
         e.preventDefault();
         const glide = !e.repeat;
-        if (lowK === "w") moveSelectionSpatial("up", glide);
-        else if (lowK === "a") moveSelectionSpatial("left", glide);
-        else if (lowK === "s") moveSelectionSpatial("down", glide);
-        else if (lowK === "d") moveSelectionSpatial("right", glide);
+        if (lowK === "w" || k === "ArrowUp") moveSelectionSpatial("up", glide);
+        else if (lowK === "a" || k === "ArrowLeft") moveSelectionSpatial("left", glide);
+        else if (lowK === "s" || k === "ArrowDown") moveSelectionSpatial("down", glide);
+        else if (lowK === "d" || k === "ArrowRight") moveSelectionSpatial("right", glide);
         else goUp();
       }
       else if (isLeft) { e.preventDefault(); goUp(); }
@@ -2419,6 +2428,10 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
   // --- Context menu (grid only) ---
   const [ctxMenu, setCtxMenu] = useState(null); // { x, y, entry }
   const [ctxMenuStackId, setCtxMenuStackId] = useState(null);
+  // --- Move files dialog (plan 026): { files: string[] } rowKeys snapshot, null = closed
+  const [moveCtx, setMoveCtx] = useState(null);
+  useEffect(() => { setMoveCtx(null); }, [folder]);
+  useEffect(() => { if (ctxMenu) setMoveCtx(null); }, [ctxMenu]);
   const ctxRef = useRef(null);
   const openContextMenu = (e, entry) => {
     e.preventDefault();
@@ -2428,6 +2441,21 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     else if (entry.kind === "file") {
       const stacks = entry.it && entry.it.stacks;
       if (Array.isArray(stacks) && stacks.length) sid = stacks[0].id;
+    }
+    // Right-click / long-press on an unselected file joins the existing
+    // selection (any current multi-select is kept) so the menu acts on it.
+    if (entry.kind === "file" && entry.key) {
+      const already = (selKeys.size ? selKeys : selKey ? new Set([selKey]) : new Set()).has(entry.key);
+      if (!already) {
+        setSelKeys((prev) => {
+          const next = new Set(prev);
+          if (!prev.size && selKey) next.add(selKey);
+          next.add(entry.key);
+          return next;
+        });
+        setAnchorKey(entry.key);
+        setSelectedKey(entry.key);
+      }
     }
     setCtxMenu({ x: e.clientX, y: e.clientY, entry });
     setCtxMenuStackId(sid);
@@ -2957,6 +2985,48 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tapGate, filtered.length]);
 
+  // --- Move files (plan 026): same target resolution as Delete, but piles
+  // can never move (stack transfer out of scope) and an empty selection
+  // means nothing to move. Snapshot taken at menu click so a selection
+  // change while the dialog is open never shifts the target set.
+  const moveTargets = useMemo(() => {
+    const keys = [...selectedKeysForStack];
+    if (!keys.length && ctxMenu && ctxMenu.entry && ctxMenu.entry.kind === "file" && ctxMenu.entry.it) keys.push(rowKey(ctxMenu.entry.it));
+    return keys.filter((k) => {
+      const it = filtered.find((x) => rowKey(x) === k);
+      return it && !it.dir && !it._isPlaylistItem;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedKeysForStack, ctxMenu, filtered]);
+  const canMove = !(ctxMenu && ctxMenu.entry && ctxMenu.entry.kind === "pile") && moveTargets.length > 0;
+  const moveNames = useMemo(
+    () => (moveCtx ? moveCtx.files.map((k) => (isFlat ? k : String(k).split("/").pop())) : []),
+    [moveCtx, isFlat]
+  );
+  const handleMoveDone = async (j) => {
+    setMoveCtx(null);
+    setSelKeys(new Set());
+    setAnchorKey(null);
+    setSelectedKey("");
+    refresh();
+    try { await refreshStacksAndAnnotate(); } catch {}
+    const failed = j && Array.isArray(j.results) ? j.results.filter((r) => !r.moved) : [];
+    const posterSkipped = [];
+    for (const r of (j && Array.isArray(j.results) ? j.results : [])) {
+      for (const p of (r.posters || [])) {
+        if (!p.moved) posterSkipped.push(`${r.name} poster ${p.name}: ${p.error || "skipped"}`);
+      }
+    }
+    if (!j || j.ok === false) {
+      const first = failed[0];
+      setAlertState({ open: true, title: "Move failed", message: (first && (first.error || first.name)) || "move failed" });
+    } else if (failed.length) {
+      setAlertState({ open: true, title: "Move partially completed", message: failed.map((r) => `${r.name}: ${r.error || "skipped"}`).join("\n") });
+    } else if (posterSkipped.length) {
+      setAlertState({ open: true, title: "Moved, poster stayed behind", message: posterSkipped.join("\n") });
+    }
+  };
+
   return (
     <div data-testid="media-page" className="media-page">
       <div className="media-page-title" style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
@@ -2967,9 +3037,9 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
       </div>
       <div data-testid="media-sticky" className="media-sticky" style={{ position: "sticky", top: 0, zIndex: 100, margin: "0 -10px", paddingTop: 6, paddingLeft: 10, paddingRight: 10, paddingBottom: 10, borderRadius: "0 0 10px 10px", background: "color-mix(in srgb, var(--bg) 60%, transparent)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)", borderBottom: err ? "none" : "1px solid var(--border)", marginBottom: 12, boxShadow: "0 6px 12px -8px rgba(0,0,0,.4)" }}>
       <div data-testid="media-toolbar" className="media-toolbar" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <input data-testid="media-filter" className="form-control form-control-sm media-filter" style={{ maxWidth: 200, height: 31 }} placeholder="Filter files…" value={filter} onChange={(e) => setFilter(e.target.value)} />
+        <input data-testid="media-filter" ref={filterInputRef} className="form-control form-control-sm media-filter" style={{ maxWidth: 200, height: 31 }} placeholder="Filter files…" value={filter} onChange={(e) => setFilter(e.target.value)} onKeyDown={(e) => { if (e.key === "Escape") e.currentTarget.blur(); }} />
         <button data-testid="media-refresh" className="btn btn-sm btn-outline-secondary" style={{ height: 31, display: "inline-flex", alignItems: "center" }} onClick={refresh} disabled={loading} title="Refresh"><i className="bi bi-arrow-clockwise" /></button>
-          <div data-testid="media-type-filter" style={{ display: "inline-flex", alignItems: "center", gap: 2, border: "1px solid var(--border)", borderRadius: 8, padding: 2, background: "var(--surface-2)" }} title="Type filter — press t to cycle">
+          <div data-testid="media-type-filter" style={{ display: "inline-flex", alignItems: "center", gap: 2, border: "1px solid var(--border)", borderRadius: 8, padding: 2, background: "var(--surface-2)" }} title="Type filter — press 2 to cycle">
             {TYPE_CHIPS.map(([v, label, icon]) => (
               <button key={v} data-testid={`media-type-${v}`} type="button" className={`btn btn-sm ${type === v ? "btn-primary" : "btn-outline-secondary"}`} style={{ height: 25, padding: "0 10px", fontSize: 11, display: "inline-flex", alignItems: "center", gap: 5, borderRadius: 6 }} onClick={() => setType(v)}><i className={`bi ${icon} media-type-icon`} style={{ fontSize: 12 }} /><span className="media-type-label">{label}</span></button>
             ))}
@@ -3006,9 +3076,9 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
           <button data-testid="media-view-grid" type="button" className={`btn btn-sm ${isGrid ? "btn-primary" : "btn-outline-secondary"}`} style={{ height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6 }} onClick={() => setParam("view", "")} title="Grid view (g)"><i className="bi bi-grid-3x3-gap-fill" /></button>
         </div>
         <span data-testid="media-sort-bar" title="Sort (same as list header)" style={{ display: "inline-flex", alignItems: "center", gap: 2, border: "1px solid var(--border)", borderRadius: 8, padding: 2, background: "var(--surface-2)" }}>
-          {isGrid && !inPlaylistView && stacksActive && <button data-testid="media-stacks-toggle" type="button" className={`btn btn-sm ${stacksMode === "open" ? "btn-primary" : "btn-outline-secondary"}`} onClick={cycleStacksMode} title={stacksMode === "locked" ? "stacked & locked — piles never open on select or navigation" : stacksMode === "open" ? "unstacked — all stacks spread open; click to lock" : "stacked — piles open on select/navigate; click to unstack"} style={{ height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6 }}>
+          <button data-testid="media-stacks-toggle" type="button" disabled={!stacksActive} className={`btn btn-sm ${stacksMode === "open" ? "btn-primary" : "btn-outline-secondary"}`} onClick={cycleStacksMode} title={stacksMode === "locked" ? "stacked & locked — piles never open on select or navigation" : stacksMode === "open" ? "unstacked — all stacks spread open; click to lock" : "stacked — piles open on select/navigate; click to unstack"} style={{ height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6 }}>
             <i className={`bi ${stacksMode === "locked" ? "bi-lock-fill" : stacksMode === "open" ? "bi-grid-3x3-gap-fill" : "bi-stack"}`} style={{ fontSize: 12 }} />
-          </button>}
+          </button>
           {sortBarBtn("custom", "Gallery", "media-sortbar-custom")}
           {sortBarBtn("name", "Name", "media-sortbar-name")}
           {sortBarBtn("size", "Size", "media-sortbar-size")}
@@ -3303,6 +3373,8 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         noStacks={!stacksActive}
         onClose={() => setCtxMenu(null)}
         onStack={() => stackSelectionNow()}
+        onMove={() => setMoveCtx({ files: moveTargets })}
+        canMove={canMove}
         onOpen={() => {
           const entry = ctxMenu && ctxMenu.entry;
           if (!entry) return;
@@ -3382,6 +3454,14 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
           if (!keys.length) return;
           handleRemoveFromStack(id, keys);
         }}
+      />
+      <MoveDialog
+        key={moveCtx ? `${folder}::${moveCtx.files.join("\n")}` : "move-closed"}
+        open={!!moveCtx}
+        items={moveNames}
+        sourceFolder={folder}
+        onClose={() => setMoveCtx(null)}
+        onDone={handleMoveDone}
       />
       {yArmKey && !viewerOpen && (
         <div
