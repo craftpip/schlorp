@@ -1736,7 +1736,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         data-selected={selected}
         onClick={(e) => { if (!isDir && gridMulti) gridClickHandler({ kind: "file", it, key: rk }, e); else if (!isDir && isCoarsePointer()) openItem(it); else tapItem(it); }}
         onDoubleClick={() => openItem(it)}
-        onContextMenu={(e) => { if (gridMulti && !isDir) { e.preventDefault(); openContextMenu(e, { kind: "file", it, key: rk }); } }}
+        onContextMenu={(e) => { if (e.ctrlKey) { e.preventDefault(); toggleSelection({ kind: "file", it, key: rk }); return; } if (gridMulti && !isDir) { e.preventDefault(); openContextMenu(e, { kind: "file", it, key: rk }); } }}
         title={dragEnabled ? `${displayName(it)} — drag to reorder` : `${displayName(it)} — click to select, double-click to open`}
         draggable={dragEnabled || (gridMulti && !isDir)}
         onDragStart={(e) => {
@@ -2170,6 +2170,14 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     const cellKeys = isPile ? entry.members.map((m) => rowKey(m)) : [k];
     setSelKeys((prev) => {
       const next = new Set(prev);
+      // First Ctrl+click after a lone primary selection (e.g. restored from
+      // ?s= on reload, where selKeys starts empty): carry the primary file
+      // into the multi-set so it isn't dropped — standard OS behaviour.
+      // Only real file rows qualify (never folder/playlist keys).
+      if (!next.size && selKey && !cellKeys.includes(selKey)) {
+        const it = filtered.find((x) => !x.dir && rowKey(x) === selKey);
+        if (it) next.add(selKey);
+      }
       for (const ck of cellKeys) { if (next.has(ck)) next.delete(ck); else next.add(ck); }
       return next;
     });
@@ -2362,6 +2370,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         data-filename={stackId}
         data-selected={members.some((m) => selKey === rowKey(m))}
         onClick={(e) => gridClickHandler(entry, e)}
+        onContextMenu={(e) => { if (e.ctrlKey) { e.preventDefault(); toggleSelection(entry); } }}
         onDoubleClick={(e) => {
           // Double-click pile: spread it, select the first member only
           // (locked mode: never opens).
@@ -2601,6 +2610,23 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
   };
   const handleRemoveFromStack = async (stackId, keys) => {
     try {
+      // Custom-sort grid: place the removed file(s) right after the pile slot
+      // so the tile shows up next to the stack it left. moveKeys targets the
+      // pile's front member (remaining[0] once the removed keys are gone), so
+      // the tile lands exactly one slot after the pile cell. Filters off --
+      // same guard as the drag-drop reorder path (filtered would prune the
+      // saved order).
+      if (sort === "custom" && !inPlaylistView && !filtersActive && Array.isArray(keys) && keys.length) {
+        const members = pileMemberKeys(stackId);
+        const removed = keys.filter((k) => members.includes(k));
+        const remaining = members.filter((k) => !removed.includes(k));
+        const anchor = remaining.length ? remaining[0] : members[0];
+        if (anchor && removed.length) {
+          const vis = filtered.filter((it) => !it.dir).map((it) => rowKey(it));
+          const next = moveKeys(vis, removed, anchor, true);
+          if (next) saveCustomOrder(next);
+        }
+      }
       // Server dissolves stacks left with a lone file; sync clears dead spread.
       await removeStackItems(stackId, keys, folder);
       await refreshStacksAndAnnotate();
@@ -3137,6 +3163,9 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                 {(gridVisibleWithWidths.length > 0 || (gridVisibleWithWidths.length === 0 && filtered.length === 0 && (folder || playlists.length === 0))) && (
                   <div data-testid="media-grid-files" ref={gridFilesRef} style={{ display: "flex", flexWrap: "wrap", gap: GRID_GAP }}
                     onContextMenu={(e) => {
+                      // Ctrl+click (macOS right-click emulation) only toggles
+                      // selection — never opens the menu.
+                      if (e.ctrlKey) { e.preventDefault(); return; }
                       // Empty-area context menu: keep selection, allow stack actions
                       if (e.target && e.target.closest && e.target.closest('[data-testid="media-tile-file"], [data-testid="media-tile-pile"], [data-testid="media-tile-folder"]')) return;
                       e.preventDefault();
@@ -3203,10 +3232,10 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                       const pk = playlistKey(it);
                       const menuOpen = openMenuKey === ky || fMenuKey === ky;
                       const viaF = fMenuKey === ky;
-                      const isSel = selKey === ky;
+                      const isSel = selKey === ky || selKeys.has(ky);
                       const isBookmarked = bookmarkedKeys.has(pk);
                       return (
-                        <div key={ky} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={isSel} className="mrow" style={{ display: "grid", gridTemplateColumns: "subgrid", gridColumn: "1 / -1", gap: "0 10px", alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: isSel ? "rgba(99,102,241,0.14)" : "var(--surface)", cursor: "pointer", userSelect: "none" }} onClick={() => tapItem(it)} onDoubleClick={() => openItem(it)} title={displayName(it)}>
+                        <div key={ky} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={isSel} className="mrow" style={{ display: "grid", gridTemplateColumns: "subgrid", gridColumn: "1 / -1", gap: "0 10px", alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: isSel ? "rgba(99,102,241,0.14)" : "var(--surface)", cursor: "pointer", userSelect: "none" }} onClick={(e) => { if (e.ctrlKey || e.metaKey) toggleSelection({ kind: "file", it, key: ky }); else tapItem(it); }} onContextMenu={(e) => { if (e.ctrlKey) { e.preventDefault(); toggleSelection({ kind: "file", it, key: ky }); } }} onDoubleClick={() => openItem(it)} title={displayName(it)}>
                           <div style={{ position: "relative", display: "grid", placeItems: "center" }} onMouseEnter={() => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); setOpenMenuKey(ky); }} onMouseLeave={() => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); playlistMenuCloseTimer.current = setTimeout(() => setOpenMenuKey((cur) => cur === ky ? null : cur), 120); }}>
                             <button data-testid="media-row-playlist-btn" className="media-row-playlist-btn" type="button" onClick={(e) => { e.stopPropagation(); const coarse = isCoarsePointer(); if (coarse) setOpenMenuKey((cur) => cur === ky ? null : ky); else setOpenMenuKey(ky); }} style={{ width: 28, height: 28, padding: 0, borderRadius: 999, border: isBookmarked ? "1px solid rgba(99,102,241,.35)" : "1px solid var(--border)", background: menuOpen ? "rgba(99,102,241,.15)" : isBookmarked ? "rgba(99,102,241,.12)" : "var(--surface-2)", color: isBookmarked ? "#6366f1" : "var(--muted)", display: "grid", placeItems: "center", cursor: "pointer", opacity: 1 }}><i className={`bi ${isBookmarked ? "bi-bookmark-fill" : "bi-bookmark"}`} /></button>
                             {menuOpen && <div style={{ position: "absolute", top: 34, left: 0, zIndex: 90 }}><PlaylistHoverMenu mediaKey={pk} showIndex={viaF} /></div>}
@@ -3258,10 +3287,10 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                     const pk = !it.dir ? playlistKey(it) : null;
                     const menuOpen = openMenuKey === ky || fMenuKey === ky;
                     const viaF = fMenuKey === ky;
-                    const isSel = selKey === ky;
+                    const isSel = selKey === ky || selKeys.has(ky);
                     const isBookmarked = pk ? bookmarkedKeys.has(pk) : false;
                     return (
-                      <div key={isFlat ? it.rel || it.name : it.name} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={isSel} className={it.dir ? "mrow mrow-dir" : "mrow mrow-file"} style={{ display: "grid", gridTemplateColumns: "subgrid", gridColumn: "1 / -1", gap: "0 10px", alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: isSel ? "rgba(99,102,241,0.14)" : it.dir ? "var(--surface-2)" : "var(--surface)", cursor: "pointer", userSelect: "none" }} onClick={() => tapItem(it)} onDoubleClick={() => openItem(it)} title="Click to select, double-click to open">
+                      <div key={isFlat ? it.rel || it.name : it.name} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={isSel} className={it.dir ? "mrow mrow-dir" : "mrow mrow-file"} style={{ display: "grid", gridTemplateColumns: "subgrid", gridColumn: "1 / -1", gap: "0 10px", alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: isSel ? "rgba(99,102,241,0.14)" : it.dir ? "var(--surface-2)" : "var(--surface)", cursor: "pointer", userSelect: "none" }} onClick={(e) => { if (e.ctrlKey || e.metaKey) toggleSelection({ kind: "file", it, key: ky }); else tapItem(it); }} onContextMenu={(e) => { if (e.ctrlKey) { e.preventDefault(); toggleSelection({ kind: "file", it, key: ky }); } }} onDoubleClick={() => openItem(it)} title="Click to select, double-click to open">
                         {!it.dir && (
                           <div style={{ position: "relative", display: "grid", placeItems: "center" }} onMouseEnter={() => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); setOpenMenuKey(ky); }} onMouseLeave={() => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); playlistMenuCloseTimer.current = setTimeout(() => setOpenMenuKey((cur) => cur === ky ? null : cur), 120); }}>
                             <button data-testid="media-row-playlist-btn" className="media-row-playlist-btn" type="button" onClick={(e) => { e.stopPropagation(); const coarse = isCoarsePointer(); if (coarse) setOpenMenuKey((cur) => cur === ky ? null : ky); else setOpenMenuKey(ky); }} style={{ width: 28, height: 28, padding: 0, borderRadius: 999, border: isBookmarked ? "1px solid rgba(99,102,241,.35)" : "1px solid var(--border)", background: menuOpen ? "rgba(99,102,241,.15)" : isBookmarked ? "rgba(99,102,241,.12)" : "var(--surface-2)", color: isBookmarked ? "#6366f1" : "var(--muted)", display: "grid", placeItems: "center", cursor: "pointer", opacity: 1 }}><i className={`bi ${isBookmarked ? "bi-bookmark-fill" : "bi-bookmark"}`} /></button>

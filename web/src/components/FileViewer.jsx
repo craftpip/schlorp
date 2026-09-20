@@ -5,6 +5,24 @@ import { usePlaylists } from "../store/PlaylistsContext.jsx";
 import ConfirmModal from "./ConfirmModal.jsx";
 import AlertModal from "./AlertModal.jsx";
 
+const ROT_STORE_KEY = "xdl_viewer_rotations";
+function readFileRotation(fp) {
+  if (!fp) return 0;
+  try {
+    const map = JSON.parse(localStorage.getItem(ROT_STORE_KEY) || "{}");
+    const v = Number(map[fp]);
+    return v === 90 || v === 180 || v === 270 ? v : 0;
+  } catch { return 0; }
+}
+function saveFileRotation(fp, deg) {
+  if (!fp) return;
+  try {
+    const map = JSON.parse(localStorage.getItem(ROT_STORE_KEY) || "{}");
+    if (deg % 360 === 0) delete map[fp];
+    else map[fp] = deg;
+    localStorage.setItem(ROT_STORE_KEY, JSON.stringify(map));
+  } catch {}
+}
 function parseFolderBase(fp) {
   const raw = String(fp || "");
   const idx = raw.indexOf("/media/");
@@ -50,6 +68,8 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const [zoom, setZoom] = useState(1);
   const [origin, setOrigin] = useState("50% 50%");
   const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [rotate, setRotate] = useState(0);
+  const [stageSize, setStageSize] = useState({ w: 0, h: 0 });
   const [isFs, setIsFs] = useState(false);
   const dragRef = useRef({ dragging: false, startX: 0, startY: 0, origX: 0, origY: 0 });
   const wasPlayingRef = useRef(false);
@@ -117,6 +137,9 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const hasPrev = idx != null && idx > 0;
   const hasNext = idx != null && viewable && idx < viewable.length - 1;
   const total = viewable ? viewable.length : 0;
+  const transposed = rotate === 90 || rotate === 270;
+  const mediaW = transposed && stageSize.w && stageSize.h ? stageSize.h : "100%";
+  const mediaH = transposed && stageSize.w && stageSize.h ? stageSize.w : "100%";
 
   const stepRate = (delta) => {
     setRate((r) => Math.min(1, Math.max(0.1, Math.round((r + delta) * 10) / 10)));
@@ -134,7 +157,8 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   useEffect(() => { try { localStorage.setItem("xdl_viewer_rate", String(rate)); } catch {} }, [rate]);
   useEffect(() => { try { localStorage.setItem("xdl_viewer_seekFrames", seekFrames ? "1" : "0"); } catch {} }, [seekFrames]);
   useEffect(() => { try { localStorage.setItem("xdl_viewer_endMode", endMode); } catch {} }, [endMode]);
-  useEffect(() => { setZoom(1); setOrigin("50% 50%"); setPan({x:0,y:0}); setCurrent(0); setDuration(0); setGifAsVideo(false); setMediaReady(false); setYConfirm(false); lastYRef.current = 0; animRef.current = null; pendingSeekRef.current = null; if (yConfirmTimerRef.current) { clearTimeout(yConfirmTimerRef.current); yConfirmTimerRef.current = null; } setTimeout(() => videoRef.current?.focus(), 50); }, [loadedUrl]);
+  useEffect(() => { saveFileRotation(filePathEff, rotate); }, [rotate, filePathEff]);
+  useEffect(() => { setZoom(1); setOrigin("50% 50%"); setPan({x:0,y:0}); setRotate(readFileRotation(filePathEff)); setCurrent(0); setDuration(0); setGifAsVideo(false); setMediaReady(false); setYConfirm(false); lastYRef.current = 0; animRef.current = null; pendingSeekRef.current = null; if (yConfirmTimerRef.current) { clearTimeout(yConfirmTimerRef.current); yConfirmTimerRef.current = null; } setTimeout(() => videoRef.current?.focus(), 50); }, [loadedUrl, filePathEff]);
   // Drive the seekbar with requestAnimationFrame: read the video's live
   // currentTime every frame so the thumb glides instead of stepping with the
   // ~4/s timeupdate events. Any seek (keyboard, wheel, ±10s, track click, or
@@ -359,6 +383,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     setOrigin("50% 50%");
   };
   const resetZoom = () => { setZoom(1); setOrigin("50% 50%"); setPan({x:0,y:0}); };
+  const rotateFile = () => setRotate((r) => (r + 90) % 360);
   // React registers wheel listeners as passive, so preventDefault() inside
   // onWheel is ignored and the window scrolls during zoom. Drive zoom through
   // a native non-passive listener instead.
@@ -370,6 +395,19 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     const onWheelNative = (e) => { if (handleWheelRef.current) handleWheelRef.current(e); };
     el.addEventListener("wheel", onWheelNative, { passive: false });
     return () => el.removeEventListener("wheel", onWheelNative);
+  }, []);
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const update = () => { const r = el.getBoundingClientRect(); setStageSize({ w: r.width, h: r.height }); };
+    update();
+    if (typeof ResizeObserver !== "undefined") {
+      const ro = new ResizeObserver(update);
+      ro.observe(el);
+      return () => ro.disconnect();
+    }
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
   }, []);
   const handleMouseDown = (e) => {
     if (!showImage && videoRef.current) {
@@ -552,8 +590,10 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
         }
        } else if (e.key.toLowerCase() === "m" && !e.ctrlKey && !e.altKey && !e.metaKey) {
         if (e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA" && !e.target.isContentEditable) { e.preventDefault(); setMuted((v) => !v); }
-      } else if (e.key.toLowerCase() === "r" && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      } else if (e.key.toLowerCase() === "r" && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
         if (e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA" && !e.target.isContentEditable) { e.preventDefault(); cycleEndModeRef.current(); }
+      } else if (e.key.toLowerCase() === "r" && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        if (e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA" && !e.target.isContentEditable) { e.preventDefault(); rotateFile(); }
       } else if (e.key.toLowerCase() === "c" && !e.ctrlKey && !e.altKey && !e.metaKey) {
         if (e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA" && !e.target.isContentEditable) { e.preventDefault(); stepRate(-0.1); }
       } else if (e.key.toLowerCase() === "v" && !e.ctrlKey && !e.altKey && !e.metaKey) {
@@ -744,6 +784,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       const r = await fetch(`/api/media?folder=${encodeURIComponent(folder)}&name=${encodeURIComponent(base)}`, { method: "DELETE" });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j.error || "delete failed");
+      saveFileRotation(filePathEff, 0);
       // Parent owns viewer position (key-based, plan 014): it moves to the
       // neighbour (next ?? prev) and reloads without jumping to the top.
       // Fall back to local navigation only when no parent handler is wired.
@@ -860,7 +901,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
             </span>
           )}
           {loading ? null : showImage ? (
-            <img key={loadedUrl} ref={imgRef} src={loadedUrl} alt={titleEff} onContextMenu={(e) => e.preventDefault()} draggable={false} onLoad={() => setMediaReady(true)} onError={isGif ? () => setGifAsVideo(true) : () => setMediaReady(true)} style={{ width: "100%", height: "100%", objectFit: "contain", background: "#000", borderRadius: 0, opacity: mediaReady ? 1 : 0, transition: zoom===1 ? "opacity .45s ease, transform 0.15s" : "opacity .45s ease", transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: origin, WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none" }} />
+            <img key={loadedUrl} ref={imgRef} src={loadedUrl} alt={titleEff} onContextMenu={(e) => e.preventDefault()} draggable={false} onLoad={() => setMediaReady(true)} onError={isGif ? () => setGifAsVideo(true) : () => setMediaReady(true)} style={{ width: mediaW, height: mediaH, objectFit: "contain", background: "#000", borderRadius: 0, opacity: mediaReady ? 1 : 0, transition: zoom===1 ? "opacity .45s ease, transform 0.15s" : "opacity .45s ease", transform: `translate(${pan.x}px, ${pan.y}px) rotate(${rotate}deg) scale(${zoom})`, transformOrigin: origin, WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none" }} />
           ) : gifAsVideoEff ? (
             <video
               key={loadedUrl}
@@ -873,7 +914,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
               autoFocus
               onClick={(e)=> e.stopPropagation()}
               onContextMenu={(e) => e.preventDefault()}
-              style={{ width: "100%", height: "100%", background: "#000", display: "block", objectFit: "contain", opacity: mediaReady ? 1 : 0, transition: zoom===1 ? "opacity .45s ease, transform 0.15s" : "opacity .45s ease", transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: origin, WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none", outline: "none" }}
+              style={{ width: mediaW, height: mediaH, background: "#000", display: "block", objectFit: "contain", opacity: mediaReady ? 1 : 0, transition: zoom===1 ? "opacity .45s ease, transform 0.15s" : "opacity .45s ease", transform: `translate(${pan.x}px, ${pan.y}px) rotate(${rotate}deg) scale(${zoom})`, transformOrigin: origin, WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none", outline: "none" }}
               onTimeUpdate={(e)=> setCurrent(e.currentTarget.currentTime)}
               onLoadedMetadata={(e)=> setDuration(e.currentTarget.duration)}
               onLoadedData={() => setMediaReady(true)}
@@ -898,7 +939,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
               tabIndex={0}
               autoFocus
               onClick={(e)=> e.stopPropagation()}
-              style={{ width: "100%", height: "100%", background: "#000", display: "block", objectFit: "contain", opacity: mediaReady ? 1 : 0, transition: zoom===1 ? "opacity .45s ease, transform 0.15s" : "opacity .45s ease", transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: origin, WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none", outline: "none" }}
+              style={{ width: mediaW, height: mediaH, background: "#000", display: "block", objectFit: "contain", opacity: mediaReady ? 1 : 0, transition: zoom===1 ? "opacity .45s ease, transform 0.15s" : "opacity .45s ease", transform: `translate(${pan.x}px, ${pan.y}px) rotate(${rotate}deg) scale(${zoom})`, transformOrigin: origin, WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none", outline: "none" }}
               onTimeUpdate={(e)=> setCurrent(e.currentTarget.currentTime)}
               onLoadedMetadata={(e)=> setDuration(e.currentTarget.duration)}
               onLoadedData={() => setMediaReady(true)}
@@ -939,6 +980,9 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
               <button type="button" tabIndex={-1} onClick={() => setSeekFrames(true)} className={`btn btn-sm ${seekFrames ? "btn-primary" : "btn-outline-secondary"}`} style={{ padding: "2px 6px", fontSize: 11, minWidth: 32 }} title="Seek by 1 frame (~33ms)">1f</button>
             </div>
             <span style={{ flex: 1 }} />
+            {(isImage || isVideo || gifAsVideoEff) && (
+              <button type="button" tabIndex={-1} className="btn btn-sm btn-outline-secondary" onClick={rotateFile} title={`Rotate 90° (⇧R)` + (rotate ? ` · now ${rotate}°` : "")} style={{ padding: "4px 8px", fontSize: 11 }}><i className="bi bi-arrow-clockwise" /> Rotate</button>
+            )}
             <button type="button" tabIndex={-1} className="btn btn-sm" onClick={cycleEndMode} title={`End mode: ${endMode} (r)`} style={{ padding: "4px 6px", fontSize: 11, minWidth: 52, borderRadius: 6, border: "1px solid " + (endMode !== "none" ? "transparent" : "var(--border)"), background: endMode === "next" ? "#6366f1" : endMode === "repeat" ? "#10b981" : endMode === "random" ? "#8b5cf6" : "var(--surface-2)", color: endMode !== "none" ? "#fff" : "var(--muted)" }}>
               <i className={`bi ${endMode === "next" ? "bi-skip-forward-fill" : endMode === "repeat" ? "bi-repeat" : endMode === "random" ? "bi-shuffle" : "bi-arrow-repeat"}`} /> {endMode === "next" ? "Next" : endMode === "repeat" ? "Loop" : endMode === "random" ? "Shuffle" : "End"}
             </button>

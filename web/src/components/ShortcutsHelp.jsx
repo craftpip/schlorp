@@ -46,6 +46,7 @@ const VIEWER_SECTIONS = [
     { keys: ["c", "<"], desc: "Slower playback (−0.1×)" },
     { keys: ["v", ">"], desc: "Faster playback (+0.1×)" },
     { keys: ["hold ⇧"], desc: "Hold to pause video (resume on release)" },
+    { keys: ["⇧R"], desc: "Rotate 90° clockwise (persists per file)" },
   ] },
   { heading: "Saved & delete", rows: [
     { keys: ["hold F"], desc: "Keep save popup open for this file" },
