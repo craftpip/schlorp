@@ -1472,8 +1472,20 @@ const collapseSpreadUnlessMember = (fid) => {
       setAlertState({ open: true, title: "Rename failed", message: e.message || String(e) });
     }
   };
-  const confirmDeleteFolder = async () => {
-    const name = folderDel && folderDel.name;
+  const createFolder = async (name) => {
+    const v = String(name || "").trim();
+    setPromptState({ open: false, id: null, value: "" });
+    if (!v) return;
+    try {
+      const r = await fetch("/api/media/folder", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ folder, name: v }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || "create failed");
+      refresh();
+    } catch (e) {
+      setAlertState({ open: true, title: "Create folder failed", message: e.message || String(e) });
+    }
+  };
+  const confirmDeleteFolder = async () => {    const name = folderDel && folderDel.name;
     setFolderDel(null);
     if (!name) return;
     try {
@@ -3318,13 +3330,17 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
       {showHelp && !viewerOpen && <ShortcutsHelp active="library" onClose={() => setShowHelp(false)} />}
       <PromptModal
         open={promptState.open}
-        title={(() => { const i = String(promptState.id || ""); return i.startsWith("stack:") ? "Rename stack" : i.startsWith("folder:") ? "Rename folder" : "Rename playlist"; })()}
-        message={(() => { const i = String(promptState.id || ""); return i.startsWith("stack:") ? `Enter a new name for "${folderStacks.find((s) => s.id === i.slice(6))?.name || ""}"` : i.startsWith("folder:") ? `Enter a new name for "${i.slice(7)}"` : `Enter new name for "${playlists.find((p) => p.id === promptState.id)?.name || ""}"`; })()}
+        title={(() => { const i = String(promptState.id || ""); return i === "newfolder" ? "Create folder" : i.startsWith("stack:") ? "Rename stack" : i.startsWith("folder:") ? "Rename folder" : "Rename playlist"; })()}
+        message={(() => { const i = String(promptState.id || ""); return i === "newfolder" ? `Create a new folder inside "${folder || "Media"}"` : i.startsWith("stack:") ? `Enter a new name for "${folderStacks.find((s) => s.id === i.slice(6))?.name || ""}"` : i.startsWith("folder:") ? `Enter a new name for "${i.slice(7)}"` : `Enter new name for "${playlists.find((p) => p.id === promptState.id)?.name || ""}"`; })()}
         defaultValue={promptState.value}
-        placeholder={(() => { const i = String(promptState.id || ""); return i.startsWith("stack:") ? "Stack name" : i.startsWith("folder:") ? "Folder name" : "Playlist name"; })()}
+        placeholder={(() => { const i = String(promptState.id || ""); return i === "newfolder" ? "Folder name" : i.startsWith("stack:") ? "Stack name" : i.startsWith("folder:") ? "Folder name" : "Playlist name"; })()}
         onCancel={() => setPromptState({ open: false, id: null, value: "" })}
         onConfirm={async (v) => {
           const i = String(promptState.id || "");
+          if (i === "newfolder") {
+            await createFolder(v);
+            return;
+          }
           if (i.startsWith("stack:")) {
             await handleStackPromptConfirm(v);
             return;
@@ -3375,6 +3391,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         onStack={() => stackSelectionNow()}
         onMove={() => setMoveCtx({ files: moveTargets })}
         canMove={canMove}
+        onCreateFolder={() => setPromptState({ open: true, id: "newfolder", value: "" })}
         onOpen={() => {
           const entry = ctxMenu && ctxMenu.entry;
           if (!entry) return;

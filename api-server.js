@@ -1193,6 +1193,32 @@ app.post("/api/media/folder/delete", async (req, res) => {
     return res.status(500).json({ ok: false, error: error.message });
   }
 });
+// Folder create (media grid "Create folder"): creates a subfolder inside the
+// current folder. Single path segment only — no nesting in one call.
+app.post("/api/media/folder", async (req, res) => {
+  try {
+    const folder = String(req.body?.folder || "").trim();
+    const name = String(req.body?.name || "").trim();
+    if (!name) return res.status(400).json({ ok: false, error: "name required" });
+    if (name.includes("/") || name.includes("\\")) return res.status(400).json({ ok: false, error: "invalid name" });
+    if (name === "." || name === "..") return res.status(400).json({ ok: false, error: "invalid name" });
+    if (name.length > 200) return res.status(400).json({ ok: false, error: "name too long" });
+    const dir = resolveMediaOutputDir(folder);
+    const fullPath = path.join(dir, name);
+    const rel = path.relative(mediaDir, fullPath);
+    if (rel.startsWith("..") || path.isAbsolute(rel)) return res.status(400).json({ ok: false, error: "invalid path" });
+    try {
+      await fs.mkdir(fullPath);
+    } catch (e) {
+      if (e && e.code === "EEXIST") return res.status(400).json({ ok: false, error: "a folder with that name already exists" });
+      if (e && e.code === "ENOENT") return res.status(400).json({ ok: false, error: "parent folder not found" });
+      throw e;
+    }
+    return res.json({ ok: true });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
 // File move (media grid "Move files", plan 026): moves files within media.
 // Best-effort sidecar cleanup mirrors DELETE /api/media above.
 async function cleanupMoveSidecar(oldRel, newRel) {
