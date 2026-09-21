@@ -1,8 +1,8 @@
-# AGENTS.md — xdl / scan-videos Codebase Guide
+# AGENTS.md — schlorp / scan-videos Codebase Guide
 
 ## Project Overview
 
-**xdl** — Node.js CLI + API server that drives CloakBrowser (stealth Chromium via Puppeteer) to visit URLs and download video media from Instagram, xHamster, xVideos, Pornhub, and generic sites. Includes a Docker+VNC setup and an Instagram saved-collection sync daemon.
+**schlorp** — Node.js CLI + API server that drives CloakBrowser (stealth Chromium via Puppeteer) to visit URLs and download video media from Instagram, xHamster, xVideos, Pornhub, and generic sites. Includes a Docker+VNC setup and an Instagram saved-collection sync daemon.
 
 - **Runtime:** Node 18+ (Docker: `node:20-bookworm-slim`)
 - **Language:** JavaScript (CommonJS)
@@ -175,7 +175,7 @@ scan-videos/scan-saved.js    → { scanSavedPage({ browser, targetUrl, endUrls?,
 
 ## Docker
 
-- **docker-compose.yml** defines `app` (web API + VNC) — single service `xdl` (container_name `xdl`), network_mode `container:gluetun-nordvpn2`
+- **docker-compose.yml** defines `app` (web API + VNC) — single service `schlorp` (container_name `schlorp`), network_mode `container:gluetun-nordvpn2`
 - `app` internal: `6767` (API), `6777` (VNC), `6778` (noVNC) — forwards via `xdl-bridge` socat bridge (`6767:6767`, `6777:6777`, `6778:6778`); compat socat inside entrypoint keeps old `7866:3000`/`7906:7900` working
 - `gluetun-nordvpn2` no longer publishes host ports — all host publishing is via `xdl-bridge` (alpine/socat)
 - Volumes: `.` → `/app` (live code), `/mnt/media2t/downloads/studies/xdl` → `/app/media`, `browser-data` volume

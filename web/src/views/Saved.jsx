@@ -47,7 +47,12 @@ export default function Saved() {
   };
   const onCrawlAndDownload = async (idx) => {
     await onCrawl(idx);
-    await onDownload(idx);
+    let freshPending = null;
+    try {
+      const j = await fetch("/sync-config").then((x) => x.json());
+      if (j.ok) freshPending = j.queue?.pending || [];
+    } catch {}
+    await onDownload(idx, freshPending);
   };
   const load = async () => {
     try {
@@ -135,11 +140,12 @@ export default function Saved() {
     return s;
   };
   const navigate = useNavigate();
-  const onDownload = async (idx) => {
+  const onDownload = async (idx, pendingOverride) => {
     const l = lists[idx];
     const folder = l.folder || "";
     const listAccount = l.account || "default";
-    const pendingForFolder = pending.filter((p) => (p.folder || "") === folder);
+    const candidates = pendingOverride || pending;
+    const pendingForFolder = candidates.filter((p) => (p.folder || "") === folder);
     if (!pendingForFolder.length) { setMsg(`No pending for ${folder || "—"}`); return; }
     setBusyIdx(`dl-${idx}`);
     try {

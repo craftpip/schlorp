@@ -1,10 +1,10 @@
 const LIBRARY_SECTIONS = [
   { heading: "Move around", rows: [
-    { keys: ["↑", "w"], desc: "Move selection up" },
-    { keys: ["↓", "s"], desc: "Move selection down" },
+    { keys: ["↑", "w"], desc: "Move selection up (list view)" },
+    { keys: ["↓", "s"], desc: "Move selection down (list view)" },
     { keys: ["←", "a"], desc: "Go up one folder (list view)" },
     { keys: ["→", "d", "Enter", "Space"], desc: "Open selected folder / file (list view)" },
-    { keys: ["w", "a", "s", "d"], desc: "Grid view: nearest item up / left / down / right" },
+    { keys: ["↑", "↓", "←", "→", "w", "a", "s", "d"], desc: "Grid view: nearest item up / left / down / right" },
     { keys: ["Shift", "W", "A", "S", "D"], desc: "Grid view: move selected file (custom order; onto a pile joins it)" },
     { keys: ["Ctrl", "W", "S"], desc: "Grid view: page up / down (Ctrl+W closes the tab instead)" },
     { keys: ["Space", "Enter"], desc: "Grid view: open selected item" },
@@ -14,7 +14,7 @@ const LIBRARY_SECTIONS = [
   { heading: "Sort & filter", rows: [
     { keys: ["g"], desc: "Toggle grid / list view" },
     { keys: ["j"], desc: "Toggle flatten (list all files recursively)" },
-    { keys: ["t"], desc: "Cycle type filter (All → Img → Vid → GIF)" },
+    { keys: ["2"], desc: "Cycle type filter (All → Img → Vid → GIF)" },
     { keys: ["Shift", "1–3"], desc: "Toggle sort Name / Size / Time" },
   ] },
   { heading: "Saved lists", rows: [

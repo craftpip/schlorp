@@ -1,8 +1,8 @@
 services:
   app:
     build: .
-    image: xdl-app-image:local
-    container_name: xdl
+    image: schlorp-app-image:local
+    container_name: schlorp
     ports:
       - "6767:6767"
       - "6777:6777"

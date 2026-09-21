@@ -12,6 +12,16 @@ import MediaContextMenu from "../components/MediaContextMenu.jsx";
 import MoveDialog from "../components/MoveDialog.jsx";
 import { moveKeys, pileLandMember, planDetach, planJoin } from "../lib/stackDrag.js";
 
+const ROT_STORE_KEY = "xdl_viewer_rotations";
+function readMediaRotation(fp) {
+  if (!fp) return 0;
+  try {
+    const map = JSON.parse(localStorage.getItem(ROT_STORE_KEY) || "{}");
+    const v = Number(map[fp]);
+    return v === 90 || v === 180 || v === 270 ? v : 0;
+  } catch { return 0; }
+}
+
 // Each stack id gets a random color sampled from the theme's blue→purple→pink
 // family. The stop list spans 7 visually distinct variants of that family
 // (indigo → violet → purple → fuchsia → pink), all part of the app's Tailwind
@@ -179,6 +189,28 @@ export default function Media() {
   const gridRef = useRef(null);
   const filterInputRef = useRef(null);
   const clampRatio = (r) => Math.min(2.2, Math.max(0.55, Number(r) || NaN));
+  // Rotation-aware tile sizing: a 90/270° rotated file displays transposed,
+  // so its tile ratio is inverted (portrait poster -> landscape tile).
+  // Bumped when the viewer saves a rotation (viewer close) or another tab
+  // writes the rotation map, so width memos recompute.
+  const [rotVersion, setRotVersion] = useState(0);
+  useEffect(() => {
+    const bump = () => setRotVersion((v) => v + 1);
+    window.addEventListener("storage", bump);
+    return () => window.removeEventListener("storage", bump);
+  }, []);
+  useEffect(() => { setRotVersion((v) => v + 1); }, [viewerKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const tileRotFor = (it, key) => {
+    const rk = it && it._isPlaylistItem ? key : (folder ? `${folder}/${key}` : key);
+    return readMediaRotation(rk);
+  };
+  const effRatioFor = (it, key) => {
+    void rotVersion;
+    const raw = parseFloat(ratios[key]) || it.ratio || 1;
+    const rot = tileRotFor(it, key);
+    const transposed = rot === 90 || rot === 270;
+    return clampRatio(transposed ? 1 / raw : raw);
+  };
   const GRID_GAP = 8;
   const GRID_TARGET_H = 240;
   // Must match renderPile's PEEK (10): the closed pile shows a 10px strip of
@@ -1554,13 +1586,14 @@ const collapseSpreadUnlessMember = (fid) => {
       if (isDir) return { it, i, h: GRID_TARGET_H, w: Math.min(GRID_TARGET_H * 1.25, 260), isDir: true };
       // Server-provided ratio (from .mediadims.json) sizes tiles on first
       // paint; measured ratios refine afterwards. No reflow from scratch.
-      const r = clampRatio(parseFloat(ratios[rowKey(it)]) || it.ratio || 1);
+      // A 90/270° rotation transposes the display, so invert the ratio.
+      const r = effRatioFor(it, rowKey(it));
       let w = Math.round(GRID_TARGET_H * r);
       const max = Math.max(gridW - GRID_GAP * 2, 80);
       if (w > max) w = max;
       return { it, i, h: GRID_TARGET_H, w, isDir: false };
     });
-  }, [isGrid, gridW, filtered, ratios]);
+  }, [isGrid, gridW, filtered, ratios, rotVersion]); // eslint-disable-line react-hooks/exhaustive-deps
   // 1 click = select only; double-click (or Enter) = open. Touch keeps tap-to-open.
   const selectOnly = (it) => { const k = rowKey(it); setSelKeys(new Set([k])); setAnchorKey(k); setSelectedKey(k); };
   const openItem = (it) => {
@@ -1695,6 +1728,18 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     const cat = fileCategory(it.name);
     const asVideo = cat === "gif" && !!gifVideo[rk];
     const loaded = !!thumbLoaded[rk];
+    const rotKey = it._isPlaylistItem ? rowKey(it) : (folder ? `${folder}/${rowKey(it)}` : rowKey(it));
+    const tileRot = readMediaRotation(rotKey);
+    // Transposed (90/270°): the tile box is already swapped to landscape by
+    // effRatioFor, but a plain `rotate()` on a 100%×100% cover image would
+    // just spin the cropped pixels in place (portrait content clipped inside
+    // a landscape box). Instead lay the image out swapped (h×w), centered,
+    // then rotate — equivalent to rotate-then-cover, so the portrait source
+    // fills the landscape tile. 180° needs no swap (center-symmetric).
+    const tileTransposed = tileRot === 90 || tileRot === 270;
+    const tileRotStyle = tileTransposed
+      ? { position: "absolute", left: "50%", top: "50%", width: h, height: w, transform: `translate(-50%,-50%) rotate(${tileRot}deg)` }
+      : tileRot === 0 ? {} : { transform: `rotate(${tileRot}deg)` };
     const markLoaded = (e) => {
       onImgLoad(e, rowKey(it));
       const k = rowKey(it);
@@ -1752,10 +1797,19 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
             setSelectedKey(rk);
           }
           if (dragEnabled) {
-            // Single file for ordering (even spread members: dropping
-            // outside the open pile detaches them, inside reorders).
-            dragKeyRef.current = rk;
-            dragKeysRef.current = null;
+            // Multi-drag: dragging a selected file carries the whole
+            // selection as one block (visible order) so all move together.
+            // Single file otherwise (even spread members: dropping outside
+            // the open pile detaches them, inside reorders).
+            const visSet = new Set(filtered.filter((x) => !x.dir).map((x) => rowKey(x)));
+            const block = carry.filter((k) => visSet.has(k));
+            if (block.length > 1 && block.includes(rk)) {
+              dragKeysRef.current = block;
+              dragKeyRef.current = null;
+            } else {
+              dragKeyRef.current = rk;
+              dragKeysRef.current = null;
+            }
             e.dataTransfer.effectAllowed = "move";
             try { e.dataTransfer.setData("text/plain", rk); } catch {}
           }
@@ -1766,16 +1820,16 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         style={{ position: "relative", flex: isDir ? "0 0 auto" : "0 0 auto", width: w, height: h, overflow: (menuOpen || isDropTarget) ? "visible" : "hidden", zIndex: menuOpen ? 60 : "auto", borderRadius: highlight || stackColor ? 10 : 0, background: isDir ? "var(--surface-2)" : "var(--surface-2)", outline: highlight ? "4px solid #fff" : (stackColor ? `3px solid ${stackColor}` : "none"), cursor: dragEnabled ? "grab" : "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, contentVisibility: menuOpen ? "visible" : "auto", containIntrinsicSize: `${w}px ${h}px`, animation: anim || undefined }}
       >
         {src ? (
-          <span style={{ position: "relative", width: "100%", height: "100%", flex: 1, display: "block", background: "#000", borderRadius: highlight || stackColor ? 10 : 0, minHeight: 0 }}>
+          <span style={{ position: "relative", width: "100%", height: "100%", flex: 1, display: "block", background: "#000", borderRadius: highlight || stackColor ? 10 : 0, minHeight: 0, overflow: "hidden" }}>
             {!loaded && (
               <span data-testid="media-thumb-loading" style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", pointerEvents: "none" }}>
                 <span className="xdl-thumb-spinner" />
               </span>
             )}
             {asVideo ? (
-              <video src={src} autoPlay muted loop playsInline preload="metadata" onLoadedData={markVideoLoaded} onError={markErr} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", background: "#000", borderRadius: highlight || stackColor ? 10 : 0, opacity: loaded ? 1 : 0, transition: "opacity .45s ease" }} />
+              <video src={src} autoPlay muted loop playsInline preload="metadata" onLoadedData={markVideoLoaded} onError={markErr} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", background: "#000", borderRadius: highlight || stackColor ? 10 : 0, opacity: loaded ? 1 : 0, transition: "opacity .45s ease", ...tileRotStyle }} />
             ) : (
-              <img src={src} alt="" loading="lazy" decoding="async" draggable={false} onLoad={markLoaded} onError={markErr} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", background: "#000", borderRadius: highlight || stackColor ? 10 : 0, opacity: loaded ? 1 : 0, transition: "opacity .45s ease" }} />
+              <img src={src} alt="" loading="lazy" decoding="async" draggable={false} onLoad={markLoaded} onError={markErr} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", background: "#000", borderRadius: highlight || stackColor ? 10 : 0, opacity: loaded ? 1 : 0, transition: "opacity .45s ease", ...tileRotStyle }} />
             )}
           </span>
         ) : isDir ? (
@@ -2001,13 +2055,13 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     return gridVisible.map((entry) => {
       if (entry.kind === "pile") return { ...entry, w: GRID_TARGET_H * 1.25, h: GRID_TARGET_H };
       const it = entry.it;
-      const r = clampRatio(parseFloat(ratios[entry.key]) || it.ratio || 1);
+      const r = effRatioFor(it, entry.key);
       let w = Math.round(GRID_TARGET_H * r);
       const max = Math.max(gridW - GRID_GAP * 2, 80);
       if (w > max) w = max;
       return { ...entry, w, h: GRID_TARGET_H };
     });
-  }, [isGrid, gridW, gridVisible, ratios]);
+  }, [isGrid, gridW, gridVisible, ratios, rotVersion, folder]); // eslint-disable-line react-hooks/exhaustive-deps
   const gridKeys = useMemo(() => gridVisible.map((e) => e.key), [gridVisible]);
   // Map: member rowKey → pile stackId (for Enter-to-spread on a selected member)
   const keyPileMap = useMemo(() => {
@@ -2345,7 +2399,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     const { stackId, stackName, members, count, key } = entry;
     const PEEK = 10;
     const firstKey = rowKey(members[0]);
-    const r0 = clampRatio(parseFloat(ratios[firstKey]) || members[0].ratio || 1);
+    const r0 = effRatioFor(members[0], firstKey);
     let memberW = Math.round(GRID_TARGET_H * r0);
     const max = Math.max(gridW - GRID_GAP * 2, 80);
     if (memberW > max) memberW = max;
@@ -2570,6 +2624,18 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
       removeStackItems(p.stackId, p.keys, folder).then(() => refreshStacksAndAnnotate()).catch(() => {});
     }
   };
+  // Which stack absorbs an outsider dropped at `infoKey`'s slot: the spread
+  // pile, or in open-all mode the stack that owns the target member. Locked
+  // mode never joins.
+  const joinStackForDrop = (infoKey) => {
+    if (pilesLocked) return null;
+    if (spreadStackId) return spreadStackId;
+    if (stacksMode === "open" && infoKey) {
+      const it = filtered.find((x) => rowKey(x) === infoKey);
+      return it && Array.isArray(it.stacks) && it.stacks[0] ? it.stacks[0].id : null;
+    }
+    return null;
+  };
   const handleStackPromptConfirm = async (v) => {
     const id = promptState.id;
     setPromptState({ open: false, id: null, value: "" });
@@ -2661,6 +2727,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     nearestDropInfo, sameDropInfo, moveCustomKey, detachIfOutsideSpread,
     addStackItems, refreshStacksAndAnnotate, pileMemberKeys, openContextMenu,
     setDropInfo, toggleSelection, shiftSelectTo,
+    joinStackForDrop,
   };
   const touchTileFromTarget = (target) => {
     if (!target || !target.closest) return null;
@@ -2851,10 +2918,11 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
       if (!d.allowDrag) return;
       if (info && info.key !== d.key) {
         L.detachIfOutsideSpread([d.key], info.key);
-        if (L.spreadStackId && !L.pilesLocked) {
-          const mem = L.pileMemberKeys(L.spreadStackId);
+        const joinId = L.joinStackForDrop(info.key);
+        if (joinId) {
+          const mem = L.pileMemberKeys(joinId);
           if (mem.includes(info.key) && !mem.includes(d.key)) {
-            L.addStackItems(L.spreadStackId, [d.key], L.folder).then(() => L.refreshStacksAndAnnotate()).catch(() => {});
+            L.addStackItems(joinId, [d.key], L.folder).then(() => L.refreshStacksAndAnnotate()).catch(() => {});
           }
         }
         L.moveCustomKey(d.key, info.key, info.side === "after");
@@ -3191,17 +3259,33 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                       const skip = dks && dks.length ? new Set(dks) : dk;
                       const info = nearestDropInfo(e.currentTarget, e.clientX, e.clientY, skip);
                       if (dks && dks.length) {
-                        if (info) moveCustomKeys(dks, info.key, info.side === "after");
+                        if (info && !dks.includes(info.key)) {
+                          // Multi-file / pile block: same detach + join rules
+                          // as the single-file path, applied to the block.
+                          detachIfOutsideSpread(dks, info.key);
+                          const joinId = joinStackForDrop(info.key);
+                          if (joinId) {
+                            const mem = pileMemberKeys(joinId);
+                            const outsiders = dks.filter((k) => !mem.includes(k));
+                            if (outsiders.length && mem.includes(info.key)) {
+                              addStackItems(joinId, outsiders, folder).then(() => refreshStacksAndAnnotate()).catch(() => {});
+                            }
+                          }
+                          moveCustomKeys(dks, info.key, info.side === "after");
+                        }
                       } else if (info && info.key !== dk) {
                         // Spread member dropped outside the open pile leaves it.
                         detachIfOutsideSpread([dk], info.key);
-                        // Outsider dropped inside the open pile joins it (at the
-                        // drop index via the reorder below).
-                        // Locked mode keeps stacks locked: no join via drag.
-                        if (spreadStackId && !pilesLocked) {
-                          const mem = pileMemberKeys(spreadStackId);
+                        // Outsider dropped at a stack member's slot joins that
+                        // stack (at the drop index via the reorder below) —
+                        // the spread pile, or in open-all mode the stack that
+                        // owns the drop target. Locked mode keeps stacks
+                        // locked: no join via drag.
+                        const joinId = joinStackForDrop(info.key);
+                        if (joinId) {
+                          const mem = pileMemberKeys(joinId);
                           if (mem.includes(info.key) && !mem.includes(dk)) {
-                            addStackItems(spreadStackId, [dk], folder).then(() => refreshStacksAndAnnotate()).catch(() => {});
+                            addStackItems(joinId, [dk], folder).then(() => refreshStacksAndAnnotate()).catch(() => {});
                           }
                         }
                         moveCustomKey(dk, info.key, info.side === "after");

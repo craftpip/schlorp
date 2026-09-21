@@ -70,6 +70,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [rotate, setRotate] = useState(0);
   const [stageSize, setStageSize] = useState({ w: 0, h: 0 });
+  const rotLoadedRef = useRef("");
   const [isFs, setIsFs] = useState(false);
   const dragRef = useRef({ dragging: false, startX: 0, startY: 0, origX: 0, origY: 0 });
   const wasPlayingRef = useRef(false);
@@ -157,8 +158,8 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   useEffect(() => { try { localStorage.setItem("xdl_viewer_rate", String(rate)); } catch {} }, [rate]);
   useEffect(() => { try { localStorage.setItem("xdl_viewer_seekFrames", seekFrames ? "1" : "0"); } catch {} }, [seekFrames]);
   useEffect(() => { try { localStorage.setItem("xdl_viewer_endMode", endMode); } catch {} }, [endMode]);
-  useEffect(() => { saveFileRotation(filePathEff, rotate); }, [rotate, filePathEff]);
-  useEffect(() => { setZoom(1); setOrigin("50% 50%"); setPan({x:0,y:0}); setRotate(readFileRotation(filePathEff)); setCurrent(0); setDuration(0); setGifAsVideo(false); setMediaReady(false); setYConfirm(false); lastYRef.current = 0; animRef.current = null; pendingSeekRef.current = null; if (yConfirmTimerRef.current) { clearTimeout(yConfirmTimerRef.current); yConfirmTimerRef.current = null; } setTimeout(() => videoRef.current?.focus(), 50); }, [loadedUrl, filePathEff]);
+  useEffect(() => { if (rotLoadedRef.current !== filePathEff) return; saveFileRotation(filePathEff, rotate); }, [rotate, filePathEff]);
+  useEffect(() => { rotLoadedRef.current = filePathEff; setZoom(1); setOrigin("50% 50%"); setPan({x:0,y:0}); setRotate(readFileRotation(filePathEff)); setCurrent(0); setDuration(0); setGifAsVideo(false); setMediaReady(false); setYConfirm(false); lastYRef.current = 0; animRef.current = null; pendingSeekRef.current = null; if (yConfirmTimerRef.current) { clearTimeout(yConfirmTimerRef.current); yConfirmTimerRef.current = null; } setTimeout(() => videoRef.current?.focus(), 50); }, [loadedUrl, filePathEff]);
   // Drive the seekbar with requestAnimationFrame: read the video's live
   // currentTime every frame so the thumb glides instead of stepping with the
   // ~4/s timeupdate events. Any seek (keyboard, wheel, ±10s, track click, or
