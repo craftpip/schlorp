@@ -1,5 +1,5 @@
 {
-  "name": "xdl",
+  "name": "schlorp",
   "version": "1.0.0",
   "description": "",
   "main": "scan-videos.js",
@@ -19,7 +19,8 @@
     "docker:down": "docker compose down",
     "docker:logs": "docker compose logs -f app",
     "docker:restart": "docker compose restart app",
-    "docker:open-browser": "docker compose run --rm -it -p 6779:6778 -e ENABLE_VNC=1 -e HEADLESS=0 app node scan-videos.js open-browser"
+    "docker:open-browser": "docker compose run --rm -it -p 6779:6778 -e ENABLE_VNC=1 -e HEADLESS=0 app node scan-videos.js open-browser",
+    "postinstall": "cloakbrowser install"
   },
   "keywords": [],
   "author": "",
@@ -29,6 +30,7 @@
     "cloakbrowser": "^0.4.10",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
+    "mmdb-lib": "^3.0.2",
     "puppeteer-core": "^24.37.5",
     "ws": "^8.21.3"
   }

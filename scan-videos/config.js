@@ -157,6 +157,32 @@ function normalizeAccountName(value) {
   return String(value || "").trim() || "default";
 }
 
+const DEFAULT_STATE_FILES = {
+  ".saved-sync-state.json": { config: { accounts: [], savedLists: [] }, lists: {} },
+  ".download-queue.json": { pending: [], completed: [] },
+  ".web-queue.json": { active: [], completed: [], gap: { minMs: 0, maxMs: 0 } },
+  ".playlists.json": { playlists: [] },
+  ".mediadims.json": {},
+  ".mediaorder.json": {},
+};
+
+async function ensureDefaultStateFiles(options = {}) {
+  const log = typeof options.log === "function" ? options.log : () => {};
+  const root = path.resolve(__dirname, "..");
+  const created = [];
+  for (const [name, contents] of Object.entries(DEFAULT_STATE_FILES)) {
+    const filePath = path.join(root, name);
+    try {
+      await fs.access(filePath);
+    } catch {
+      await fs.writeFile(filePath, JSON.stringify(contents, null, 2), "utf8");
+      created.push(name);
+    }
+  }
+  if (created.length) log(`Created default state files: ${created.join(", ")}`);
+  return created;
+}
+
 module.exports = {
   shouldRunHeadless,
   shouldAutoContinuePrompts,
@@ -170,4 +196,5 @@ module.exports = {
   normalizeCdpUrl,
   isCdpUrl,
   getStateFilePath,
+  ensureDefaultStateFiles,
 };

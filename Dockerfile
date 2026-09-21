@@ -24,9 +24,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci --omit=dev
-
-RUN mkdir -p /data/browser /data/cloakbrowser /app/media
 
 ENV NODE_ENV=production \
   PORT=6767 \
@@ -39,6 +36,11 @@ ENV NODE_ENV=production \
   ENABLE_VNC=0 \
   VNC_PORT=6777 \
   NOVNC_PORT=6778
+
+RUN mkdir -p /data/browser /data/cloakbrowser /app/media \
+  && npm ci --omit=dev
+
+VOLUME /data/browser /data/cloakbrowser
 
 EXPOSE 6767 6777 6778
 

@@ -3,7 +3,7 @@
 
 const fs = require("fs/promises");
 const path = require("path");
-const { normalizeAccountName } = require("./scan-videos/config");
+const { normalizeAccountName, ensureDefaultStateFiles } = require("./scan-videos/config");
 
 const API_BASE = process.env.API_BASE || "http://localhost:6767";
 const STATE_FILE = process.env.SAVED_SYNC_STATE_FILE || path.resolve(__dirname, ".saved-sync-state.json");
@@ -436,6 +436,8 @@ async function main() {
   console.log(`API: ${API_BASE}`);
   console.log(`State: ${STATE_FILE}`);
   console.log(`Queue: ${QUEUE_FILE}`);
+
+  await ensureDefaultStateFiles({ log: (msg) => console.log(`[state] ${msg}`) });
 
   const startupJitterMs = randomBetween(0, 5 * 60 * 1000);
   console.log(`Startup jitter: ${Math.round(startupJitterMs / 1000)}s`);

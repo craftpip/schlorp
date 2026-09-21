@@ -8,7 +8,7 @@ const { run } = require("./scan-videos/index");
 const { buildBrowserFromLocalProfile } = require("./scan-videos/browser");
 const { scanSavedPage } = require("./scan-videos/scan-saved");
 const { sanitizeMoveKey, isInsideMedia, mediaRelOf, resolveMoveSource, findCompanionPosters } = require("./scan-videos/media-move");
-const { loadAppConfig, normalizeAccountName, resolveAccountConfig, resolveProfileConfig, getStateFilePath, normalizeCdpUrl } = require("./scan-videos/config");
+const { loadAppConfig, normalizeAccountName, resolveAccountConfig, resolveProfileConfig, getStateFilePath, normalizeCdpUrl, ensureDefaultStateFiles } = require("./scan-videos/config");
 const { WebSocketServer } = require("ws");
 const http = require("http");
 const { EventEmitter } = require("events");
@@ -3281,6 +3281,9 @@ setInterval(() => {
 
 server.listen(port, () => {
   console.log(`API server listening on http://localhost:${port}`);
+  ensureDefaultStateFiles({ log: (msg) => console.log(`[state] ${msg}`) }).catch((error) => {
+    console.error(`[state] failed to create default state files: ${error.message}`);
+  });
   void loadWebQueue().then(() => ensureQueueWorker());
   void getSharedBrowser((message) => {
     const text = String(message == null ? "" : message).trim();
