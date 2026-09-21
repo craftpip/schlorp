@@ -1,24 +1,30 @@
+# syntax=docker/dockerfile:1
 FROM node:20-bookworm-slim
+
+ARG NOVNC_VERSION=1.7.0
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
   ffmpeg \
   xvfb \
   fluxbox \
   x11vnc \
-  novnc \
   websockify \
-  procps \
-  socat \
   fonts-liberation \
   ca-certificates \
+  curl \
   libnspr4 \
   libnss3 \
   libatk1.0-0 \
   libatk-bridge2.0-0 \
   libatspi2.0-0 \
   libxcomposite1 \
+  && mkdir -p /usr/share/novnc \
+  && curl -fsSL "https://github.com/novnc/noVNC/archive/refs/tags/v${NOVNC_VERSION}.tar.gz" \
+    | tar -xz --strip-components=1 -C /usr/share/novnc \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -37,8 +43,9 @@ ENV NODE_ENV=production \
   VNC_PORT=6777 \
   NOVNC_PORT=6778
 
-RUN mkdir -p /data/browser /data/cloakbrowser /app/media \
-  && npm ci --omit=dev
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
+    mkdir -p /data/browser /data/cloakbrowser /app/media \
+  && npm ci --omit=dev --prefer-offline --ignore-scripts
 
 VOLUME /data/browser /data/cloakbrowser
 

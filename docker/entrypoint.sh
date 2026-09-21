@@ -11,13 +11,6 @@ echo $! > /tmp/xvfb.pid
 fluxbox >/tmp/fluxbox.log 2>&1 &
 echo $! > /tmp/fluxbox.pid
 
-# Bridge old host ports (7866:3000 etc via gluetun) to new internal ports
-if command -v socat >/dev/null 2>&1; then
-  [ "${PORT:-6767}" != "3000" ] && socat TCP-LISTEN:3000,fork,reuseaddr TCP:127.0.0.1:${PORT:-6767} >/tmp/socat-3000.log 2>&1 & echo $! > /tmp/socat-3000.pid || true
-  [ "${VNC_PORT:-6777}" != "5900" ] && socat TCP-LISTEN:5900,fork,reuseaddr TCP:127.0.0.1:${VNC_PORT:-6777} >/tmp/socat-5900.log 2>&1 & echo $! > /tmp/socat-5900.pid || true
-  [ "${NOVNC_PORT:-6778}" != "7900" ] && socat TCP-LISTEN:7900,fork,reuseaddr TCP:127.0.0.1:${NOVNC_PORT:-6778} >/tmp/socat-7900.log 2>&1 & echo $! > /tmp/socat-7900.pid || true
-fi
-
 VNC_FLAG="/data/browser/.vnc-enabled"
 VNC_PORT_EFF="${VNC_PORT:-6777}"
 NOVNC_PORT_EFF="${NOVNC_PORT:-6778}"
