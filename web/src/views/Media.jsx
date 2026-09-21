@@ -181,6 +181,10 @@ export default function Media() {
   const setType = (v) => setParam("type", v === "all" ? "" : v);
   const [viewerKey, setViewerKey] = useState(null);
   const [showHelp, setShowHelp] = useState(false);
+  // Sticky overflow menu (plan 030): on mobile (≤640px) the toolbar +
+  // view/sort controls collapse behind a `...` toggle; breadcrumbs stay
+  // visible. Desktop ignores this state (toggle hidden, all shown).
+  const [menuOpen, setMenuOpen] = useState(false);
   const [ratios, setRatios] = useState({});
   const [imgErr, setImgErr] = useState({});
   const [thumbLoaded, setThumbLoaded] = useState({});
@@ -212,7 +216,7 @@ export default function Media() {
     return clampRatio(transposed ? 1 / raw : raw);
   };
   const GRID_GAP = 8;
-  const GRID_TARGET_H = 240;
+  const GRID_TARGET_H = gridW > 0 && gridW < 640 ? 140 : 240;
   // Must match renderPile's PEEK (10): the closed pile shows a 10px strip of
   // each under-card. The footprint collapse below uses it to rebuild the pile's
   // exact PEEK offsets when the stack opens/closes.
@@ -277,6 +281,20 @@ export default function Media() {
   const isCoarsePointer = () => {
     try { return !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches); }
     catch { return false; }
+  };
+  // Mobile (coarse pointer): single tap selects, double-tap opens. Touch
+  // browsers don't reliably fire dblclick, so track tap timing manually.
+  const lastTapRef = useRef({ key: null, time: 0 });
+  const DOUBLE_TAP_MS = 350;
+  const isDoubleTap = (key) => {
+    const now = Date.now();
+    const last = lastTapRef.current;
+    if (last.key === key && now - last.time < DOUBLE_TAP_MS) {
+      lastTapRef.current = { key: null, time: 0 };
+      return true;
+    }
+    lastTapRef.current = { key, time: now };
+    return false;
   };
   // Playlists (015)
   const { playlists, createPlaylist, renamePlaylist, deletePlaylist, removeItem: removePlaylistItem, refresh: refreshPlaylists, toggleItem: togglePlaylistItem } = usePlaylists();
@@ -562,6 +580,7 @@ export default function Media() {
   const pendingSelectRef = useRef(null); // key to restore after the next load (go-up, delete)
   const freshLoadRef = useRef(false); // next committed items scroll once to the selection
   const keyboardScrollRef = useRef(false); // next selection commit scrolls (arrow-key nav)
+  const loadSeqRef = useRef(0); // latest folder fetch wins; stale responses are ignored
 
   // Same-folder reloads (refresh / delete) keep the stale rows mounted while
   // fetching — unmounting the list collapses the page height and the browser
@@ -569,6 +588,7 @@ export default function Media() {
   const load = async (f, { clear = false } = {}) => {
     if (clear) setItems([]);
     setLoading(true); setErr("");
+    const seq = ++loadSeqRef.current;
     const pending = pendingSelectRef.current;
     pendingSelectRef.current = null;
     try {
@@ -577,6 +597,7 @@ export default function Media() {
       if (isFlat) qs.set("flat", "1");
       const r = await fetch(`/api/media?${qs.toString()}`);
       const j = await r.json();
+      if (seq !== loadSeqRef.current) return;
       if (!j.ok) throw new Error(j.error || "failed");
       const fresh = (j.items || []).filter((it) => it.dir || !isPosterFile(it.name));
       const keyOf = (it) => (isFlat ? it.rel || it.name : it.name);
@@ -629,8 +650,8 @@ export default function Media() {
       } else if (curSel) {
         setParam("sel", "");
       }
-    } catch (e) { setErr(e.message); }
-    finally { setLoading(false); }
+    } catch (e) { if (seq === loadSeqRef.current) setErr(e.message); }
+    finally { if (seq === loadSeqRef.current) setLoading(false); }
   };
 
   // Fresh content (mount / folder / flat change / explicit refresh) scrolls once
@@ -824,6 +845,7 @@ export default function Media() {
     try { await createPlaylist(name); setNewPlaylistName(""); } catch (e) { setPlaylistErr(e.message || String(e)); } finally { setCreatingPlaylist(false); }
   };
   const openPlaylist = (id) => {
+    setMenuOpen(false);
     const ns = new URLSearchParams(searchParams);
     ns.set("pl", id);
     ns.delete("p");
@@ -831,6 +853,7 @@ export default function Media() {
     setSearchParams(ns, { replace: true });
   };
   const closePlaylist = () => {
+    setMenuOpen(false);
     const ns = new URLSearchParams(searchParams);
     ns.delete("pl"); ns.delete("p");
     setSearchParams(ns, { replace: true });
@@ -1130,6 +1153,8 @@ const collapseSpreadUnlessMember = (fid) => {
       const lowK = k.toLowerCase();
       if ((k === "/" || k === "?") && !e.ctrlKey && !e.altKey && !e.metaKey) { e.preventDefault(); setShowHelp((v) => !v); return; }
       if (k === "Escape" && showHelp) { e.preventDefault(); setShowHelp(false); return; }
+      // Sticky overflow menu (plan 030): Esc closes it first.
+      if (k === "Escape" && menuOpen) { e.preventDefault(); setMenuOpen(false); return; }
       // Grid: Esc clears multi-select and collapses any spread stack.
       if (isGrid && !inPlaylistView && k === "Escape") {
         e.preventDefault();
@@ -1139,10 +1164,12 @@ const collapseSpreadUnlessMember = (fid) => {
         setAnchorKey(selKey || null);
         if (hadSpread) return;
       }
-      // 1 focuses the search / filter bar.
+      // 1 focuses the search / filter bar (opens the overflow menu first
+      // on mobile, where the input is hidden while collapsed).
       if (k === "1" && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
         e.preventDefault();
-        if (filterInputRef.current) filterInputRef.current.focus();
+        setMenuOpen(true);
+        requestAnimationFrame(() => { if (filterInputRef.current) filterInputRef.current.focus(); });
         return;
       }
       // Grid: X cycles the stacks mode — stacked → open → locked (same as the
@@ -1349,7 +1376,7 @@ const collapseSpreadUnlessMember = (fid) => {
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewerOpen, allSelectable, selectedIdx, searchParams, showHelp, confirmState.open, promptState.open, alertState.open, deleteTarget, folderDel, multiDeleteTarget]);
+  }, [viewerOpen, allSelectable, selectedIdx, searchParams, showHelp, menuOpen, confirmState.open, promptState.open, alertState.open, deleteTarget, folderDel, multiDeleteTarget]);
 
   // Hold-F: while F is held, keep the save popup open for the selected file;
   // letter toggles the first matching list, 1-9 toggles extras by number.
@@ -1456,6 +1483,7 @@ const collapseSpreadUnlessMember = (fid) => {
   }, [selectedIdx, selKey]);
 
   const goFolder = (name) => {
+    setMenuOpen(false);
     const ns = new URLSearchParams(searchParams);
     ns.set("f", encB64(folder ? `${folder}/${name}` : name));
     ns.delete("folder");
@@ -1463,6 +1491,7 @@ const collapseSpreadUnlessMember = (fid) => {
     setSearchParams(ns);
   };
   const goUp = () => {
+    setMenuOpen(false);
     if (inPlaylistView) { closePlaylist(); return; }
     if (!folder) return;
     const parts = folder.split("/").filter(Boolean);
@@ -1476,6 +1505,7 @@ const collapseSpreadUnlessMember = (fid) => {
     setSearchParams(ns);
   };
   const goCrumb = (idx) => {
+    setMenuOpen(false);
     const nf = crumbs.slice(0, idx + 1).join("/");
     const ns = new URLSearchParams(searchParams);
     ns.set("f", encB64(nf));
@@ -1485,6 +1515,22 @@ const collapseSpreadUnlessMember = (fid) => {
   };
   const delFile = (it) => {
     setDeleteTarget(it);
+  };
+  // Playlist "Goto file": leave the playlist view and land on the file in
+  // whatever folder it lives in (folder param = dirname, selection = basename).
+  const gotoPlaylistFile = (key) => {
+    const rel = String(key || "").split("/").filter(Boolean).join("/");
+    if (!rel) return;
+    const parts = rel.split("/");
+    const base = parts.pop();
+    const dir = parts.join("/");
+    const ns = new URLSearchParams(searchParams);
+    ns.delete("pl"); ns.delete("p");
+    if (dir) ns.set("f", encB64(dir)); else ns.delete("f");
+    ns.delete("folder");
+    if (base) ns.set("s", encB64(base)); else ns.delete("s");
+    ns.delete("sel");
+    setSearchParams(ns);
   };
   const confirmDeleteFile = async () => {
     const it = deleteTarget;
@@ -1594,7 +1640,7 @@ const collapseSpreadUnlessMember = (fid) => {
       return { it, i, h: GRID_TARGET_H, w, isDir: false };
     });
   }, [isGrid, gridW, filtered, ratios, rotVersion]); // eslint-disable-line react-hooks/exhaustive-deps
-  // 1 click = select only; double-click (or Enter) = open. Touch keeps tap-to-open.
+  // 1 click / tap = select only; double-click / double-tap = open.
   const selectOnly = (it) => { const k = rowKey(it); setSelKeys(new Set([k])); setAnchorKey(k); setSelectedKey(k); };
   const openItem = (it) => {
     if (!it) return;
@@ -1603,9 +1649,14 @@ const collapseSpreadUnlessMember = (fid) => {
     else openViewer(it);
   };
   const tapItem = (it) => {
-    // Coarse pointers (mobile): single tap selects AND opens (previous behaviour).
-    if (isCoarsePointer()) openItem(it);
-    else selectOnly(it);
+    // Mobile: second tap within the double-tap window opens.
+    if (isCoarsePointer() && isDoubleTap(rowKey(it))) { openItem(it); return; }
+    selectOnly(it);
+  };
+  const tapPlaylist = (pl) => {
+    const plKey = `playlist:${pl.id}`;
+    if (isCoarsePointer() && isDoubleTap(plKey)) { openPlaylist(pl.id); return; }
+    setSelectedKey(plKey);
   };
   const openViewer = (it) => {
     if (!it || it.dir) return;
@@ -1661,7 +1712,7 @@ const collapseSpreadUnlessMember = (fid) => {
         onMouseEnter={() => setHoveredFolderKey(rowKey(it))}
         onMouseLeave={() => setHoveredFolderKey((cur) => (cur === rowKey(it) ? null : cur))}
         title={`${displayName(it)} — click to select, double-click to open`}
-        style={{ width: FOLDER_CHIP_W, height: FOLDER_CHIP_H, flex: "0 0 auto", display: "flex", alignItems: "center", gap: 10, padding: "0 12px", overflow: "hidden", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)", outline: selected ? "4px solid #fff" : "none", cursor: "pointer", position: "relative" }}
+        style={{ width: FOLDER_CHIP_W, height: FOLDER_CHIP_H, flex: "0 0 auto", display: "flex", alignItems: "center", gap: 10, padding: "0 12px", overflow: "hidden", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)", outline: selected ? "4px solid #fff" : "none", cursor: "pointer", position: "relative", userSelect: "none", WebkitUserSelect: "none" }}
       >
         <i className="bi bi-folder-fill" style={{ fontSize: 24, color: "#f59e0b", flex: "0 0 auto" }} />
         <span style={{ flex: 1, fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{displayName(it)}</span>
@@ -1684,12 +1735,12 @@ const collapseSpreadUnlessMember = (fid) => {
         data-filename={plKey}
         data-selected={selected}
         className="media-tile-playlist"
-        onClick={() => setSelectedKey(plKey)}
+        onClick={() => tapPlaylist(pl)}
         onDoubleClick={() => openPlaylist(pl.id)}
         onMouseEnter={() => setHoveredPlId(pl.id)}
         onMouseLeave={() => setHoveredPlId((cur) => (cur === pl.id ? null : cur))}
         title={`${pl.name} · ${count} items — click to select, double-click to open`}
-        style={{ width: FOLDER_CHIP_W, height: FOLDER_CHIP_H, flex: "0 0 auto", display: "flex", alignItems: "center", gap: 10, padding: "0 8px 0 12px", overflow: "hidden", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)", outline: selected ? "4px solid #6366f1" : "none", cursor: "pointer", position: "relative" }}
+        style={{ width: FOLDER_CHIP_W, height: FOLDER_CHIP_H, flex: "0 0 auto", display: "flex", alignItems: "center", gap: 10, padding: "0 8px 0 12px", overflow: "hidden", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)", outline: selected ? "4px solid #6366f1" : "none", cursor: "pointer", position: "relative", userSelect: "none", WebkitUserSelect: "none" }}
       >
         <i className="bi bi-collection-play-fill" style={{ fontSize: 22, color: "#6366f1", flex: "0 0 auto" }} />
         <span style={{ flex: 1, fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{pl.name}</span>
@@ -1779,9 +1830,9 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         className={isDir ? "media-tile-folder" : "media-tile-file"}
         data-filename={rowKey(it)}
         data-selected={selected}
-        onClick={(e) => { if (!isDir && gridMulti) gridClickHandler({ kind: "file", it, key: rk }, e); else if (!isDir && isCoarsePointer()) openItem(it); else tapItem(it); }}
+        onClick={(e) => { if (!isDir && gridMulti) gridClickHandler({ kind: "file", it, key: rk }, e); else tapItem(it); }}
         onDoubleClick={() => openItem(it)}
-        onContextMenu={(e) => { if (e.ctrlKey) { e.preventDefault(); toggleSelection({ kind: "file", it, key: rk }); return; } if (gridMulti && !isDir) { e.preventDefault(); openContextMenu(e, { kind: "file", it, key: rk }); } }}
+        onContextMenu={(e) => { if (e.ctrlKey) { e.preventDefault(); toggleSelection({ kind: "file", it, key: rk }); return; } if (!isDir && (gridMulti || (it && it._isPlaylistItem))) { e.preventDefault(); openContextMenu(e, { kind: "file", it, key: rk }); } }}
         title={dragEnabled ? `${displayName(it)} — drag to reorder` : `${displayName(it)} — click to select, double-click to open`}
         draggable={dragEnabled || (gridMulti && !isDir)}
         onDragStart={(e) => {
@@ -1817,7 +1868,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
           try { e.dataTransfer.setData("application/x-xdl-stack", JSON.stringify(carry)); } catch {}
         }}
         onDragEnd={() => { dragKeyRef.current = null; dragKeysRef.current = null; if (dropInfo) setDropInfo(null); }}
-        style={{ position: "relative", flex: isDir ? "0 0 auto" : "0 0 auto", width: w, height: h, overflow: (menuOpen || isDropTarget) ? "visible" : "hidden", zIndex: menuOpen ? 60 : "auto", borderRadius: highlight || stackColor ? 10 : 0, background: isDir ? "var(--surface-2)" : "var(--surface-2)", outline: highlight ? "4px solid #fff" : (stackColor ? `3px solid ${stackColor}` : "none"), cursor: dragEnabled ? "grab" : "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, contentVisibility: menuOpen ? "visible" : "auto", containIntrinsicSize: `${w}px ${h}px`, animation: anim || undefined }}
+        style={{ position: "relative", flex: isDir ? "0 0 auto" : "0 0 auto", width: w, height: h, overflow: (menuOpen || isDropTarget) ? "visible" : "hidden", zIndex: menuOpen ? 60 : "auto", borderRadius: highlight || stackColor ? 10 : 0, background: isDir ? "var(--surface-2)" : "var(--surface-2)", outline: highlight ? "4px solid #fff" : (stackColor ? `3px solid ${stackColor}` : "none"), cursor: dragEnabled ? "grab" : "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, contentVisibility: menuOpen ? "visible" : "auto", containIntrinsicSize: `${w}px ${h}px`, animation: anim || undefined, userSelect: "none", WebkitUserSelect: "none" }}
       >
         {src ? (
           <span style={{ position: "relative", width: "100%", height: "100%", flex: 1, display: "block", background: "#000", borderRadius: highlight || stackColor ? 10 : 0, minHeight: 0, overflow: "hidden" }}>
@@ -1910,7 +1961,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     const isCustom = key === "custom";
     return (
       <button data-testid={tid} type="button" className={`btn btn-sm ${active ? "btn-primary" : "btn-outline-secondary"}`} onClick={() => toggleSort(key)} title={isCustom ? "Custom order — drag tiles to rearrange (grid)" : `Sort by ${label}`} style={{ height: 25, padding: "0 10px", fontSize: 11, display: "inline-flex", alignItems: "center", gap: 4, borderRadius: 6, fontWeight: 600 }}>
-        {label}
+        {isCustom ? (<><span className="media-sort-full">Gallery</span><span className="media-sort-abbr">Gal</span></>) : label}
         {!isCustom && active && <span style={{ color: "#fff", display: "inline-block", fontSize: 10 }}>{sortDir === "desc" ? "▼" : "▲"}</span>}
       </button>
     );
@@ -2274,7 +2325,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     const cellKeys = isPile ? entry.members.map((m) => rowKey(m)) : [k];
     const shift = e?.shiftKey;
     const ctrl = e?.ctrlKey || e?.metaKey;
-    // Coarse pointer: treat as plain click (single tap = select+open)
+    // Coarse pointer (mobile): single tap selects, double-tap opens.
     if (isCoarsePointer()) {
       if (isPile) {
         const ks = pilesLocked ? cellKeys : [cellKeys[0]];
@@ -2283,7 +2334,10 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         setAnchorKey(ks[0]);
         // Atomic URL write (plan 019). Locked mode changes no spread.
         setSelectedKeyAndSpread(ks[0], pilesLocked ? spreadStackId : entry.stackId);
-      } else { setSelKeys(new Set([k])); setAnchorKey(k); setSelectedKey(k); }
+      } else {
+        if (isDoubleTap(k)) { openViewer(entry.it); return; }
+        setSelKeys(new Set([k])); setAnchorKey(k); setSelectedKey(k);
+      }
       return;
     }
     if (shift) {
@@ -2486,7 +2540,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
           } catch {}
         }}
         title={isCustomReorder ? `${stackName} — ${count} files — drag to reorder` : `${stackName} — ${count} files`}
-        style={{ position: "relative", display: "flex", flexDirection: "row", alignItems: "stretch", width: memberW + PEEK * (members.length - 1), height: GRID_TARGET_H, flex: "0 0 auto", cursor: isCustomReorder ? "grab" : "pointer", borderRadius: 10, outline: pileOutline }}
+        style={{ position: "relative", display: "flex", flexDirection: "row", alignItems: "stretch", width: memberW + PEEK * (members.length - 1), height: GRID_TARGET_H, flex: "0 0 auto", cursor: isCustomReorder ? "grab" : "pointer", borderRadius: 10, outline: pileOutline, userSelect: "none", WebkitUserSelect: "none" }}
       >
         {pileDropSide && (
           <div style={{ position: "absolute", top: 0, bottom: 0, [pileDropSide]: -3, width: 4, borderRadius: 2, background: "var(--accent)", zIndex: 10, pointerEvents: "none" }} />
@@ -3141,21 +3195,25 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         {loading && items.length > 0 && <span data-testid="media-updating" className="small text-muted"><i className="bi bi-arrow-clockwise" /> Updating…</span>}
         <span className="small text-muted media-hint" style={{ marginLeft: 2 }}>Click to select · double-click to open</span>
       </div>
-      <div data-testid="media-sticky" className="media-sticky" style={{ position: "sticky", top: 0, zIndex: 100, margin: "0 -10px", paddingTop: 6, paddingLeft: 10, paddingRight: 10, paddingBottom: 10, borderRadius: "0 0 10px 10px", background: "color-mix(in srgb, var(--bg) 60%, transparent)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)", borderBottom: err ? "none" : "1px solid var(--border)", marginBottom: 12, boxShadow: "0 6px 12px -8px rgba(0,0,0,.4)" }}>
-      <div data-testid="media-toolbar" className="media-toolbar" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+      <div data-testid="media-sticky" data-menu-open={menuOpen ? "true" : "false"} className={`media-sticky${menuOpen ? " menu-open" : ""}`} style={{ position: "sticky", top: 0, zIndex: 100, margin: "0 -10px", paddingTop: 6, paddingLeft: 10, paddingRight: 10, paddingBottom: 10, borderRadius: "0 0 10px 10px", background: "color-mix(in srgb, var(--bg) 60%, transparent)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)", borderBottom: err ? "none" : "1px solid var(--border)", marginBottom: 12, boxShadow: "0 6px 12px -8px rgba(0,0,0,.4)" }}>
+      <div data-testid="media-toolbar" id="media-toolbar" className="media-toolbar" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <div className="media-tools-row" data-tools-row="search" style={{ display: "contents" }}>
         <input data-testid="media-filter" ref={filterInputRef} className="form-control form-control-sm media-filter" style={{ maxWidth: 200, height: 31 }} placeholder="Filter files…" value={filter} onChange={(e) => setFilter(e.target.value)} onKeyDown={(e) => { if (e.key === "Escape") e.currentTarget.blur(); }} />
         <button data-testid="media-refresh" className="btn btn-sm btn-outline-secondary" style={{ height: 31, display: "inline-flex", alignItems: "center" }} onClick={refresh} disabled={loading} title="Refresh"><i className="bi bi-arrow-clockwise" /></button>
+        </div>
+        <div className="media-tools-row" data-tools-row="type" style={{ display: "contents" }}>
           <div data-testid="media-type-filter" style={{ display: "inline-flex", alignItems: "center", gap: 2, border: "1px solid var(--border)", borderRadius: 8, padding: 2, background: "var(--surface-2)" }} title="Type filter — press 2 to cycle">
             {TYPE_CHIPS.map(([v, label, icon]) => (
               <button key={v} data-testid={`media-type-${v}`} type="button" className={`btn btn-sm ${type === v ? "btn-primary" : "btn-outline-secondary"}`} style={{ height: 25, padding: "0 10px", fontSize: 11, display: "inline-flex", alignItems: "center", gap: 5, borderRadius: 6 }} onClick={() => setType(v)}><i className={`bi ${icon} media-type-icon`} style={{ fontSize: 12 }} /><span className="media-type-label">{label}</span></button>
             ))}
           </div>
         <button data-testid="media-flatten" type="button" className={`btn btn-sm ${isFlat ? "btn-primary" : "btn-outline-secondary"}`} onClick={() => { if (isFlat) setParam("flat", ""); else setConfirmState({ open: true, id: "flatten:", name: "" }); }} title="Flatten: list all files recursively under this folder (j)" style={{ height: 31, display: "inline-flex", alignItems: "center", gap: 5 }}><i className="bi bi-layers" /> <span className="media-btn-label">Flatten</span></button>
+        </div>
       </div>
 
       <div data-testid="media-breadcrumbs" style={{ display: "flex", gap: 6, flexWrap: "wrap", rowGap: 6, alignItems: "center", marginTop: 8 }}>
         <div data-testid="media-breadcrumb-path" style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "nowrap", minWidth: 0, overflow: "hidden", flex: "1 1 auto" }}>
-        <button data-testid="media-breadcrumb-root" className="btn btn-sm btn-outline-secondary" onClick={() => { const ns = new URLSearchParams(searchParams); ns.delete("f"); ns.delete("folder"); ns.delete("pl"); ns.delete("p"); ns.delete("flat"); setSearchParams(ns); }} disabled={!folder && !inPlaylistView}><i className="bi bi-house" /> Media</button>
+        <button data-testid="media-breadcrumb-root" className="btn btn-sm btn-outline-secondary" onClick={() => { setMenuOpen(false); const ns = new URLSearchParams(searchParams); ns.delete("f"); ns.delete("folder"); ns.delete("pl"); ns.delete("p"); ns.delete("flat"); setSearchParams(ns); }} disabled={!folder && !inPlaylistView}><i className="bi bi-house" /> Media</button>
         {!inPlaylistView && crumbs.map((c, i) => (
           <span key={i} data-testid={`media-breadcrumb-${c}`} style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ color: "var(--muted)" }}>/</span>
@@ -3174,9 +3232,9 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
             <span className="btn btn-sm btn-primary">{playlistDetail.name}</span>
           </span>
         )}
-        {(folder || inPlaylistView) && <button data-testid="media-up" className="btn btn-sm btn-outline-secondary" onClick={goUp} style={{ marginLeft: 8 }}><i className="bi bi-arrow-90deg-up" /> Up</button>}
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "nowrap", marginLeft: "auto" }}>
+        {(folder || inPlaylistView) && <button data-testid="media-up" className="btn btn-sm btn-outline-secondary" onClick={goUp} style={{ marginLeft: 8, flex: "0 0 auto" }}><i className="bi bi-arrow-90deg-up" /> Up</button>}
+        <div id="media-side-controls" className="media-side-controls" style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "nowrap", marginLeft: "auto" }}>
         <div data-testid="media-view-toggle" style={{ display: "inline-flex", alignItems: "center", gap: 2, border: "1px solid var(--border)", borderRadius: 8, padding: 2, background: "var(--surface-2)" }}>
           <button data-testid="media-view-list" type="button" className={`btn btn-sm ${isGrid ? "btn-outline-secondary" : "btn-primary"}`} style={{ height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6 }} onClick={() => setParam("view", "list")} title="List view (g)"><i className="bi bi-list-ul" /></button>
           <button data-testid="media-view-grid" type="button" className={`btn btn-sm ${isGrid ? "btn-primary" : "btn-outline-secondary"}`} style={{ height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6 }} onClick={() => setParam("view", "")} title="Grid view (g)"><i className="bi bi-grid-3x3-gap-fill" /></button>
@@ -3191,6 +3249,9 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
           {sortBarBtn("time", "Time", "media-sortbar-time")}
         </span>
         </div>
+        <button data-testid="media-menu-toggle" type="button" className="btn btn-sm btn-outline-secondary media-menu-toggle" onClick={() => setMenuOpen((v) => !v)} aria-expanded={menuOpen} aria-controls="media-toolbar media-side-controls" aria-label={menuOpen ? "Hide filters" : "Show filters"} title={menuOpen ? "Hide filters (Esc)" : "Show filters"} style={{ height: 31, width: 31, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 8, flex: "0 0 auto" }}>
+          <i className={`bi ${menuOpen ? "bi-x-lg" : "bi-three-dots"}`} style={{ fontSize: 14 }} />
+        </button>
       </div>
       </div>
 
@@ -3319,14 +3380,14 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                       const isSel = selKey === ky || selKeys.has(ky);
                       const isBookmarked = bookmarkedKeys.has(pk);
                       return (
-                        <div key={ky} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={isSel} className="mrow" style={{ display: "grid", gridTemplateColumns: "subgrid", gridColumn: "1 / -1", gap: "0 10px", alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: isSel ? "rgba(99,102,241,0.14)" : "var(--surface)", cursor: "pointer", userSelect: "none" }} onClick={(e) => { if (e.ctrlKey || e.metaKey) toggleSelection({ kind: "file", it, key: ky }); else tapItem(it); }} onContextMenu={(e) => { if (e.ctrlKey) { e.preventDefault(); toggleSelection({ kind: "file", it, key: ky }); } }} onDoubleClick={() => openItem(it)} title={displayName(it)}>
+                        <div key={ky} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={isSel} className="mrow" style={{ display: "grid", gridTemplateColumns: "subgrid", gridColumn: "1 / -1", gap: "0 10px", alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: isSel ? "rgba(99,102,241,0.14)" : "var(--surface)", cursor: "pointer", userSelect: "none", WebkitUserSelect: "none" }} onClick={(e) => { if (e.ctrlKey || e.metaKey) toggleSelection({ kind: "file", it, key: ky }); else tapItem(it); }} onContextMenu={(e) => { if (e.ctrlKey) { e.preventDefault(); toggleSelection({ kind: "file", it, key: ky }); } else { e.preventDefault(); openContextMenu(e, { kind: "file", it, key: ky }); } }} onDoubleClick={() => openItem(it)} title={displayName(it)}>
                           <div style={{ position: "relative", display: "grid", placeItems: "center" }} onMouseEnter={() => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); setOpenMenuKey(ky); }} onMouseLeave={() => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); playlistMenuCloseTimer.current = setTimeout(() => setOpenMenuKey((cur) => cur === ky ? null : cur), 120); }}>
                             <button data-testid="media-row-playlist-btn" className="media-row-playlist-btn" type="button" onClick={(e) => { e.stopPropagation(); const coarse = isCoarsePointer(); if (coarse) setOpenMenuKey((cur) => cur === ky ? null : ky); else setOpenMenuKey(ky); }} style={{ width: 28, height: 28, padding: 0, borderRadius: 999, border: isBookmarked ? "1px solid rgba(99,102,241,.35)" : "1px solid var(--border)", background: menuOpen ? "rgba(99,102,241,.15)" : isBookmarked ? "rgba(99,102,241,.12)" : "var(--surface-2)", color: isBookmarked ? "#6366f1" : "var(--muted)", display: "grid", placeItems: "center", cursor: "pointer", opacity: 1 }}><i className={`bi ${isBookmarked ? "bi-bookmark-fill" : "bi-bookmark"}`} /></button>
                             {menuOpen && <div style={{ position: "absolute", top: 34, left: 0, zIndex: 90 }}><PlaylistHoverMenu mediaKey={pk} showIndex={viaF} /></div>}
                           </div>
                           <div data-testid="media-row-name" style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0, marginLeft: "5px" }}>
                             <i className={`bi ${catIcon[fileCategory(it.name)]}`} style={{ color: "var(--accent)", display: "grid", placeItems: "center", width: 18, height: 18, fontSize: 14, lineHeight: 1, flex: "0 0 auto", transform: "translateY(1px)" }} />
-                            <button data-testid="media-row-open-file" onClick={(e) => { e.stopPropagation(); tapItem(it); }} onDoubleClick={(e) => { e.stopPropagation(); openItem(it); }} style={{ background: "none", border: 0, color: "var(--text)", fontWeight: 500, textAlign: "left", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", padding: 0, minWidth: 0, maxWidth: "100%" }}>{displayName(it)}</button>
+                            <button data-testid="media-row-open-file" onClick={(e) => { e.stopPropagation(); tapItem(it); }} onDoubleClick={(e) => { e.stopPropagation(); openItem(it); }} style={{ background: "none", border: 0, color: "var(--text)", fontWeight: 500, textAlign: "left", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", padding: 0, minWidth: 0, maxWidth: "100%", userSelect: "none", WebkitUserSelect: "none" }}>{displayName(it)}</button>
                           </div>
                           <span data-testid="media-row-size" className="small mcol-size" style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", color: "var(--muted)", whiteSpace: "nowrap" }}>{fmtSize(it.size)}</span>
                           <span data-testid="media-row-time" className="small mcol-time" style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", color: "var(--muted)", whiteSpace: "nowrap" }} title={it.created ? new Date(it.created).toLocaleString() : ""}>{timeAgo(it.created || it.mtime)}</span>
@@ -3349,10 +3410,10 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                     const plKey = `playlist:${pl.id}`;
                     const sel = selKey === plKey;
                     return (
-                      <div key={pl.id} id={`media-playlist-row-${pl.id}`} data-testid="media-row-playlist" data-filename={plKey} data-selected={sel} className="mrow mrow-dir media-row-playlist" style={{ display: "grid", gridTemplateColumns: "subgrid", gridColumn: "1 / -1", gap: "0 10px", alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: sel ? "rgba(99,102,241,0.14)" : "var(--surface-2)", cursor: "pointer", userSelect: "none" }} onClick={() => setSelectedKey(plKey)} onDoubleClick={() => openPlaylist(pl.id)} title={`${pl.name} — click to select, double-click to open`}>
+                      <div key={pl.id} id={`media-playlist-row-${pl.id}`} data-testid="media-row-playlist" data-filename={plKey} data-selected={sel} className="mrow mrow-dir media-row-playlist" style={{ display: "grid", gridTemplateColumns: "subgrid", gridColumn: "1 / -1", gap: "0 10px", alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: sel ? "rgba(99,102,241,0.14)" : "var(--surface-2)", cursor: "pointer", userSelect: "none", WebkitUserSelect: "none" }} onClick={() => tapPlaylist(pl)} onDoubleClick={() => openPlaylist(pl.id)} title={`${pl.name} — click to select, double-click to open`}>
                         <div data-testid="media-row-name" style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0, marginLeft: "5px", gridColumn: "1 / span 2" }}>
                           <i className="bi bi-collection-play-fill" style={{ color: "#6366f1", display: "grid", placeItems: "center", width: 18, height: 18, fontSize: 14, lineHeight: 1, flex: "0 0 auto", transform: "translateY(1px)" }} />
-                          <button data-testid="media-row-open-playlist" onClick={(e) => { e.stopPropagation(); setSelectedKey(plKey); }} onDoubleClick={(e) => { e.stopPropagation(); openPlaylist(pl.id); }} title={`${pl.name} — click to select, double-click to open`} style={{ background: "none", border: 0, color: "var(--text)", fontWeight: 600, textAlign: "left", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0, maxWidth: "100%", flex: 1, padding: 0, marginLeft: "5px" }}>{pl.name}</button>
+                          <button data-testid="media-row-open-playlist" onClick={(e) => { e.stopPropagation(); tapPlaylist(pl); }} onDoubleClick={(e) => { e.stopPropagation(); openPlaylist(pl.id); }} title={`${pl.name} — click to select, double-click to open`} style={{ background: "none", border: 0, color: "var(--text)", fontWeight: 600, textAlign: "left", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0, maxWidth: "100%", flex: 1, padding: 0, marginLeft: "5px", userSelect: "none", WebkitUserSelect: "none" }}>{pl.name}</button>
                           <span className="playlist-row-actions" style={{ display: "inline-flex", gap: 4, opacity: sel ? 1 : 0, transition: "opacity .12s", marginLeft: 6, flex: "0 0 auto" }}>
                             <button data-testid={`playlist-row-edit-${pl.id}`} title="Rename" onClick={(e) => { e.stopPropagation(); setPromptState({ open: true, id: pl.id, value: pl.name }); }} className="btn btn-sm btn-outline-secondary" style={{ padding: "2px 6px" }}><i className="bi bi-pencil" /></button>
                             <button data-testid={`playlist-row-delete-${pl.id}`} title="Delete" onClick={(e) => { e.stopPropagation(); setConfirmState({ open: true, id: pl.id, name: pl.name }); }} className="btn btn-sm btn-outline-secondary" style={{ padding: "2px 6px", color: "#f87171" }}><i className="bi bi-trash" /></button>
@@ -3374,7 +3435,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                     const isSel = selKey === ky || selKeys.has(ky);
                     const isBookmarked = pk ? bookmarkedKeys.has(pk) : false;
                     return (
-                      <div key={isFlat ? it.rel || it.name : it.name} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={isSel} className={it.dir ? "mrow mrow-dir" : "mrow mrow-file"} style={{ display: "grid", gridTemplateColumns: "subgrid", gridColumn: "1 / -1", gap: "0 10px", alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: isSel ? "rgba(99,102,241,0.14)" : it.dir ? "var(--surface-2)" : "var(--surface)", cursor: "pointer", userSelect: "none" }} onClick={(e) => { if (e.ctrlKey || e.metaKey) toggleSelection({ kind: "file", it, key: ky }); else tapItem(it); }} onContextMenu={(e) => { if (e.ctrlKey) { e.preventDefault(); toggleSelection({ kind: "file", it, key: ky }); } }} onDoubleClick={() => openItem(it)} title="Click to select, double-click to open">
+                      <div key={isFlat ? it.rel || it.name : it.name} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={isSel} className={it.dir ? "mrow mrow-dir" : "mrow mrow-file"} style={{ display: "grid", gridTemplateColumns: "subgrid", gridColumn: "1 / -1", gap: "0 10px", alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: isSel ? "rgba(99,102,241,0.14)" : it.dir ? "var(--surface-2)" : "var(--surface)", cursor: "pointer", userSelect: "none", WebkitUserSelect: "none" }} onClick={(e) => { if (e.ctrlKey || e.metaKey) toggleSelection({ kind: "file", it, key: ky }); else tapItem(it); }} onContextMenu={(e) => { if (e.ctrlKey) { e.preventDefault(); toggleSelection({ kind: "file", it, key: ky }); } }} onDoubleClick={() => openItem(it)} title="Click to select, double-click to open">
                         {!it.dir && (
                           <div style={{ position: "relative", display: "grid", placeItems: "center" }} onMouseEnter={() => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); setOpenMenuKey(ky); }} onMouseLeave={() => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); playlistMenuCloseTimer.current = setTimeout(() => setOpenMenuKey((cur) => cur === ky ? null : cur), 120); }}>
                             <button data-testid="media-row-playlist-btn" className="media-row-playlist-btn" type="button" onClick={(e) => { e.stopPropagation(); const coarse = isCoarsePointer(); if (coarse) setOpenMenuKey((cur) => cur === ky ? null : ky); else setOpenMenuKey(ky); }} style={{ width: 28, height: 28, padding: 0, borderRadius: 999, border: isBookmarked ? "1px solid rgba(99,102,241,.35)" : "1px solid var(--border)", background: menuOpen ? "rgba(99,102,241,.15)" : isBookmarked ? "rgba(99,102,241,.12)" : "var(--surface-2)", color: isBookmarked ? "#6366f1" : "var(--muted)", display: "grid", placeItems: "center", cursor: "pointer", opacity: 1 }}><i className={`bi ${isBookmarked ? "bi-bookmark-fill" : "bi-bookmark"}`} /></button>
@@ -3384,9 +3445,9 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                         <div data-testid="media-row-name" style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0, marginLeft: "5px", ...(it.dir ? { gridColumn: "1 / span 2" } : {}) }}>
                           <i className={`bi ${it.dir ? "bi-folder-fill" : catIcon[fileCategory(it.name)]}`} style={{ color: it.dir ? "#f59e0b" : "var(--accent)", display: "grid", placeItems: "center", width: 18, height: 18, fontSize: 14, lineHeight: 1, flex: "0 0 auto", transform: "translateY(1px)" }} />
                           {it.dir ? (
-                            <button data-testid="media-row-open-folder" onClick={(e) => { e.stopPropagation(); tapItem(it); }} onDoubleClick={(e) => { e.stopPropagation(); openItem(it); }} title={`${it.name} — click to select, double-click to open`} style={{ background: "none", border: 0, color: "var(--text)", fontWeight: 600, textAlign: "left", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0, maxWidth: "100%" }}>{it.name}</button>
+                            <button data-testid="media-row-open-folder" onClick={(e) => { e.stopPropagation(); tapItem(it); }} onDoubleClick={(e) => { e.stopPropagation(); openItem(it); }} title={`${it.name} — click to select, double-click to open`} style={{ background: "none", border: 0, color: "var(--text)", fontWeight: 600, textAlign: "left", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0, maxWidth: "100%", userSelect: "none", WebkitUserSelect: "none" }}>{it.name}</button>
                           ) : (
-                            <button data-testid="media-row-open-file" onClick={(e) => { e.stopPropagation(); tapItem(it); }} onDoubleClick={(e) => { e.stopPropagation(); openItem(it); }} title={`${displayName(it)} — click to select, double-click to open`} style={{ background: "none", border: 0, color: "var(--text)", fontWeight: 500, textAlign: "left", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", padding: 0, minWidth: 0, maxWidth: "100%" }}>{displayName(it)}</button>
+                            <button data-testid="media-row-open-file" onClick={(e) => { e.stopPropagation(); tapItem(it); }} onDoubleClick={(e) => { e.stopPropagation(); openItem(it); }} title={`${displayName(it)} — click to select, double-click to open`} style={{ background: "none", border: 0, color: "var(--text)", fontWeight: 500, textAlign: "left", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", padding: 0, minWidth: 0, maxWidth: "100%", userSelect: "none", WebkitUserSelect: "none" }}>{displayName(it)}</button>
                           )}
                         </div>
                         <span data-testid="media-row-size" className="small mcol-size" style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", color: "var(--muted)", whiteSpace: "nowrap" }}>{fmtSize(it.size)}</span>
@@ -3501,6 +3562,11 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         selCount={selectedKeysForStack.size}
         noStacks={!stacksActive}
         onClose={() => setCtxMenu(null)}
+        onGotoFile={() => {
+          const entry = ctxMenu && ctxMenu.entry;
+          const key = entry && (entry.key || (entry.it && (entry.it.rel || entry.it.name)));
+          if (key) gotoPlaylistFile(key);
+        }}
         onStack={() => stackSelectionNow()}
         onMove={() => setMoveCtx({ files: moveTargets })}
         canMove={canMove}

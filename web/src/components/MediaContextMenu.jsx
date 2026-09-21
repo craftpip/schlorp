@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 
-export default function MediaContextMenu({ menu, onClose, stacks, selCount, onStack, onOpen, onOpenStack, onMove, canMove, onCreateFolder, onDelete, onAddToStack, onRename, onUnstack, onRemoveFromStack, noStacks }) {
+export default function MediaContextMenu({ menu, onClose, stacks, selCount, onStack, onOpen, onOpenStack, onMove, canMove, onCreateFolder, onDelete, onAddToStack, onRename, onUnstack, onRemoveFromStack, noStacks, onGotoFile }) {
   // Scroll lock while the popup is open (same as ConfirmModal) so the grid
   // behind the backdrop doesn't scroll (plan 024).
   useEffect(() => {
@@ -12,6 +12,7 @@ export default function MediaContextMenu({ menu, onClose, stacks, selCount, onSt
   if (!menu) return null;
   const { entry, stackId } = menu;
   const isPile = entry && entry.kind === "pile";
+  const isPlaylistFile = !!(entry && entry.kind === "file" && entry.it && entry.it._isPlaylistItem);
   const count = isPile ? entry.count : entry && entry.kind === "file" ? 1 : 0;
   // Selection count wins: right-clicking with files multi-selected stacks the selection.
   const fileCount = selCount > 1 ? selCount : (entry && entry.kind === "file" ? 1 : count);
@@ -37,6 +38,12 @@ export default function MediaContextMenu({ menu, onClose, stacks, selCount, onSt
         style={{ width: "min(520px, 100%)", maxHeight: "calc(100vh - 48px)", display: "flex", flexDirection: "column", overflow: "hidden", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, boxShadow: "0 12px 32px rgba(0,0,0,.25)" }}
       >
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 4, fontSize: 13 }}>
+          {isPlaylistFile && onGotoFile && (
+            <>
+              <MenuItem data-testid="media-ctx-goto-file" label="Goto file" icon="bi-file-earmark" onClick={() => { onClose(); onGotoFile(); }} />
+              <Divider />
+            </>
+          )}
           {!noStacks && <MenuItem data-testid="media-ctx-stack-create" label={`Stack ${fileCount} item${fileCount === 1 ? "" : "s"}`} icon="bi-layers" disabled={fileCount < 2} onClick={() => { onClose(); onStack(); }} />}
           {!noStacks && (own.length > 0 || rest.length > 0) && (
             <>
@@ -56,7 +63,7 @@ export default function MediaContextMenu({ menu, onClose, stacks, selCount, onSt
           )}
           {!noStacks && <Divider />}
           <MenuItem label="Open" icon="bi-box-arrow-up-right" onClick={() => { onClose(); onOpen(); }} />
-          <MenuItem data-testid="media-ctx-create-folder" label="Create folder" icon="bi-folder-plus" onClick={() => { onClose(); onCreateFolder(); }} />
+          {!isPlaylistFile && <MenuItem data-testid="media-ctx-create-folder" label="Create folder" icon="bi-folder-plus" onClick={() => { onClose(); onCreateFolder(); }} />}
           <MenuItem data-testid="media-ctx-move" label="Move files" icon="bi-arrows-move" disabled={!canMove} onClick={() => { onClose(); onMove(); }} />
           <MenuItem label="Delete" icon="bi-trash" danger onClick={() => { onClose(); onDelete(); }} />
           {!noStacks && isPile && (
@@ -120,14 +127,6 @@ function StackCell({ s, member, disabled, onClick, onOpen }) {
       {member && (
         <span style={{ position: "absolute", top: 3, left: 3, fontSize: 11, lineHeight: 1, color: "#fff", background: "var(--accent)", padding: "3px 4px", borderRadius: 999, pointerEvents: "none" }}>✓</span>
       )}
-      <button
-        type="button"
-        data-testid="media-ctx-open-stack"
-        onClick={(e) => { e.stopPropagation(); if (onOpen) onOpen(); }}
-        style={{ position: "absolute", bottom: 3, left: 3, fontSize: 10, fontWeight: 700, lineHeight: 1, color: "#fff", background: "rgba(20,22,40,.72)", border: "1px solid rgba(255,255,255,.18)", padding: "3px 6px", borderRadius: 999, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 3 }}
-      >
-        <i className="bi bi-box-arrow-up-right" style={{ fontSize: 9 }} /> Open
-      </button>
     </div>
   );
 }
