@@ -10,6 +10,7 @@ const {
   resolveMoveSource,
   posterStemOf,
   findCompanionPosters,
+  splitStacksByCoverage,
 } = require("../../scan-videos/media-move");
 const { withTempDir } = require("../helpers/temp-state");
 
@@ -121,6 +122,42 @@ test("move: missing source and directories report not found", async () => {
     const dirKey = await moveOneFile(mediaDir, "src/asub", path.join(mediaDir, "dst"));
     assert.deepEqual(dirKey, { moved: false, error: "not found" });
   });
+});
+
+test("splitStacksByCoverage: partial selection reports removed members", () => {
+  const stacks = [{ id: "s.xdlstack", name: "s", items: ["a.mp4", "b.mp4", "c.mp4"] }];
+  const r = splitStacksByCoverage(stacks, ["a.mp4"]);
+  assert.deepEqual(r.full, []);
+  assert.deepEqual(r.partialBases, ["a.mp4"]);
+});
+
+test("splitStacksByCoverage: full selection moves the stack silently", () => {
+  const stacks = [{ id: "s.xdlstack", name: "s", items: ["a.mp4", "b.mp4"] }];
+  const r = splitStacksByCoverage(stacks, ["a.mp4", "b.mp4"]);
+  assert.deepEqual(r.full, stacks);
+  assert.deepEqual(r.partialBases, []);
+});
+
+test("splitStacksByCoverage: mixed full + partial stacks", () => {
+  const stacks = [
+    { id: "full.xdlstack", name: "full", items: ["a.mp4", "b.mp4"] },
+    { id: "part.xdlstack", name: "part", items: ["b.mp4", "c.mp4", "d.mp4"] },
+  ];
+  const r = splitStacksByCoverage(stacks, ["a.mp4", "b.mp4"]);
+  assert.equal(r.full.length, 1);
+  assert.equal(r.full[0].id, "full.xdlstack");
+  // b.mp4 travels with its full stack but still leaves the partial one.
+  assert.deepEqual(r.partialBases, ["b.mp4"]);
+});
+
+test("splitStacksByCoverage: untouched and empty stacks ignored", () => {
+  const stacks = [
+    { id: "a.xdlstack", name: "a", items: ["x.mp4", "y.mp4"] },
+    { id: "e.xdlstack", name: "e", items: [] },
+  ];
+  const r = splitStacksByCoverage(stacks, ["q.mp4"]);
+  assert.deepEqual(r.full, []);
+  assert.deepEqual(r.partialBases, []);
 });
 
 test("posterStemOf / findCompanionPosters: picks up <stem>-poster images only", () => {

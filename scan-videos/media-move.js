@@ -83,4 +83,29 @@ function findCompanionPosters(entryNames, fileBase) {
   return out;
 }
 
-module.exports = { normalizeFolder, sanitizeMoveKey, isInsideMedia, mediaRelOf, resolveMoveSource, posterStemOf, findCompanionPosters };
+// Stack-aware move planning (pure): given the stacks of one source folder
+// and the basenames requested to move out of that folder, split stacks into
+// fully-covered ones (every member moves → the .xdlstack file travels too,
+// no removal notice) and partial ones (only some members move → those
+// members leave the stack, shown as a removal notice).
+// `stacks` entries look like { id, name, items: [basename] }.
+// Returns { full: [stack], partialBases: [basename...] } where partialBases
+// are the distinct moving basenames that leave at least one (partial) stack.
+// A basename in both a full stack and a partial stack still counts as
+// partial — it leaves the partial stack behind.
+function splitStacksByCoverage(stacks, moveBases) {
+  const set = new Set((moveBases || []).map((b) => String(b)));
+  const full = [];
+  const partialSet = new Set();
+  for (const s of stacks || []) {
+    const items = Array.isArray(s && s.items) ? s.items.map((x) => String(x)) : [];
+    if (!items.length) continue;
+    const moving = items.filter((x) => set.has(x));
+    if (!moving.length) continue;
+    if (moving.length === items.length) full.push(s);
+    else for (const x of moving) partialSet.add(x);
+  }
+  return { full, partialBases: [...partialSet] };
+}
+
+module.exports = { normalizeFolder, sanitizeMoveKey, isInsideMedia, mediaRelOf, resolveMoveSource, posterStemOf, findCompanionPosters, splitStacksByCoverage };

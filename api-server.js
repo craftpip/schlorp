@@ -7,7 +7,7 @@ const fs = require("fs/promises");
 const { run } = require("./scan-videos/index");
 const { buildBrowserFromLocalProfile } = require("./scan-videos/browser");
 const { scanSavedPage } = require("./scan-videos/scan-saved");
-const { sanitizeMoveKey, isInsideMedia, mediaRelOf, resolveMoveSource, findCompanionPosters } = require("./scan-videos/media-move");
+const { sanitizeMoveKey, isInsideMedia, mediaRelOf, resolveMoveSource, findCompanionPosters, splitStacksByCoverage } = require("./scan-videos/media-move");
 const { loadAppConfig, normalizeAccountName, resolveAccountConfig, resolveProfileConfig, getStateFilePath, normalizeCdpUrl, ensureDefaultStateFiles } = require("./scan-videos/config");
 const { generatePosterThumbnail, selectPosterTargets, posterStemOf, isVideoFileName, POSTER_SIBLING_RE } = require("./scan-videos/download");
 const { WebSocketServer } = require("ws");
@@ -1314,6 +1314,53 @@ app.post("/api/media/move", async (req, res) => {
 
     const results = [];
     let moved = 0;
+    // Stack-aware move: a stack whose members ALL move out of the same
+    // source folder travels with them — its .xdlstack file moves first so
+    // the pile re-forms in the target instead of dissolving, and no removal
+    // notice applies. Partially-selected stacks keep the strip/dissolve
+    // behavior via cleanupMoveSidecar below. A candidate only auto-moves
+    // when every member will really move (source exists, no target
+    // collision); otherwise it falls back to the partial path and lands in
+    // stacksSkipped.
+    const stacksMoved = [];
+    const stacksSkipped = [];
+    try {
+      const byDir = new Map(); // srcDir → Set(basename)
+      for (const raw of names) {
+        const key = sanitizeMoveKey(raw, folder);
+        if (!key) continue;
+        const src = resolveMoveSource(key, mediaDir);
+        if (!isInsideMedia(src, mediaDir)) continue;
+        const dir = path.dirname(src);
+        if (!byDir.has(dir)) byDir.set(dir, new Set());
+        byDir.get(dir).add(path.basename(src));
+      }
+      const targetStacks = await readStacksInFolder(targetDir).catch(() => []);
+      for (const [dir, bases] of byDir) {
+        if (dir === targetDir) continue;
+        const stacks = await readStacksInFolder(dir).catch(() => []);
+        if (!stacks.length) continue;
+        const { full } = splitStacksByCoverage(stacks, [...bases]);
+        for (const st of full) {
+          let movable = true;
+          for (const item of st.items) {
+            const s = path.join(dir, item);
+            const d = path.join(targetDir, item);
+            const sStat = await fs.stat(s).catch(() => null);
+            if (!sStat || sStat.isDirectory()) { movable = false; break; }
+            if (s === d) { movable = false; break; }
+            if (await fs.stat(d).catch(() => null)) { movable = false; break; }
+          }
+          if (!movable) { stacksSkipped.push({ id: st.id, name: st.name, error: "member would not move" }); continue; }
+          if (targetStacks.length >= STACK_LIMIT_PER_FOLDER) { stacksSkipped.push({ id: st.id, name: st.name, error: `too many stacks (max ${STACK_LIMIT_PER_FOLDER})` }); continue; }
+          if (await fs.stat(path.join(targetDir, st.id)).catch(() => null)) { stacksSkipped.push({ id: st.id, name: st.name, error: "stack already exists in target folder" }); continue; }
+          await fs.mkdir(targetDir, { recursive: true });
+          await fs.rename(path.join(dir, st.id), path.join(targetDir, st.id));
+          targetStacks.push({ id: st.id, name: st.name, items: st.items, count: st.items.length });
+          stacksMoved.push({ id: st.id, name: st.name });
+        }
+      }
+    } catch {}
     for (const raw of names) {
       const key = sanitizeMoveKey(raw, folder);
       if (!key) { results.push({ name: raw, moved: false, error: "invalid name" }); continue; }
@@ -1353,7 +1400,7 @@ app.post("/api/media/move", async (req, res) => {
       results.push(entry);
       try { await cleanupMoveSidecar(key, newRel); } catch {}
     }
-    return res.json({ ok: true, moved, results });
+    return res.json({ ok: true, moved, results, stacksMoved, stacksSkipped });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message });
   }

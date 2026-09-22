@@ -374,6 +374,10 @@ export default function Media() {
   const thumbGenMissingCount = thumbGenVideos.filter((v) => v.missing).length;
   const [selKeys, setSelKeys] = useState(() => new Set());
   const [anchorKey, setAnchorKey] = useState(null);
+  // Selection mode (plan 033, grid only): single (clicks/right-click select
+  // only the current cell) vs multi (clicks toggle, right-click adds).
+  // Sticky like stacksMode; explicit Shift/Ctrl always work in both modes.
+  const [multiSelect, setMultiSelect] = useState(false);
   // Spread (open) pile survives reloads via ?spread= (validated below).
   const [spreadStackId, setSpreadStackId] = useState(() => searchParams.get("spread") || null);
   const [closingSpreadId, setClosingSpreadId] = useState(null);
@@ -2481,6 +2485,20 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
       return;
     }
     // Plain click
+    if (multiSelect) {
+      // Multi mode (033): toggle the cell in/out of the selection, never
+      // spread or collapse piles.
+      if (!isPile) { toggleSelection(entry); return; }
+      const cur = selKeys.size ? selKeys : selKey ? new Set([selKey]) : new Set();
+      if (cellKeys.every((ck) => cur.has(ck))) {
+        setSelKeys((prev) => { const next = new Set(prev); for (const ck of cellKeys) next.delete(ck); return next; });
+      } else {
+        setSelKeys((prev) => { const next = new Set(prev.size ? prev : (selKey ? [selKey] : [])); for (const ck of cellKeys) next.add(ck); return next; });
+      }
+      setAnchorKey(cellKeys[0]);
+      setSelectedKey(cellKeys[0]);
+      return;
+    }
     if (isPile && !spreadStackId) {
       if (pilesLocked) {
         // Locked: select the whole stack without opening it.
@@ -2687,32 +2705,25 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
       const stacks = entry.it && entry.it.stacks;
       if (Array.isArray(stacks) && stacks.length) sid = stacks[0].id;
     }
-    // Right-click / long-press on an unselected file joins the existing
-    // selection (any current multi-select is kept) so the menu acts on it.
-    // Right-click on a collapsed pile join-selects the whole stack.
-    if (entry.kind === "pile" && Array.isArray(entry.members) && entry.members.length) {
-      const keys = entry.members.map((m) => rowKey(m));
+    // Right-click selection (plan 033): single mode moves the selection to
+    // the current cell only (a pile selects its members, staying collapsed)
+    // — unless the cell is already selected (e.g. after shift+click), in
+    // which case the selection is kept; multi mode never touches it.
+    if (!multiSelect) {
       const cur = selKeys.size ? selKeys : selKey ? new Set([selKey]) : new Set();
-      if (!keys.every((k) => cur.has(k))) {
-        setSelKeys((prev) => {
-          const next = new Set(prev.size ? prev : (selKey ? [selKey] : []));
-          for (const k of keys) next.add(k);
-          return next;
-        });
-        setAnchorKey(keys[0]);
-        setSelectedKey(keys[0]);
-      }
-    } else if (entry.kind === "file" && entry.key) {
-      const already = (selKeys.size ? selKeys : selKey ? new Set([selKey]) : new Set()).has(entry.key);
-      if (!already) {
-        setSelKeys((prev) => {
-          const next = new Set(prev);
-          if (!prev.size && selKey) next.add(selKey);
-          next.add(entry.key);
-          return next;
-        });
-        setAnchorKey(entry.key);
-        setSelectedKey(entry.key);
+      if (entry.kind === "pile" && Array.isArray(entry.members) && entry.members.length) {
+        const keys = entry.members.map((m) => rowKey(m));
+        if (!keys.every((k) => cur.has(k))) {
+          setSelKeys(new Set(keys));
+          setAnchorKey(keys[0]);
+          setSelectedKey(keys[0]);
+        }
+      } else if (entry.kind === "file" && entry.key) {
+        if (!cur.has(entry.key)) {
+          setSelKeys(new Set([entry.key]));
+          setAnchorKey(entry.key);
+          setSelectedKey(entry.key);
+        }
       }
     }
     setCtxMenu({ x: e.clientX, y: e.clientY, entry });
@@ -3309,14 +3320,104 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedKeysForStack, ctxMenu, filtered]);
   const canMove = !(ctxMenu && ctxMenu.entry && ctxMenu.entry.kind === "pile") && moveTargets.length > 0;
-  // Piles move as a unit (stack file + members together): right-clicking a
-  // collapsed pile offers "Move stack" instead of "Move files".
+  // Piles move as a unit (stack file + members together). Right-clicking a
+  // collapsed pile with nothing else selected offers "Move stack"; with
+  // other files in the selection it offers "Move stack & files" and moves
+  // everything (the pile as a unit via moveStackImpact, rest as files).
   const ctxPile = ctxMenu && ctxMenu.entry && ctxMenu.entry.kind === "pile" ? ctxMenu.entry : null;
-  const canMoveStack = !!ctxPile && Array.isArray(ctxPile.members) && ctxPile.members.length > 0;
+  const canMoveStack = !!ctxPile && !isFlat && Array.isArray(ctxPile.members) && ctxPile.members.length > 0;
+  const ctxPileMemberKeys = ctxPile && Array.isArray(ctxPile.members) ? ctxPile.members.map((m) => rowKey(m)) : [];
+  const ctxPileExtras = ctxPile ? moveTargets.filter((k) => !ctxPileMemberKeys.includes(k)) : [];
+  // Smart move menu: classify the file selection against this folder's
+  // stacks (non-flat grid only — flat keeps plain "Move files").
+  // stack  = selection is exactly one full stack · stackfiles = full
+  // stack(s) plus other files · files = no full stack. The dialog +
+  // moveStackImpact (from moveCtx.files) handle unit moves and the
+  // partial-stack notice; this only picks the label.
+  const moveMenuInfo = useMemo(() => {
+    const keys = [...selectedKeysForStack];
+    const none = { mode: "files", fullCount: 0, single: null };
+    if (isFlat || inPlaylistView || !keys.length) return none;
+    const sel = new Set(keys);
+    let fullCount = 0;
+    let covered = 0;
+    let single = null;
+    for (const s of folderStacks) {
+      const itemsArr = Array.isArray(s.items) ? s.items : [];
+      if (!itemsArr.length) continue;
+      if (!itemsArr.every((n) => sel.has(n))) continue;
+      fullCount++;
+      covered += itemsArr.length;
+      single = s;
+    }
+    if (!fullCount) return none;
+    if (fullCount === 1 && covered === keys.length) return { mode: "stack", fullCount, single };
+    return { mode: "stackfiles", fullCount, single: null };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedKeysForStack, folderStacks, filtered, isFlat, inPlaylistView]);
+  const moveMenuMode = ctxPile ? (ctxPileExtras.length ? "stackfiles" : "stack") : moveMenuInfo.mode;
+  const moveMenuLabel = moveMenuMode === "stack" ? "Move stack" : moveMenuMode === "stackfiles" ? "Move stack & files" : "Move files";
+  const canMoveMenu = ctxPile ? canMoveStack : moveMenuMode === "stackfiles" ? moveMenuInfo.fullCount > 0 : canMove;
+  const requestStackMove = async (stackId, target) => {
+    const r = await fetch(`/api/stacks/${encodeURIComponent(stackId)}/move?folder=${encodeURIComponent(folder)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ folder, target }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) throw new Error((j && j.error) || "move failed");
+    return j;
+  };
   const moveNames = useMemo(
     () => (moveCtx ? moveCtx.files.map((k) => (isFlat ? k : String(k).split("/").pop())) : []),
     [moveCtx, isFlat]
   );
+  // Stack impact of the pending file move (grid view): stacks whose members
+  // ALL move travel with their files (the .xdlstack moves too — no notice),
+  // while partially-selected stacks lose members (notice in the dialog).
+  // Mirrors splitStacksByCoverage() in scan-videos/media-move.js.
+  const moveStackImpact = useMemo(() => {
+    const empty = { partialCount: 0, partialStacks: [], fullStacks: [] };
+    if (!moveCtx || moveCtx.stackId || !Array.isArray(moveCtx.files) || !moveCtx.files.length) return empty;
+    const moveBases = new Set(moveCtx.files.map((k) => String(k).split("/").pop()));
+    const moveBaseToKeys = new Map();
+    for (const k of moveCtx.files) {
+      const b = String(k).split("/").pop();
+      if (!moveBaseToKeys.has(b)) moveBaseToKeys.set(b, []);
+      moveBaseToKeys.get(b).push(k);
+    }
+    const partialBases = new Set();
+    const partialNames = new Map();
+    const fullStacks = [];
+    for (const s of folderStacks || []) {
+      const itemsArr = Array.isArray(s.items) ? s.items.map(String) : [];
+      if (!itemsArr.length) continue;
+      const moving = itemsArr.filter((x) => moveBases.has(x));
+      if (!moving.length) continue;
+      if (moving.length === itemsArr.length) {
+        fullStacks.push({ id: s.id, name: s.name || s.id, files: moving.flatMap((b) => moveBaseToKeys.get(b) || []) });
+      } else {
+        for (const x of moving) partialBases.add(x);
+        partialNames.set(s.id, s.name || s.id);
+      }
+    }
+    // Flat view: stacked files from subfolders whose stacks aren't loaded
+    // here count as partial (their full member list is unknown client-side;
+    // the server still auto-moves truly-full stacks silently).
+    if (isFlat) {
+      const fullBases = new Set();
+      for (const s of folderStacks || []) for (const x of (s.items || [])) fullBases.add(String(x));
+      const covered = new Set([...partialBases, ...fullBases]);
+      for (const k of moveCtx.files) {
+        const base = String(k).split("/").pop();
+        if (covered.has(base)) continue;
+        const it = filtered.find((x) => !x.dir && rowKey(x) === k);
+        if (it && Array.isArray(it.stacks) && it.stacks.length) partialBases.add(base);
+      }
+    }
+    return { partialCount: partialBases.size, partialStacks: [...partialNames.values()], fullStacks };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [moveCtx, folderStacks, filtered, isFlat]);
   const handleMoveDone = async (j) => {
     setMoveCtx(null);
     setSelKeys(new Set());
@@ -3336,8 +3437,9 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
       setAlertState({ open: true, title: "Move failed", message: (first && (first.error || first.name)) || "move failed" });
     } else if (failed.length) {
       setAlertState({ open: true, title: "Move partially completed", message: failed.map((r) => `${r.name}: ${r.error || "skipped"}`).join("\n") });
-    } else if (posterSkipped.length) {
-      setAlertState({ open: true, title: "Moved, poster stayed behind", message: posterSkipped.join("\n") });
+    } else if ((j.stacksSkipped || []).length || posterSkipped.length) {
+      const lines = (j.stacksSkipped || []).map((s) => `stack "${s.name || s.id}": ${s.error || "stayed behind"}`);
+      setAlertState({ open: true, title: (j.stacksSkipped || []).length ? "Moved, stack stayed behind" : "Moved, poster stayed behind", message: [...lines, ...posterSkipped].join("\n") });
     }
   };
 
@@ -3393,6 +3495,9 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
           <button data-testid="media-view-list" type="button" className={`btn btn-sm ${isGrid ? "btn-outline-secondary" : "btn-primary"}`} style={{ height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6 }} onClick={() => setParam("view", "list")} title="List view (g)"><i className="bi bi-list-ul" /></button>
           <button data-testid="media-view-grid" type="button" className={`btn btn-sm ${isGrid ? "btn-primary" : "btn-outline-secondary"}`} style={{ height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6 }} onClick={() => setParam("view", "")} title="Grid view (g)"><i className="bi bi-grid-3x3-gap-fill" /></button>
         </div>
+        <button data-testid="media-multiselect-toggle" type="button" disabled={!isGrid || inPlaylistView} className={`btn btn-sm ${multiSelect ? "btn-primary" : "btn-outline-secondary"}`} onClick={() => setMultiSelect((v) => !v)} title={multiSelect ? "Multi-select on — clicks add/remove" : "Multi-select off — clicks select one"} style={{ height: 29, width: 29, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 8, border: "1px solid var(--border)", background: multiSelect ? undefined : "var(--surface-2)", flex: "0 0 auto" }}>
+          <i className="bi bi-check2-square" style={{ fontSize: 12 }} />
+        </button>
         <span data-testid="media-sort-bar" title="Sort (same as list header)" style={{ display: "inline-flex", alignItems: "center", gap: 2, border: "1px solid var(--border)", borderRadius: 8, padding: 2, background: "var(--surface-2)" }}>
           <button data-testid="media-stacks-toggle" type="button" disabled={!stacksActive} className={`btn btn-sm ${stacksMode === "open" ? "btn-primary" : "btn-outline-secondary"}`} onClick={cycleStacksMode} title={stacksMode === "locked" ? "stacked & locked — piles never open on select or navigation" : stacksMode === "open" ? "unstacked — all stacks spread open; click to lock" : "stacked — piles open on select/navigate; click to unstack"} style={{ height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6 }}>
             <i className={`bi ${stacksMode === "locked" ? "bi-lock-fill" : stacksMode === "open" ? "bi-grid-3x3-gap-fill" : "bi-stack"}`} style={{ fontSize: 12 }} />
@@ -3722,17 +3827,34 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
           if (key) gotoPlaylistFile(key);
         }}
         onStack={() => stackSelectionNow()}
-        onMove={() => setMoveCtx({ files: moveTargets })}
-        canMove={canMove}
-        onMoveStack={() => {
-          if (!ctxPile) return;
-          setMoveCtx({
-            stackId: ctxPile.stackId,
-            stackName: ctxPile.stackName || ctxPile.stackId,
-            files: (ctxPile.members || []).map((m) => rowKey(m)),
-          });
+        onMove={() => {
+          if (ctxPile) {
+            if (ctxPileExtras.length) {
+              // Pile + other selected files: move everything. moveStackImpact
+              // (from moveCtx.files) detects the full pile stack for a unit
+              // move; extras go as files, with the partial-stack notice.
+              setMoveCtx({ files: [...ctxPileMemberKeys, ...ctxPileExtras] });
+              return;
+            }
+            setMoveCtx({
+              stackId: ctxPile.stackId,
+              stackName: ctxPile.stackName || ctxPile.stackId,
+              files: ctxPileMemberKeys,
+            });
+            return;
+          }
+          if (moveMenuInfo.mode === "stack" && moveMenuInfo.single) {
+            const s = moveMenuInfo.single;
+            setMoveCtx({ stackId: s.id, stackName: s.name || s.id, files: (s.items || []).filter((n) => selectedKeysForStack.has(n)) });
+            return;
+          }
+          // files + stackfiles: same snapshot — moveStackImpact (from
+          // moveCtx.files) detects full stacks for unit moves and raises
+          // the partial-stack notice.
+          setMoveCtx({ files: moveTargets });
         }}
-        canMoveStack={canMoveStack}
+        canMove={canMoveMenu}
+        moveLabel={moveMenuLabel}
         onCreateFolder={() => setPromptState({ open: true, id: "newfolder", value: "" })}
         onOpen={() => {
           const entry = ctxMenu && ctxMenu.entry;
@@ -3819,7 +3941,9 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         open={!!moveCtx}
         items={moveNames}
         sourceFolder={folder}
-        heading={moveCtx && moveCtx.stackId ? `Move stack "${moveCtx.stackName || moveCtx.stackId}"` : undefined}
+        heading={moveCtx && moveCtx.stackId ? `Move stack "${moveCtx.stackName || moveCtx.stackId}"` : moveStackImpact.fullStacks.length ? "Move stack & files" : undefined}
+        stackNotice={moveStackImpact.partialCount > 0 ? { count: moveStackImpact.partialCount, stackNames: moveStackImpact.partialStacks } : null}
+        stackMoves={moveCtx && !moveCtx.stackId && moveStackImpact.fullStacks.length ? moveStackImpact.fullStacks : null}
         onMoveTarget={moveCtx && moveCtx.stackId ? async (target) => {
           const r = await fetch(`/api/stacks/${encodeURIComponent(moveCtx.stackId)}/move?folder=${encodeURIComponent(folder)}`, {
             method: "POST",
