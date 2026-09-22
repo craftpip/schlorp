@@ -854,4 +854,107 @@
         .media-range-railwrap{display:none !important}
         .media-range-rail{display:none !important}
       }
+      /* Press / touch feedback (media page + context menu + dialogs).
+         Minimal, subtle: slight scale-down + tone shift on :active so every
+         tap/click shows what is being pressed. Respects reduced motion. */
+      .media-page, .media-ctx-card{ --press-tint:rgba(99,102,241,.16); }
+      .media-page button, .media-ctx-card button, .media-ctx-card .media-ctx-item{
+        -webkit-tap-highlight-color:rgba(99,102,241,.25);
+        touch-action:manipulation;
+      }
+      /* Toolbar / generic buttons: press sinks slightly */
+      .media-page .btn:active:not(:disabled){
+        transform:scale(.96);
+        filter:brightness(.97);
+      }
+      /* Grid tiles + folder/playlist chips: press shrinks + brightens.
+         :has guard: pressing an inner button (bookmark, rename, delete)
+         dips only that button, not the whole tile/chip. */
+      .media-page [data-testid="media-tile-file"],
+      .media-page [data-testid="media-tile-pile"],
+      .media-page [data-testid="media-tile-folder"],
+      .media-page [data-testid="media-tile-playlist"]{
+        transition:transform .12s ease, filter .12s ease;
+      }
+      .media-page [data-testid="media-tile-file"]:active:not(:has(button:active, a:active)),
+      .media-page [data-testid="media-tile-pile"]:active:not(:has(button:active, a:active)),
+      .media-page [data-testid="media-tile-folder"]:active:not(:has(button:active, a:active)),
+      .media-page [data-testid="media-tile-playlist"]:active:not(:has(button:active, a:active)){
+        transform:scale(.965);
+        filter:brightness(1.1);
+      }
+      /* List rows: full-width rows don't scale — darken instead.
+         :has guard: pressing an inner action button dips only the button,
+         not the whole row (ancestors also match :active while pressing). */
+      .media-page [data-testid="media-row"],
+      .media-page [data-testid="media-row-playlist"]{
+        transition:filter .12s ease, background-color .12s ease;
+      }
+      .media-page [data-testid="media-row"]:active:not(:has(button:active, a:active)),
+      .media-page [data-testid="media-row-playlist"]:active:not(:has(button:active, a:active)){
+        filter:brightness(.94);
+      }
+      /* Small icon/action buttons inside tiles, rows and chips */
+      .media-page [data-testid="media-tile-playlist-btn"]:active,
+      .media-page [data-testid="media-row-playlist-btn"]:active,
+      .media-page [data-testid="media-row-action-open"]:active,
+      .media-page [data-testid="media-row-action-delete"]:active,
+      .media-page [data-testid="media-row-playlist-remove"]:active,
+      .media-page [data-testid^="folder-chip-"]:active,
+      .media-page [data-testid^="playlist-chip-"]:active,
+      .media-page [data-testid^="playlist-row-"]:active{
+        transform:scale(.88);
+      }
+      /* Breadcrumb / sort / view-toggle / type-filter controls */
+      .media-page [data-testid="media-breadcrumb-root"]:active,
+      .media-page [data-testid="media-breadcrumbs"] .btn:active,
+      .media-page [data-testid="media-view-toggle"] .btn:active,
+      .media-page [data-testid="media-type-filter"] .btn:active,
+      .media-page [data-testid="media-sort-bar"] .btn:active,
+      .media-page button[data-testid^="media-sort-"]:active,
+      .media-page [data-testid="media-up"]:active,
+      .media-page [data-testid="media-refresh"]:active,
+      .media-page [data-testid="media-flatten"]:active,
+      .media-page [data-testid="media-multiselect-toggle"]:active,
+      .media-page [data-testid="media-stacks-toggle"]:active,
+      .media-page [data-testid="media-menu-toggle"]:active,
+      .media-page [data-testid="media-clear-filters"]:active{
+        transform:scale(.93);
+      }
+      /* Range-ruler rail segments + minis */
+      .media-range-seg{transition:transform .12s ease, filter .12s ease}
+      .media-range-seg:active{transform:scale(.95);filter:brightness(1.12)}
+      .media-range-photo-jump:active{filter:brightness(1.2)}
+      /* Context-menu rows (JS also sets inline press tint; :active is the fallback) */
+      .media-ctx-card .media-ctx-item{transition:background-color .12s ease, transform .12s ease}
+      .media-ctx-card .media-ctx-item:active:not([data-disabled="true"]){
+        background:rgba(99,102,241,.22) !important;
+        transform:scale(.985);
+      }
+      .media-ctx-card [data-testid="media-ctx-add-stack"]{transition:transform .12s ease, filter .12s ease}
+      .media-ctx-card [data-testid="media-ctx-add-stack"]:active{
+        transform:scale(.93);
+        filter:brightness(1.15);
+      }
+      /* Dialog buttons (move / confirm / prompt / thumbgen / viewer) */
+      .media-page [data-testid="thumbgen-popup"] .btn:active:not(:disabled),
+      .media-page [data-testid="media-viewer"] .btn:active:not(:disabled){
+        transform:scale(.96);
+      }
+      @media(prefers-reduced-motion:reduce){
+        .media-page [data-testid="media-tile-file"],
+        .media-page [data-testid="media-tile-pile"],
+        .media-page [data-testid="media-tile-folder"],
+        .media-page [data-testid="media-tile-playlist"],
+        .media-page .btn,
+        .media-ctx-card .media-ctx-item,
+        .media-ctx-card [data-testid="media-ctx-add-stack"],
+        .media-range-seg{transition:none}
+        .media-page [data-testid="media-tile-file"]:active:not(:has(button:active, a:active)),
+        .media-page [data-testid="media-tile-pile"]:active:not(:has(button:active, a:active)),
+        .media-page [data-testid="media-tile-folder"]:active:not(:has(button:active, a:active)),
+        .media-page [data-testid="media-tile-playlist"]:active:not(:has(button:active, a:active)),
+        .media-page .btn:active:not(:disabled),
+        .media-ctx-card [data-testid="media-ctx-add-stack"]:active{transform:none}
+      }
     

@@ -3253,12 +3253,17 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
   const stackMenuEntries = folderStacks.map((s) => {
     const itemsArr = Array.isArray(s.items) ? s.items : [];
     const membersSet = new Set(itemsArr);
-    const firstMember = filtered.find((x) => !x.dir && membersSet.has(String(rowKey(x)).split("/").pop()));
+    const orderedMembers = filtered.filter((x) => !x.dir && membersSet.has(String(rowKey(x)).split("/").pop()));
+    const firstMember = orderedMembers[0];
+    // Slideshow frames for the context-menu hover preview: member thumbs in
+    // grid order (capped so huge stacks don't ship thousands of URLs).
+    const thumbs = orderedMembers.slice(0, 12).map((m) => thrumb(m)).filter(Boolean);
     return {
       id: s.id,
       name: s.name,
       count: s.count ?? itemsArr.length,
       thumb: firstMember ? thrumb(firstMember) : null,
+      thumbs,
     };
   });
   const promptStackPropsFor = (id) => {
@@ -3461,7 +3466,16 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
       const L = touchLiveRef.current;
       let entry = null;
       if (p.pile) {
-        entry = { kind: "pile", stackId: p.key };
+        // Resolve the full pile entry (with members): the collapsed pile's
+        // context menu (incl. "Move stack & files") needs members to enable.
+        const ve = gridVisibleRef.current.find((e) => e.kind === "pile" && e.stackId === p.key);
+        if (ve && Array.isArray(ve.members) && ve.members.length) {
+          entry = ve;
+        } else {
+          const keys = L.pileMemberKeys ? L.pileMemberKeys(p.key) : [];
+          const members = (L.filtered || []).filter((x) => !x.dir && keys.includes(L.rowKey(x)));
+          entry = { kind: "pile", stackId: p.key, stackName: p.key, members, count: members.length, key: `stack:${p.key}` };
+        }
       } else {
         const it = (L.filtered || []).find((x) => !x.dir && L.rowKey(x) === p.key);
         if (!it) return;
@@ -3802,8 +3816,13 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
   // other files in the selection it offers "Move stack & files" and moves
   // everything (the pile as a unit via moveStackImpact, rest as files).
   const ctxPile = ctxMenu && ctxMenu.entry && ctxMenu.entry.kind === "pile" ? ctxMenu.entry : null;
-  const canMoveStack = !!ctxPile && !isFlat && Array.isArray(ctxPile.members) && ctxPile.members.length > 0;
-  const ctxPileMemberKeys = ctxPile && Array.isArray(ctxPile.members) ? ctxPile.members.map((m) => rowKey(m)) : [];
+  // Pile members may be missing when the menu entry was built without them
+  // (mobile long-press). Fall back to the visible member keys so the move
+  // target set and the enabled state stay correct.
+  const ctxPileDirectKeys = ctxPile && Array.isArray(ctxPile.members) && ctxPile.members.length ? ctxPile.members.map((m) => rowKey(m)) : [];
+  const ctxPileFallbackKeys = ctxPile ? pileMemberKeys(ctxPile.stackId) : [];
+  const ctxPileMemberKeys = ctxPileDirectKeys.length ? ctxPileDirectKeys : ctxPileFallbackKeys;
+  const canMoveStack = !!ctxPile && !isFlat && ctxPileMemberKeys.length > 0;
   const ctxPileExtras = ctxPile ? moveTargets.filter((k) => !ctxPileMemberKeys.includes(k)) : [];
   // Smart move menu: classify the file selection against this folder's
   // stacks (non-flat grid only — flat keeps plain "Move files").
@@ -3834,7 +3853,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
   }, [selectedKeysForStack, folderStacks, filtered, isFlat, inPlaylistView]);
   const moveMenuMode = ctxPile ? (ctxPileExtras.length ? "stackfiles" : "stack") : moveMenuInfo.mode;
   const moveMenuLabel = moveMenuMode === "stack" ? "Move stack" : moveMenuMode === "stackfiles" ? "Move stack & files" : "Move files";
-  const canMoveMenu = ctxPile ? canMoveStack : moveMenuMode === "stackfiles" ? moveMenuInfo.fullCount > 0 : canMove;
+  const canMoveMenu = ctxPile ? (canMoveStack || ctxPileExtras.length > 0) : moveMenuMode === "stackfiles" ? moveMenuInfo.fullCount > 0 : canMove;
   const requestStackMove = async (stackId, target) => {
     const r = await fetch(`/api/stacks/${encodeURIComponent(stackId)}/move?folder=${encodeURIComponent(folder)}`, {
       method: "POST",
