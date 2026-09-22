@@ -1835,6 +1835,85 @@ app.delete("/api/stacks/:id/items", async (req, res) => {
     return res.status(500).json({ ok: false, error: msg });
   }
 });
+// Move a whole stack (plan 032+): the .xdlstack file travels together with
+// all of its member files (plus poster companions) into the target folder,
+// so the pile re-forms there instead of dissolving in the source.
+// Pre-validates every collision before moving anything.
+app.post("/api/stacks/:id/move", async (req, res) => {
+  try {
+    const folder = String(req.body?.folder || req.query?.folder || "").trim();
+    const target = String(req.body?.target || "").trim();
+    const dir = resolveMediaOutputDir(folder);
+    const id = String(req.params.id || "").trim();
+    const full = stackFilePath(dir, id);
+    const stat = await fs.stat(full).catch(() => null);
+    if (!stat || !stat.isFile()) return res.status(404).json({ ok: false, error: "stack not found" });
+    let targetDir;
+    try {
+      targetDir = resolveMediaOutputDir(target);
+    } catch (e) {
+      return res.status(400).json({ ok: false, error: e.message });
+    }
+    if (targetDir === dir) return res.status(400).json({ ok: false, error: "same folder" });
+    const data = parseStackFile(await fs.readFile(full, "utf8"));
+    const targetStacks = await readStacksInFolder(targetDir);
+    if (targetStacks.length >= STACK_LIMIT_PER_FOLDER) return res.status(409).json({ ok: false, error: `too many stacks (max ${STACK_LIMIT_PER_FOLDER})` });
+    if (await fs.stat(path.join(targetDir, id)).catch(() => null)) return res.status(409).json({ ok: false, error: `stack "${data.name}" already exists in target folder` });
+    const entries = await fs.readdir(dir).catch(() => []);
+    // Plan first: every collision aborts before anything moves.
+    const plan = [];
+    const skipped = [];
+    for (const item of data.items) {
+      const src = path.join(dir, item);
+      const st = await fs.stat(src).catch(() => null);
+      if (!st || !st.isFile()) { skipped.push({ name: item, moved: false, error: "not found" }); continue; }
+      if (await fs.stat(path.join(targetDir, item)).catch(() => null)) {
+        return res.status(409).json({ ok: false, error: `target exists: ${item}` });
+      }
+      plan.push(item);
+    }
+    if (!plan.length) return res.status(400).json({ ok: false, error: "no movable files in stack" });
+    await fs.mkdir(targetDir, { recursive: true });
+    // Stack file first: per-file sidecar cleanup below strips the moved
+    // basename from every .xdlstack left in the source folder (other stacks
+    // the file also belongs to) — the moved stack is already gone from there.
+    await fs.rename(full, path.join(targetDir, id));
+    const moved = [];
+    let postersMoved = 0;
+    for (const item of plan) {
+      const src = path.join(dir, item);
+      const dest = path.join(targetDir, item);
+      const oldRel = mediaRelOf(src, mediaDir);
+      await fs.rename(src, dest);
+      moved.push(item);
+      const newRel = mediaRelOf(dest, mediaDir);
+      // Poster companions travel with the file (same skip-on-collision
+      // policy as POST /api/media/move).
+      try {
+        const posters = findCompanionPosters(entries, item);
+        for (const poster of posters) {
+          const pSrc = path.join(dir, poster);
+          const pDest = path.join(targetDir, poster);
+          const pStat = await fs.stat(pSrc).catch(() => null);
+          if (!pStat || pStat.isDirectory()) continue;
+          if (await fs.stat(pDest).catch(() => null)) continue;
+          await fs.rename(pSrc, pDest);
+          postersMoved++;
+          try { await cleanupMoveSidecar(mediaRelOf(pSrc, mediaDir), mediaRelOf(pDest, mediaDir)); } catch {}
+        }
+      } catch {}
+      try { await cleanupMoveSidecar(oldRel, newRel); } catch {}
+    }
+    const stack = await readStackFile(targetDir, id);
+    return res.json({ ok: true, stack, moved, skipped, postersMoved });
+  } catch (error) {
+    const msg = error.message || String(error);
+    if (/stack not found/i.test(msg)) return res.status(404).json({ ok: false, error: msg });
+    if (/already exists|too many/i.test(msg)) return res.status(409).json({ ok: false, error: msg });
+    if (/same folder|no movable|invalid|target exists/i.test(msg)) return res.status(400).json({ ok: false, error: msg });
+    return res.status(500).json({ ok: false, error: msg });
+  }
+});
 // --- GIF → MP4 streaming conversion (cache in tmp, single-flight per key) ---
 const gifCacheDir = path.join(require("os").tmpdir(), "xdl-gifcache");
 const gifInFlight = new Map();

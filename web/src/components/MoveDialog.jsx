@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 // folder, lists subfolders only; folder names enter, Up climbs, breadcrumb
 // jumps, per-row Move buttons target subfolders, footer Move here targets
 // the displayed folder itself.
-export default function MoveDialog({ open, items, sourceFolder, onClose, onDone }) {
+export default function MoveDialog({ open, items, sourceFolder, heading, onMoveTarget, onClose, onDone }) {
   const names = Array.isArray(items) ? items : [];
   // Browsed location. The parent remounts the dialog (via `key`) on every
   // open, so the initial state is always the menu-click sourceFolder.
@@ -68,6 +68,12 @@ export default function MoveDialog({ open, items, sourceFolder, onClose, onDone 
     if (moving) return;
     setMoving(true);
     try {
+      // Stack mode: the parent owns the request (POST /api/stacks/:id/move).
+      if (onMoveTarget) {
+        const j = await onMoveTarget(target);
+        onDone(j);
+        return;
+      }
       const r = await fetch("/api/media/move", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -96,7 +102,7 @@ export default function MoveDialog({ open, items, sourceFolder, onClose, onDone 
       >
         <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 14px", borderBottom: "1px solid var(--border)" }}>
           <div style={{ fontWeight: 700, fontSize: 14, color: "var(--text)", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            Move {names.length} item{names.length === 1 ? "" : "s"}
+            {heading || `Move ${names.length} item${names.length === 1 ? "" : "s"}`}
           </div>
           <button data-testid="media-move-close" type="button" className="btn btn-sm btn-outline-secondary" onClick={onClose} title="Close" style={{ padding: "2px 8px" }}>
             <i className="bi bi-x-lg" />

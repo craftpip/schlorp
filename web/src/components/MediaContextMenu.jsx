@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 
-export default function MediaContextMenu({ menu, onClose, stacks, selCount, onStack, onOpen, onOpenStack, onMove, canMove, onCreateFolder, onDelete, onAddToStack, onRename, onUnstack, onRemoveFromStack, noStacks, onGotoFile }) {
+export default function MediaContextMenu({ menu, onClose, stacks, selCount, onStack, onOpen, onOpenStack, onMove, canMove, onMoveStack, canMoveStack, onCreateFolder, onDelete, onAddToStack, onRename, onUnstack, onRemoveFromStack, noStacks, onGotoFile }) {
   // Scroll lock while the popup is open (same as ConfirmModal) so the grid
   // behind the backdrop doesn't scroll (plan 024).
   useEffect(() => {
@@ -64,7 +64,7 @@ export default function MediaContextMenu({ menu, onClose, stacks, selCount, onSt
           {!noStacks && <Divider />}
           <MenuItem label="Open" icon="bi-box-arrow-up-right" onClick={() => { onClose(); onOpen(); }} />
           {!isPlaylistFile && <MenuItem data-testid="media-ctx-create-folder" label="Create folder" icon="bi-folder-plus" onClick={() => { onClose(); onCreateFolder(); }} />}
-          <MenuItem data-testid="media-ctx-move" label="Move files" icon="bi-arrows-move" disabled={!canMove} onClick={() => { onClose(); onMove(); }} />
+          <MenuItem data-testid="media-ctx-move" label={isPile ? "Move stack" : "Move files"} icon="bi-arrows-move" disabled={isPile ? !canMoveStack : !canMove} onClick={() => { onClose(); (isPile ? onMoveStack : onMove)(); }} />
           <MenuItem label="Delete" icon="bi-trash" danger onClick={() => { onClose(); onDelete(); }} />
           {!noStacks && isPile && (
             <>

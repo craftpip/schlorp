@@ -2594,7 +2594,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         data-filename={stackId}
         data-selected={members.some((m) => selKey === rowKey(m))}
         onClick={(e) => gridClickHandler(entry, e)}
-        onContextMenu={(e) => { if (e.ctrlKey) { e.preventDefault(); toggleSelection(entry); } }}
+        onContextMenu={(e) => { if (e.ctrlKey) { e.preventDefault(); toggleSelection(entry); return; } openContextMenu(e, entry); }}
         onDoubleClick={(e) => {
           // Double-click pile: spread it, select the first member only
           // (locked mode: never opens).
@@ -2689,7 +2689,20 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     }
     // Right-click / long-press on an unselected file joins the existing
     // selection (any current multi-select is kept) so the menu acts on it.
-    if (entry.kind === "file" && entry.key) {
+    // Right-click on a collapsed pile join-selects the whole stack.
+    if (entry.kind === "pile" && Array.isArray(entry.members) && entry.members.length) {
+      const keys = entry.members.map((m) => rowKey(m));
+      const cur = selKeys.size ? selKeys : selKey ? new Set([selKey]) : new Set();
+      if (!keys.every((k) => cur.has(k))) {
+        setSelKeys((prev) => {
+          const next = new Set(prev.size ? prev : (selKey ? [selKey] : []));
+          for (const k of keys) next.add(k);
+          return next;
+        });
+        setAnchorKey(keys[0]);
+        setSelectedKey(keys[0]);
+      }
+    } else if (entry.kind === "file" && entry.key) {
       const already = (selKeys.size ? selKeys : selKey ? new Set([selKey]) : new Set()).has(entry.key);
       if (!already) {
         setSelKeys((prev) => {
@@ -3282,10 +3295,10 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tapGate, filtered.length]);
 
-  // --- Move files (plan 026): same target resolution as Delete, but piles
-  // can never move (stack transfer out of scope) and an empty selection
-  // means nothing to move. Snapshot taken at menu click so a selection
-  // change while the dialog is open never shifts the target set.
+  // --- Move files (plan 026): same target resolution as Delete, and an
+  // empty selection means nothing to move. Collapsed piles move as a unit
+  // via "Move stack" (stack file + members). Snapshot taken at menu click so
+  // a selection change while the dialog is open never shifts the target set.
   const moveTargets = useMemo(() => {
     const keys = [...selectedKeysForStack];
     if (!keys.length && ctxMenu && ctxMenu.entry && ctxMenu.entry.kind === "file" && ctxMenu.entry.it) keys.push(rowKey(ctxMenu.entry.it));
@@ -3296,6 +3309,10 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedKeysForStack, ctxMenu, filtered]);
   const canMove = !(ctxMenu && ctxMenu.entry && ctxMenu.entry.kind === "pile") && moveTargets.length > 0;
+  // Piles move as a unit (stack file + members together): right-clicking a
+  // collapsed pile offers "Move stack" instead of "Move files".
+  const ctxPile = ctxMenu && ctxMenu.entry && ctxMenu.entry.kind === "pile" ? ctxMenu.entry : null;
+  const canMoveStack = !!ctxPile && Array.isArray(ctxPile.members) && ctxPile.members.length > 0;
   const moveNames = useMemo(
     () => (moveCtx ? moveCtx.files.map((k) => (isFlat ? k : String(k).split("/").pop())) : []),
     [moveCtx, isFlat]
@@ -3707,6 +3724,15 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         onStack={() => stackSelectionNow()}
         onMove={() => setMoveCtx({ files: moveTargets })}
         canMove={canMove}
+        onMoveStack={() => {
+          if (!ctxPile) return;
+          setMoveCtx({
+            stackId: ctxPile.stackId,
+            stackName: ctxPile.stackName || ctxPile.stackId,
+            files: (ctxPile.members || []).map((m) => rowKey(m)),
+          });
+        }}
+        canMoveStack={canMoveStack}
         onCreateFolder={() => setPromptState({ open: true, id: "newfolder", value: "" })}
         onOpen={() => {
           const entry = ctxMenu && ctxMenu.entry;
@@ -3789,10 +3815,23 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         }}
       />
       <MoveDialog
-        key={moveCtx ? `${folder}::${moveCtx.files.join("\n")}` : "move-closed"}
+        key={moveCtx ? `${folder}::${moveCtx.stackId || ""}::${moveCtx.files.join("\n")}` : "move-closed"}
         open={!!moveCtx}
         items={moveNames}
         sourceFolder={folder}
+        heading={moveCtx && moveCtx.stackId ? `Move stack "${moveCtx.stackName || moveCtx.stackId}"` : undefined}
+        onMoveTarget={moveCtx && moveCtx.stackId ? async (target) => {
+          const r = await fetch(`/api/stacks/${encodeURIComponent(moveCtx.stackId)}/move?folder=${encodeURIComponent(folder)}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ folder, target }),
+          });
+          const j = await r.json().catch(() => ({}));
+          if (!r.ok || !j.ok) throw new Error((j && j.error) || "move failed");
+          const results = (Array.isArray(j.moved) ? j.moved : []).map((n) => ({ name: String(n).split("/").pop(), moved: true }));
+          for (const s of (Array.isArray(j.skipped) ? j.skipped : [])) results.push({ name: s.name, moved: false, error: s.error || "skipped" });
+          return { ok: true, moved: results.filter((x) => x.moved).length, results };
+        } : undefined}
         onClose={() => setMoveCtx(null)}
         onDone={handleMoveDone}
       />
