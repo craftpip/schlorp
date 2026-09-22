@@ -231,6 +231,8 @@ export default function Media() {
   };
   const GRID_GAP = 8;
   const GRID_TARGET_H = gridW > 0 && gridW < 640 ? 140 : 240;
+  // Range-ruler rail (plan 034): 50 files per range segment.
+  const RANGE_SIZE = 50;
   // Must match renderPile's PEEK (10): the closed pile shows a 10px strip of
   // each under-card. The footprint collapse below uses it to rebuild the pile's
   // exact PEEK offsets when the stack opens/closes.
@@ -2301,6 +2303,246 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     }
     return m;
   }, [closingSpreadId, gridVisible, folderStacks]);
+  // Range-ruler rail (plan 034): partition the file position space (viewable
+  // order) into 50-file ranges. Display order always follows the grid
+  // top→bottom — ONLY the Gallery labels differ: they count from 0 at the
+  // bottom (N=120: 120-100, 100-50, 50-0). Other sorts label from the top
+  // (1-50, 51-100). Piles are atomic: a pile straddling a boundary belongs
+  // wholly to the range holding its first member in view order.
+  const isGalleryRail = sort === "custom" && !inPlaylistView;
+  const rangeSegments = useMemo(() => {
+    if (!isGrid || !gridW) return [];
+    const list = inPlaylistView && playlistItemsForView ? playlistItemsForView : filtered.filter((it) => !it.dir);
+    const n = list.length;
+    if (n <= RANGE_SIZE) return [];
+    // Pile membership: member rowKey -> pile stackId + first-member index.
+    const memberPile = new Map();
+    const pileFirstIdx = new Map();
+    const pileCoverKey = new Map();
+    if (stacksActive) {
+      const byId = new Map();
+      list.forEach((it, idx) => {
+        const st = (it.stacks || [])[0];
+        if (!st) return;
+        if (!byId.has(st.id)) byId.set(st.id, []);
+        byId.get(st.id).push({ it, idx, key: rowKey(it) });
+      });
+      for (const [sid, members] of byId) {
+        if (members.length < 2) continue;
+        const first = Math.min(...members.map((mm) => mm.idx));
+        pileFirstIdx.set(sid, first);
+        pileCoverKey.set(sid, members.find((mm) => mm.idx === first).key);
+        for (const mm of members) memberPile.set(mm.key, sid);
+      }
+    }
+    // Chunk of a view-order index. Normal sorts anchor chunks at the top;
+    // Gallery anchors at the bottom counting from 0 (bottom item = 0).
+    // Display index k always runs top→bottom in grid order — never reversed.
+    const count = Math.ceil(n / RANGE_SIZE);
+    const chunkOf = (idx) => (isGalleryRail ? Math.floor((n - 1 - idx) / RANGE_SIZE) : Math.floor(idx / RANGE_SIZE));
+    const segOf = (idx, key) => {
+      const sid = memberPile.get(key);
+      const c = sid != null && pileFirstIdx.has(sid) ? chunkOf(pileFirstIdx.get(sid)) : chunkOf(idx);
+      return isGalleryRail ? count - 1 - c : c;
+    };
+    const segs = [];
+    for (let k = 0; k < count; k++) {
+      let label;
+      if (isGalleryRail) {
+        const j = count - 1 - k; // chunk from the bottom (0 = bottom chunk)
+        label = `${Math.min((j + 1) * RANGE_SIZE, n)}-${j * RANGE_SIZE}`;
+      } else {
+        label = `${k * RANGE_SIZE + 1}-${Math.min((k + 1) * RANGE_SIZE, n)}`;
+      }
+      segs.push({ idx: k, label, keys: [], minis: [] });
+    }
+    list.forEach((it, idx) => {
+      const key = rowKey(it);
+      const r = segOf(idx, key);
+      if (segs[r]) segs[r].keys.push({ it, idx, key });
+    });
+    // Two minis per range: first 2 assigned files (view order) with a thumb URL.
+    for (const seg of segs) {
+      for (const { it } of seg.keys) {
+        if (seg.minis.length >= 2) break;
+        let url = null;
+        try { url = thrumb(it); } catch { url = null; }
+        if (url) seg.minis.push({ url, key: rowKey(it) });
+      }
+      // Jump target: first assigned file (view order = visual top of range).
+      seg.target = seg.keys.length ? seg.keys[0] : null;
+    }
+    return segs;
+  }, [isGrid, gridW, filtered, playlistItemsForView, inPlaylistView, stacksActive, sort, folder]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Key -> range idx (for scroll-spy active state). Pile members map via
+  // their pile's first member, matching the atomic assignment above.
+  const keyRangeMap = useMemo(() => {
+    const m = new Map();
+    for (const seg of rangeSegments) for (const { key } of seg.keys) m.set(key, seg.idx);
+    return m;
+  }, [rangeSegments]);
+  const showRail = isGrid && !!gridW && rangeSegments.length > 0;
+  const [activeRangeIdx, setActiveRangeIdx] = useState(null);
+  // Rail overflow edge shadows: which sides can scroll further.
+  const [railEdges, setRailEdges] = useState({ top: false, bottom: false });
+  // (No scroll-sync echo guards needed: sync is one-way page→rail, and the
+  // rail never drives the page. Jump-to-range glides use smooth scrolling.)
+  // Touch-hold: manual rail interaction (touch/wheel/drag) pauses the
+  // page-follow so the rail doesn't snap back mid-browse. Press-and-hold
+  // keeps the hold for the whole touch (pointer/touch start → end); wheel
+  // ticks and release get a 2.5s grace window.
+  const railHoldUntilRef = useRef(0);
+  const RAIL_HOLD_GRACE_MS = 2500;
+  // Capped (30s) so a lost pointer-up can't pause the follow forever.
+  const holdRailStart = () => { railHoldUntilRef.current = performance.now() + 30000; };
+  const holdRailEnd = () => { railHoldUntilRef.current = performance.now() + RAIL_HOLD_GRACE_MS; };
+
+  // Scroll-spy: active segment follows the top-visible tile (rAF-throttled).
+  useEffect(() => {
+    if (!showRail) return undefined;
+    let raf = 0;
+    const onScroll = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        const grid = gridFilesRef.current;
+        if (!grid) return;
+        const sticky = document.querySelector('[data-testid="media-sticky"]');
+        const offset = (sticky ? sticky.offsetHeight : 0) + 12;
+        let best = null;
+        for (const el of grid.querySelectorAll("[data-filename]")) {
+          if (el.classList.contains("media-tile-folder")) continue;
+          if (el.getAttribute("data-testid") === "media-tile-file" && el.closest && el.closest('[data-testid="media-tile-pile"]')) continue;
+          const r = el.getBoundingClientRect();
+          if (r.bottom > offset && r.top < window.innerHeight) { best = el.getAttribute("data-filename"); break; }
+        }
+        if (best == null) return;
+        // A pile container reports its stack key: map to its first member's range.
+        let ridx = keyRangeMap.get(best);
+        if (ridx == null && String(best).startsWith("stack:")) {
+          const mem = pileMemberKeys(String(best).slice("stack:".length));
+          if (mem.length) ridx = keyRangeMap.get(mem[0]);
+        }
+        if (ridx != null) setActiveRangeIdx((cur) => (cur === ridx ? cur : ridx));
+        // Page→rail follow: bring the ACTIVE segment into view, centered in
+        // the rail box when possible (no proportional scroll sync). Paused
+        // while the user is manually browsing the rail (touch-hold). The rail
+        // CSS glides (scroll-behavior:smooth) toward each write.
+        {
+          const rail = document.querySelector('[data-testid="media-range-ruler"]');
+          if (rail && performance.now() >= railHoldUntilRef.current) {
+            const rMax = rail.scrollHeight - rail.clientHeight;
+            if (rMax > 0) {
+              const segEl = ridx != null ? rail.querySelector(`[data-range-idx="${ridx}"]`) : null;
+              if (segEl) {
+                const target = Math.min(rMax, Math.max(0, segEl.offsetTop + segEl.offsetHeight / 2 - rail.clientHeight / 2));
+                if (Math.abs(rail.scrollTop - target) > 2) rail.scrollTop = target;
+              }
+            }
+          }
+        }
+      });
+    };
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => { window.removeEventListener("scroll", onScroll); if (raf) cancelAnimationFrame(raf); };
+  }, [showRail, keyRangeMap]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Rail overflow edges (for inset scroll shadows): refreshed on rail
+  // scroll, on show/segments change, and on window resize.
+  const updateRailEdges = (rail) => {
+    if (!rail) return;
+    const canUp = rail.scrollTop > 2;
+    const canDown = rail.scrollTop + rail.clientHeight < rail.scrollHeight - 2;
+    setRailEdges((prev) => (prev.top === canUp && prev.bottom === canDown ? prev : { top: canUp, bottom: canDown }));
+  };
+  useEffect(() => {
+    if (!showRail) return undefined;
+    const update = () => updateRailEdges(document.querySelector('[data-testid="media-range-ruler"]'));
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, [showRail, rangeSegments]);
+  // Rail scroll is follow-only: it never drives the page (click a segment
+  // to jump). The handler just refreshes overflow edge shadows.
+  const onRailScroll = (e) => {
+    updateRailEdges(e.currentTarget);
+  };
+  const escSel = (key) => {
+    try { return `[data-filename="${typeof CSS !== "undefined" && CSS.escape ? CSS.escape(key) : key}"]`; }
+    catch { return "[data-filename]"; }
+  };
+  // Click a range: scroll the target tile/pile just below the sticky toolbar
+  // (piles stay closed) and move selection there so arrows continue from it.
+  // Clears the touch-hold so the rail follows to the jumped segment.
+  const jumpToRange = (seg) => {
+    if (!seg || !seg.target) return;
+    railHoldUntilRef.current = 0;
+    const { key } = seg.target;
+    const sid = (() => {
+      const it = (inPlaylistView && playlistItemsForView ? playlistItemsForView : filtered.filter((x) => !x.dir)).find((x) => rowKey(x) === key);
+      return it && Array.isArray(it.stacks) && it.stacks[0] && stacksActive ? it.stacks[0].id : null;
+    })();
+    // Closed pile showing this file? Land on the pile container instead.
+    let sel = null;
+    if (sid && spreadStackId !== sid && stacksMode !== "open") {
+      const pileEl = gridFilesRef.current && gridFilesRef.current.querySelector(`[data-testid="media-tile-pile"]${escSel(`stack:${sid}`)}`);
+      if (pileEl) {
+        const sticky = document.querySelector('[data-testid="media-sticky"]');
+        const offset = (sticky ? sticky.offsetHeight : 0) + 12;
+        const r = pileEl.getBoundingClientRect();
+        window.scrollTo({ top: Math.max(0, window.scrollY + r.top - offset), behavior: "smooth" });
+        const mem = pileMemberKeys(sid);
+        const firstKey = mem.length ? mem[0] : key;
+        setSelKeys(new Set([firstKey]));
+        setAnchorKey(firstKey);
+        setSelectedKey(firstKey);
+        setActiveRangeIdx(seg.idx);
+        return;
+      }
+    }
+    const grid = gridFilesRef.current;
+    sel = grid && grid.querySelector(`[data-testid="media-tile-file"]${escSel(key)}`);
+    if (!sel) sel = document.querySelector(`[data-testid="media-tile-file"]${escSel(key)}`);
+    if (sel) {
+      const sticky = document.querySelector('[data-testid="media-sticky"]');
+      const offset = (sticky ? sticky.offsetHeight : 0) + 12;
+      const r = sel.getBoundingClientRect();
+      window.scrollTo({ top: Math.max(0, window.scrollY + r.top - offset), behavior: "smooth" });
+    }
+    setSelKeys(new Set([key]));
+    setAnchorKey(key);
+    setSelectedKey(key);
+    setActiveRangeIdx(seg.idx);
+  };
+  const renderRangeRail = () => {
+    if (!showRail) return null;
+    // Inset scroll shadows on sides that have overflowed content.
+    const railShadow = [
+      railEdges.top ? "inset 0 12px 10px -8px rgba(0,0,0,.4)" : null,
+      railEdges.bottom ? "inset 0 -12px 10px -8px rgba(0,0,0,.4)" : null,
+    ].filter(Boolean).join(", ") || "none";
+    return (
+      <div data-testid="media-range-ruler" className="media-range-rail" onScroll={onRailScroll} style={{ boxShadow: railShadow }}
+        onPointerDown={holdRailStart} onPointerUp={holdRailEnd} onPointerCancel={holdRailEnd} onPointerLeave={holdRailEnd}
+        onTouchStart={holdRailStart} onTouchEnd={holdRailEnd} onWheel={holdRailEnd}>
+        {rangeSegments.map((seg) => {
+          const active = activeRangeIdx === seg.idx || (activeRangeIdx == null && selKey && keyRangeMap.get(selKey) === seg.idx);
+          return (
+            <button key={seg.idx} data-testid="media-range-ruler-seg" data-range-idx={seg.idx} data-active={active ? "true" : "false"}
+              type="button" className="media-range-seg" onClick={() => jumpToRange(seg)}
+              title={`Items ${seg.label}`}>
+              <span className="media-range-minis">
+                {seg.minis.length ? seg.minis.map((mm) => (
+                  <span key={mm.key} className="media-range-photo" style={{ backgroundImage: `url("${mm.url}")` }} />
+                )) : <span className="media-range-mini-fallback"><i className="bi bi-image" /></span>}
+              </span>
+              <span className="media-range-label">{seg.label}</span>
+            </button>
+          );
+        })}
+      </div>
+    );
+  };
   // Live refs so the keyboard effect can always read fresh grid data
   const gridVisibleRef = useRef(gridVisible);
   gridVisibleRef.current = gridVisible;
@@ -3559,8 +3801,11 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                     <span style={{ flex: 1 }} />
                     <button className="btn btn-sm btn-outline-secondary" onClick={closePlaylist} title="Back to Media"><i className="bi bi-arrow-90deg-up" /> Back</button>
                   </div>
-                  <div data-testid="media-grid-files" ref={gridFilesRef} style={{ display: "flex", flexWrap: "wrap", gap: GRID_GAP }}>
+                  <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                  <div data-testid="media-grid-files" ref={gridFilesRef} style={{ display: "flex", flexWrap: "wrap", gap: GRID_GAP, flex: 1, minWidth: 0 }}>
                     {fileRows.map((row) => renderTile(row.it, row.i, row.w, row.h))}
+                  </div>
+                  {renderRangeRail()}
                   </div>
                 </div>
               )
@@ -3579,7 +3824,8 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                   </div>
                 )}
                 {(gridVisibleWithWidths.length > 0 || (gridVisibleWithWidths.length === 0 && filtered.length === 0 && (folder || playlists.length === 0))) && (
-                  <div data-testid="media-grid-files" ref={gridFilesRef} style={{ display: "flex", flexWrap: "wrap", gap: GRID_GAP }}
+                  <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                  <div data-testid="media-grid-files" ref={gridFilesRef} style={{ display: "flex", flexWrap: "wrap", gap: GRID_GAP, flex: 1, minWidth: 0 }}
                     onContextMenu={(e) => {
                       // Ctrl+click (macOS right-click emulation) only toggles
                       // selection — never opens the menu.
@@ -3643,6 +3889,8 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                     }}
                   >
                     {filtered.length === 0 ? (!loading && !err ? (filtersActive ? filterEmptyNotice : <div data-testid="media-empty" className="empty" style={{ padding: 20, gridColumn: "1 / -1", width: "100%", textAlign: "center" }}><i className="bi bi-inbox" /> {folder ? "This folder is empty" : "No files — download something!"}</div>) : null) : gridVisibleWithWidths.map((entry) => (entry.kind === "pile" ? renderPile(entry) : renderTile(entry.it, 0, entry.w, entry.h)))}
+                  </div>
+                  {renderRangeRail()}
                   </div>
                 )}
                 {filtered.length > 0 && fileRows.length === 0 && !inPlaylistView && (filtersActive ? filterEmptyNotice : <div data-testid="media-empty" className="empty" style={{ padding: 12 }}><i className="bi bi-inbox" /> No files in this folder</div>)}

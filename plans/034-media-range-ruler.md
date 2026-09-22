@@ -1,7 +1,7 @@
 # 034 — Media grid range-ruler scrollbar
 
 > Project: **xdl** — media grid UI (`web/src/views/Media.jsx` + `web/src/styles.css`, no backend change).
-> Date: 2026-09-22. Status: **Proposed** (plan only, not implemented).
+> Date: 2026-09-22. Status: **Implemented** (2026-09-22: rail + minis + pile-atomic + scroll-spy in `Media.jsx`, styles in `styles.css`; `npm run lint` clean, `npm run build` OK).
 > Scope: grid view only (`?view != list`). List view unchanged.
 
 ---
@@ -11,8 +11,8 @@
 Grid view gets a vertical range scrollbar on the right side, Google-Photos-timeline style:
 
 - Not a timeline — **ranges of 50 items**, ruler-like numbered segments, click jumps to that range.
-- **Gallery (`sort=custom`, default): ranges start from the bottom** — top of rail = highest range. Example with 120 items, top→bottom: `120-101`, `100-51`, `50-1`.
-- **Other sorts (Name / Size / Time): ranges start from 0/1 on top** — top→bottom: `1-50`, `51-100`, `101-120`.
+- **Gallery (`sort=custom`, time-desc): rail follows the grid top→bottom; ONLY the labels count from 0 at the bottom.** Example with 120 items, top→bottom: `120-100`, `100-50`, `50-0` (chunk boundaries anchored at the bottom, so the top chunk is the partial one). (2026-09-22: briefly reversed the whole segment order by mistake — reverted; order always = grid order, Gallery differs in labels only.)
+- **Other sorts (Name / Size / Time): labels count from the top.** Top→bottom: `1-50`, `51-100`, `101-120`.
 - **1-based labels** (inclusive): `1-50`, not `0-50`. Last range may be partial (`101-120`).
 - Each range segment shows **2 thumbnails** of items in that range.
 - Piles stay **closed** on jump. A pile split across a boundary **belongs wholly to the top range** (the range holding its first file in view order); the full pile shows/jumps with that range.
@@ -21,7 +21,8 @@ Grid view gets a vertical range scrollbar on the right side, Google-Photos-timel
 
 - **Counted set = `viewable`** (`filtered.filter(it => !it.dir)`). Folders/playlist chips excluded.
 - **Position = index in current view order** (0 = visual top). Range `k` (0-based) covers 1-based positions `[k*50+1, min((k+1)*50, N)]`.
-- **Gallery flip is display-only**: same position partition; rail order reversed and each label printed `end-start` (`120-101`); normal sorts print `start-end` (`101-120`).
+- **Rail order always = grid order (top→bottom) in every mode.** Gallery differs in labels only (0-based from the bottom).
+- **Playlist view (`?pl=`)**: ascending rail like normal sorts.
 - **Playlist view (`?pl=`)**: ascending rail like normal sorts.
 - **Visibility**: show rail only when `isGrid && gridW && viewable.length > 50`. Hidden at ≤640px width.
 - **Range size**: constant `RANGE_SIZE = 50`.
@@ -36,16 +37,15 @@ Grid view gets a vertical range scrollbar on the right side, Google-Photos-timel
 
 ## 3. UI (Google-Photos-style rail)
 
-- Layout: flex row beside `media-grid-files` — files `flex:1`, rail fixed ~64px wide. Rail: `position: sticky; top: <sticky-toolbar-height + 12px>; max-height: 60vh; overflow-y: auto`.
-- Segment = `<button data-testid="media-range-ruler-seg">` containing **2 square minis** (~28×28px, `border-radius: 6px`, `object-fit: cover`, 4px gap) + range label below/beside. Muted label text; accent dot/ring on the **active** range (follows window scroll via rAF-throttled scroll listener mapping top-visible tile → range). Hover = accent wash. Minimal, one accent, 8px radii.
+- Layout: flex row beside `media-grid-files` — files `flex:1`, rail fixed ~64px wide, borderless/transparent. Rail: `position: sticky; top: 76px; max-height: calc(100vh - 100px)` (stretches to viewport bottom); overflow-y auto.
+- Segment = `<button data-testid="media-range-ruler-seg">` with a **vertical stack of 2 full-bleed photo blocks** (range content as `background-image: cover`, full rail width, 52px+ each — no boxes/borders) + range label overlaid at the bottom (white + scrim gradient). **Highlight = opacity**: inactive `.45`, hover `.8`, active `1` (scroll-spy maps top-visible tile → range). **One-way follow (page→rail only, no scroll sync)**: body scroll brings the ACTIVE segment into view, centered in the rail box when possible. The rail never drives the page — use click-to-jump. rAF-throttled; rail glides via `scroll-behavior:smooth`, jumps via smooth `scrollTo`, reduced-motion falls back to instant. **Overflow shadows**: inset box-shadow on rail top/bottom whenever that side has more to scroll (refreshed on rail scroll incl. programmatic writes, show/segments change, window resize). Click-to-jump unchanged.
 - No drag-scrub bubble (Photos shows a big overlay while dragging) — click-to-jump + active-follow only. Add later if wanted.
 
 ## 4. Thumbnails (2 per range)
 
 - Source: reuse tile resolver `thrumb(it)` (poster sibling → photo/gif file itself → `/api/mediathumb` for video). No new endpoints; browser cache shared with grid tiles.
 - Pick **first 2 files assigned to that range (post pile-assignment) that yield a thumb URL**, in view order (Gallery: topmost-first within the range). Pile member → use pile cover thumb (first member's thumb).
-- Fallbacks: <2 thumb-bearing files → mini + icon placeholder box; video with no poster → tile's icon fallback. Mini `onError` → swap to icon box, never a broken-image glyph.
-- Perf: `<img loading="lazy" decoding="async">`, fixed CSS size (no layout shift). ~20 tiny imgs for 10 ranges, all cache hits from on-screen tiles.
+- Fallbacks: <2 thumb-bearing files → show what exists; none → neutral icon block. A thumb URL that 404s renders an empty neutral block (backgrounds have no error event). Rendered as `background-image` divs (no `<img>`), so no native lazy-loading — fine, ~20 small images, all cache hits from on-screen tiles.
 
 ## 5. Interaction
 
