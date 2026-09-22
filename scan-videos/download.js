@@ -35,16 +35,49 @@ function posterPathFor(videoPath) {
     : `${videoPath}-poster.jpg`;
 }
 
+const POSTER_SIBLING_RE = /^(.*)-poster\.(jpe?g|png|webp|avif|gif)$/i;
+
+// Stem of a file name (extension stripped) — "<video>-poster.jpg" pair key.
+function posterStemOf(name) {
+  return String(name || "").replace(/\.[^.]+$/, "");
+}
+
+function isVideoFileName(name) {
+  const ext = String(name || "").split(".").pop().toLowerCase();
+  return VIDEO_EXTS.has(ext);
+}
+
+// Decide which videos in a directory listing get a poster frame:
+// - "missing": only videos whose stem has no `<stem>-poster.*` sibling.
+// - "all": every video (existing posters are regenerated).
+// Pure (no ffmpeg/fs) so it can be unit-tested. Returns { targets, skipped }.
+function selectPosterTargets(names, mode) {
+  const videos = (names || []).filter(isVideoFileName).sort();
+  const posterStems = new Set();
+  for (const n of names || []) {
+    const m = POSTER_SIBLING_RE.exec(n);
+    if (m) posterStems.add(m[1].toLowerCase());
+  }
+  const targets = [];
+  const skipped = [];
+  for (const name of videos) {
+    if (mode === "missing" && posterStems.has(posterStemOf(name).toLowerCase())) skipped.push(name);
+    else targets.push(name);
+  }
+  return { targets, skipped };
+}
+
 // Best-effort: extract a representative frame next to the video as
 // `<stem>-poster.jpg`. Never throws — a failed thumbnail is not a failed download.
-async function generatePosterThumbnail(videoPath) {
+// `overwrite: true` re-extracts even when a poster already exists (ffmpeg `-y`).
+async function generatePosterThumbnail(videoPath, { overwrite = false } = {}) {
   try {
     const ext = path.extname(videoPath).slice(1).toLowerCase();
     if (!VIDEO_EXTS.has(ext)) return null;
     if (!(await hasFfmpeg())) return null;
     const posterPath = posterPathFor(videoPath);
     if (posterPath === videoPath) return null;
-    try { await fs.access(posterPath); return posterPath; } catch {}
+    try { await fs.access(posterPath); if (!overwrite) return posterPath; } catch {}
 
     // Thumbnail frame timestamp: the exact middle of the video (t = duration/2).
     const durationSeconds = await probeDurationSeconds(videoPath);
@@ -482,4 +515,10 @@ module.exports = {
   muxVideoAndAudio,
   mediaHasAudio,
   downloadMedia,
+  generatePosterThumbnail,
+  posterPathFor,
+  posterStemOf,
+  isVideoFileName,
+  selectPosterTargets,
+  POSTER_SIBLING_RE,
 };

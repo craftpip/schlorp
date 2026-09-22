@@ -112,8 +112,6 @@ function StackCell({ s, member, disabled, onClick, onOpen }) {
       data-testid="media-ctx-add-stack"
       title={s.name}
       onClick={disabled ? (e) => e.stopPropagation() : onClick}
-      onMouseEnter={(e) => { if (!disabled) e.currentTarget.style.borderColor = "var(--accent)"; }}
-      onMouseLeave={(e) => { e.currentTarget.style.borderColor = ""; }}
       style={{ position: "relative", width: "100%", aspectRatio: "6 / 5", borderRadius: 8, overflow: "hidden", background: "#000", border: `1px solid ${member ? "var(--accent)" : "var(--border)"}`, cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.4 : 1 }}
     >
       {s.thumb ? (

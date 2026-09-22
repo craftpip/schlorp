@@ -5,7 +5,7 @@ const path = require("path");
 const fs = require("fs/promises");
 
 const { fixtureServer } = require("../helpers/fixture-server");
-const { hasFfmpeg, muxVideoAndAudio, mediaHasAudio, downloadMedia } = require("../../scan-videos/download");
+const { hasFfmpeg, muxVideoAndAudio, mediaHasAudio, downloadMedia, generatePosterThumbnail, selectPosterTargets, posterStemOf, isVideoFileName } = require("../../scan-videos/download");
 
 function tmpDir() { return fs.mkdtemp(path.join(os.tmpdir(), "download-test-")); }
 
@@ -307,4 +307,51 @@ test("downloadMedia: createOutDir creates missing directory", async () => {
   } finally {
     await srv.close();
   }
+});
+
+test("isVideoFileName: video containers true, others false", () => {
+  assert.equal(isVideoFileName("clip.mp4"), true);
+  assert.equal(isVideoFileName("clip.MKV"), true);
+  assert.equal(isVideoFileName("clip.webm"), true);
+  assert.equal(isVideoFileName("pic.jpg"), false);
+  assert.equal(isVideoFileName("anim.gif"), false);
+  assert.equal(isVideoFileName("song.mp3"), false);
+  assert.equal(isVideoFileName("noext"), false);
+});
+
+test("posterStemOf: strips the extension for poster-pair lookup", () => {
+  assert.equal(posterStemOf("clip.mp4"), "clip");
+  assert.equal(posterStemOf("clip.mkv"), "clip");
+  assert.equal(posterStemOf("fold/vid.webm"), "fold/vid");
+});
+
+test("selectPosterTargets: missing mode targets only videos without a poster sibling", () => {
+  const names = ["a.mp4", "a-poster.jpg", "b.mp4", "b-poster.png", "c.mkv", "d.webm", "pic.png", "clip.gif"];
+  const r = selectPosterTargets(names, "missing");
+  assert.deepEqual(r.targets, ["c.mkv", "d.webm"]);
+  assert.deepEqual(r.skipped, ["a.mp4", "b.mp4"]);
+});
+
+test("selectPosterTargets: all mode regenerates every video, skips nothing", () => {
+  const names = ["a.mp4", "a-poster.jpg", "b.mp4", "c.gif", "d.mp3"];
+  const r = selectPosterTargets(names, "all");
+  assert.deepEqual(r.targets, ["a.mp4", "b.mp4"]);
+  assert.deepEqual(r.skipped, []);
+});
+
+test("selectPosterTargets: poster sibling match is case-insensitive across exts", () => {
+  const names = ["a.mp4", "a-POSTER.PNG", "b.mkv", "b-Poster.JPeG", "c.webm"];
+  const r = selectPosterTargets(names, "missing");
+  assert.deepEqual(r.targets, ["c.webm"]);
+  assert.deepEqual(r.skipped, ["a.mp4", "b.mkv"]);
+});
+
+test("generatePosterThumbnail: without ffmpeg returns null and creates nothing", async () => {
+  const out = await tmpDir();
+  const video = path.join(out, "clip.mp4");
+  await fs.writeFile(video, "not real video bytes");
+  const poster = path.join(out, "clip-poster.jpg");
+  const res = await generatePosterThumbnail(video);
+  assert.equal(res, null);
+  assert.equal(await fs.stat(poster).catch(() => null), null);
 });

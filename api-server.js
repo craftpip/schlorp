@@ -9,6 +9,7 @@ const { buildBrowserFromLocalProfile } = require("./scan-videos/browser");
 const { scanSavedPage } = require("./scan-videos/scan-saved");
 const { sanitizeMoveKey, isInsideMedia, mediaRelOf, resolveMoveSource, findCompanionPosters } = require("./scan-videos/media-move");
 const { loadAppConfig, normalizeAccountName, resolveAccountConfig, resolveProfileConfig, getStateFilePath, normalizeCdpUrl, ensureDefaultStateFiles } = require("./scan-videos/config");
+const { generatePosterThumbnail, selectPosterTargets, posterStemOf, isVideoFileName, POSTER_SIBLING_RE } = require("./scan-videos/download");
 const { WebSocketServer } = require("ws");
 const http = require("http");
 const { EventEmitter } = require("events");
@@ -2029,6 +2030,104 @@ app.get("/api/mediathumb", async (req, res) => {
   }
 });
 
+// --- Manual poster generation (UI Shift+G) ---
+// Generates `<stem>-poster.jpg` frame thumbnails for the videos in one folder
+// (non-recursive, current directory only). mode "missing" fills gaps only
+// (stems with an existing poster sibling are skipped); mode "all" regenerates
+// every video (ffmpeg `-y` overwrites in place). Sequential loop; single JSON
+// response with generated/skipped/failed tallies.
+app.post("/api/posters/generate", async (req, res) => {
+  try {
+    const folder = String((req.body && req.body.folder) || "").replace(/\\/g, "/").trim();
+    const mode = String((req.body && req.body.mode) || "");
+    if (mode !== "missing" && mode !== "all") {
+      return res.status(400).json({ ok: false, error: "mode must be 'missing' or 'all'" });
+    }
+    const rawKeys = (req.body && req.body.keys !== undefined) ? req.body.keys : null;
+    if (rawKeys !== null && !Array.isArray(rawKeys)) {
+      return res.status(400).json({ ok: false, error: "keys must be an array of selected file names" });
+    }
+    const dir = resolveMediaOutputDir(folder);
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch((e) => {
+      if (e && e.code === "ENOENT") return null;
+      throw e;
+    });
+    if (!entries) return res.status(404).json({ ok: false, error: "folder not found" });
+    // Resolve + containment-check explicit keys before the ffmpeg gate so bad
+    // paths are rejected regardless of ffmpeg availability.
+    let resolvedKeys = null;
+    if (rawKeys !== null) {
+      resolvedKeys = [];
+      for (const raw of rawKeys) {
+        const key = String(raw || "").replace(/\\/g, "/").trim();
+        if (!key) continue;
+        const norm = path.normalize(key);
+        if (path.isAbsolute(norm)) return res.status(400).json({ ok: false, error: `invalid key: ${key}` });
+        const full = path.join(dir, norm);
+        const rel = path.relative(dir, full);
+        if (rel === ".." || rel.startsWith(".." + path.sep) || path.isAbsolute(rel)) {
+          return res.status(400).json({ ok: false, error: `invalid key: ${key}` });
+        }
+        resolvedKeys.push({ key, full });
+      }
+    }
+    if (!ffmpegBin) {
+      return res.status(503).json({ ok: false, error: "ffmpeg not installed" });
+    }
+    const names = entries.filter((en) => en.isFile()).map((en) => en.name);
+    const planned = [];
+    let skippedCount = 0;
+    if (resolvedKeys !== null) {
+      for (const { key, full } of resolvedKeys) {
+        const st = await fs.stat(full).catch(() => null);
+        if (!st || !st.isFile()) { skippedCount += 1; continue; }
+        if (!isVideoFileName(path.basename(full))) { skippedCount += 1; continue; }
+        let hasPoster = false;
+        if (mode === "missing") {
+          const stem = posterStemOf(path.basename(full)).toLowerCase();
+          const siblings = await fs.readdir(path.dirname(full)).catch(() => []);
+          hasPoster = siblings.some((n) => {
+            const m = POSTER_SIBLING_RE.exec(n);
+            return m && m[1].toLowerCase() === stem;
+          });
+          if (hasPoster) { skippedCount += 1; continue; }
+        }
+        planned.push({ key, full });
+      }
+    } else {
+      const { targets, skipped } = selectPosterTargets(names, mode);
+      skippedCount = skipped.length;
+      for (const name of targets) planned.push({ key: name, full: path.join(dir, name) });
+    }
+    // Stream one NDJSON progress line per file, then a final done line, so the
+    // popup can show live progress instead of an indeterminate wait.
+    res.status(200);
+    res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("X-Accel-Buffering", "no");
+    let clientGone = false;
+    const emit = (event) => {
+      if (clientGone) return;
+      try { res.write(JSON.stringify(event) + "\n"); }
+      catch { clientGone = true; }
+    };
+    const total = planned.length;
+    const failedKeys = [];
+    let generatedCount = 0;
+    let index = 0;
+    for (const { key, full } of planned) {
+      index += 1;
+      const poster = await generatePosterThumbnail(full, { overwrite: mode === "all" });
+      if (poster) generatedCount += 1;
+      else failedKeys.push({ key, message: "poster not produced (ffmpeg error or unsupported file)" });
+      emit({ type: "progress", index, total, generated: generatedCount, skipped: skippedCount, failed: failedKeys.length, file: key });
+    }
+    emit({ type: "done", ok: true, folder, mode, total, generated: generatedCount, skipped: skippedCount, failed: failedKeys.length, errors: failedKeys.slice(0, 10) });
+    try { res.end(); } catch { /* client already gone */ }
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error.message });
+  }
+});
 app.post("/vnc/enable", async (_req, res) => {
   try {
     await withVncLock(async () => {

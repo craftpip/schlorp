@@ -185,6 +185,14 @@ export default function Media() {
   // view/sort controls collapse behind a `...` toggle; breadcrumbs stay
   // visible. Desktop ignores this state (toggle hidden, all shown).
   const [menuOpen, setMenuOpen] = useState(false);
+  // Thumbnail generation popup (Shift+G): generates `<stem>-poster.jpg`
+  // frames for videos in the current folder — missing-only or all.
+  const [thumbGenOpen, setThumbGenOpen] = useState(false);
+  const [thumbGenBusy, setThumbGenBusy] = useState(false);
+  const [thumbGenResult, setThumbGenResult] = useState(null);
+  const [thumbGenProgress, setThumbGenProgress] = useState(null);
+  const thumbGenStateRef = useRef({ busy: false, result: null });
+  thumbGenStateRef.current = { busy: thumbGenBusy, result: thumbGenResult };
   const [ratios, setRatios] = useState({});
   const [imgErr, setImgErr] = useState({});
   const [thumbLoaded, setThumbLoaded] = useState({});
@@ -356,6 +364,14 @@ export default function Media() {
   // apply to non-playlist grid views; list view stays flat single-select.
   const { stacksForFolder: stacksForFolderAll, refresh: refreshStacks, createStack, renameStack, deleteStack, addItems: addStackItems, removeItems: removeStackItems } = useStacks();
   const folderStacks = isGrid && !inPlaylistView ? stacksForFolderAll(folder) : [];
+  // Videos in the current folder for the Shift+G thumbnail popup: N total vs
+  // M without a poster sibling (`it.thumb`), derived from the loaded listing.
+  const thumbGenVideos = useMemo(() => {
+    if (inPlaylistView) return [];
+    return (items || []).filter((it) => !it.dir && fileCategory(it.name) === "video").map((it) => ({ key: rowKey(it), name: it.name, missing: !it.thumb }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, inPlaylistView, isFlat]);
+  const thumbGenMissingCount = thumbGenVideos.filter((v) => v.missing).length;
   const [selKeys, setSelKeys] = useState(() => new Set());
   const [anchorKey, setAnchorKey] = useState(null);
   // Spread (open) pile survives reloads via ?spread= (validated below).
@@ -595,7 +611,14 @@ export default function Media() {
       const qs = new URLSearchParams();
       if (f) qs.set("folder", f);
       if (isFlat) qs.set("flat", "1");
-      const r = await fetch(`/api/media?${qs.toString()}`);
+      // Bypass the HTTP cache: /api/media answers 304 (empty body) when the
+      // listing is unchanged, and a stale cached body would hide freshly
+      // generated posters. The 304 guard below keeps strays (proxies) safe.
+      const r = await fetch(`/api/media?${qs.toString()}`, { cache: "no-store" });
+      if (r.status === 304) {
+        if (seq === loadSeqRef.current) setLoading(false);
+        return;
+      }
       const j = await r.json();
       if (seq !== loadSeqRef.current) return;
       if (!j.ok) throw new Error(j.error || "failed");
@@ -657,6 +680,68 @@ export default function Media() {
   // Fresh content (mount / folder / flat change / explicit refresh) scrolls once
   // to the selection. Delete-triggered reloads must NOT scroll (plan 014).
   const refresh = () => { freshLoadRef.current = true; load(folder); };
+  // Shift+G popup: POST to generate posters (missing-only or all), stream
+  // NDJSON per-file progress into the popup, refresh the grid when finished so
+  // new `-poster.jpg` siblings light up `it.thumb`.
+  const runThumbGen = async (mode, keys) => {
+    setThumbGenBusy(true);
+    setThumbGenResult(null);
+    setThumbGenProgress(null);
+    try {
+      const r = await fetch("/api/posters/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(keys ? { folder, mode, keys } : { folder, mode }),
+      });
+      // Hard errors (400/404/503) are single JSON responses; success is NDJSON.
+      if (r.headers.get("content-type") && r.headers.get("content-type").includes("application/json")) {
+        const j = await r.json().catch(() => ({ ok: false, error: "invalid response" }));
+        if (!r.ok || !j.ok) throw new Error(j.error || `HTTP ${r.status}`);
+        setThumbGenResult(j);
+        refresh();
+        return;
+      }
+      if (!r.ok || !r.body) throw new Error(`HTTP ${r.status}`);
+      const decoder = new TextDecoder();
+      const reader = r.body.getReader();
+      let buf = "";
+      let result = null;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf("\n")) !== -1) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          let ev;
+          try { ev = JSON.parse(line); } catch { continue; }
+          if (ev.type === "progress") {
+            setThumbGenProgress({ index: ev.index, total: ev.total, generated: ev.generated, skipped: ev.skipped, failed: ev.failed, file: ev.file });
+          } else if (ev.type === "done") {
+            result = ev;
+          }
+        }
+      }
+      if (!result) throw new Error("connection closed before the job finished");
+      if (!result.ok) throw new Error(result.error || "generation failed");
+      setThumbGenResult(result);
+      refresh();
+    } catch (e) {
+      setThumbGenResult({ ok: false, error: e.message || String(e) });
+    } finally {
+      setThumbGenBusy(false);
+    }
+  };
+  // Closing the popup mid/post-run still updates the grid: posters written so
+  // far light up immediately; the stream keeps running and refreshes again on
+  // completion. Closing before any run does nothing.
+  const closeThumbGen = () => {
+    setThumbGenOpen(false);
+    const s = thumbGenStateRef.current;
+    if (s.busy || s.result) refresh();
+  };
   // Playlist detail fetch when ?pl is set
   useEffect(() => {
     if (!activePlId) { setPlaylistDetail(null); setPlaylistLoading(false); return; }
@@ -1133,6 +1218,7 @@ const collapseSpreadUnlessMember = (fid) => {
         const typing = e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable);
         if (!typing) {
           if (showHelp) { e.preventDefault(); setShowHelp(false); return; }
+          if (thumbGenOpen) { e.preventDefault(); closeThumbGen(); return; }
           if (ctxMenu) { e.preventDefault(); setCtxMenu(null); return; }
           if (confirmState.open) { e.preventDefault(); setConfirmState({ open: false, id: null, name: "" }); return; }
           if (promptState.open) { e.preventDefault(); setPromptState({ open: false, id: null, value: "" }); return; }
@@ -1155,6 +1241,8 @@ const collapseSpreadUnlessMember = (fid) => {
       if (k === "Escape" && showHelp) { e.preventDefault(); setShowHelp(false); return; }
       // Sticky overflow menu (plan 030): Esc closes it first.
       if (k === "Escape" && menuOpen) { e.preventDefault(); setMenuOpen(false); return; }
+      // Thumbnail generation popup: Esc closes it.
+      if (k === "Escape" && thumbGenOpen) { e.preventDefault(); closeThumbGen(); return; }
       // Grid: Esc clears multi-select and collapses any spread stack.
       if (isGrid && !inPlaylistView && k === "Escape") {
         e.preventDefault();
@@ -1179,7 +1267,24 @@ const collapseSpreadUnlessMember = (fid) => {
         cycleStacksMode();
         return;
       }
-      if (lowK === "g" && !e.ctrlKey && !e.altKey && !e.metaKey) { e.preventDefault(); setParam("view", isGrid ? "list" : ""); }
+      if (lowK === "g" && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        // Shift+G (key reads "G" on US layouts): thumbnail generation popup.
+        // Reload the folder silently (no scroll) so grid thumbnails and the
+        // popup's counts are fresh before the user decides what to generate.
+        // Reset any previous run's state so the popup never shows a stale
+        // "Done" from last time.
+        e.preventDefault();
+        if (!viewerOpen && !inPlaylistView) {
+          if (!thumbGenOpen) {
+            setThumbGenResult(null);
+            setThumbGenProgress(null);
+            load(folder);
+          }
+          setThumbGenOpen(true);
+        }
+        return;
+      }
+      if (lowK === "g" && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) { e.preventDefault(); setParam("view", isGrid ? "list" : ""); }
       else if (lowK === "j" && !e.ctrlKey && !e.altKey && !e.metaKey) { e.preventDefault(); if (isFlat) setParam("flat", ""); else setConfirmState({ open: true, id: "flatten:", name: "" }); }
       else if (k === "2" && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
         e.preventDefault();
@@ -1376,7 +1481,7 @@ const collapseSpreadUnlessMember = (fid) => {
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewerOpen, allSelectable, selectedIdx, searchParams, showHelp, menuOpen, confirmState.open, promptState.open, alertState.open, deleteTarget, folderDel, multiDeleteTarget]);
+  }, [viewerOpen, allSelectable, selectedIdx, searchParams, showHelp, menuOpen, thumbGenOpen, confirmState.open, promptState.open, alertState.open, deleteTarget, folderDel, multiDeleteTarget]);
 
   // Hold-F: while F is held, keep the save popup open for the selected file;
   // letter toggles the first matching list, 1-9 toggles extras by number.
@@ -1669,11 +1774,12 @@ const collapseSpreadUnlessMember = (fid) => {
     setSelectedKey(k);
     setViewerKey(k);
   };
-  const thrumb = (it) => {
+  const thrumb = (it, thumb) => {
     if (!it || it.dir) return null;
+    if (thumb === undefined) thumb = it.thumb;
     const isPlItem = !!it._isPlaylistItem;
-    if (it.thumb && !isPlItem) return toMediaUrl(folder, it.thumb);
-    if (isPlItem && it.thumb) return "/media/" + String(it.thumb).split("/").filter(Boolean).map(encodeURIComponent).join("/");
+    if (thumb && !isPlItem) return toMediaUrl(folder, thumb);
+    if (isPlItem && thumb) return "/media/" + String(thumb).split("/").filter(Boolean).map(encodeURIComponent).join("/");
     const cat = fileCategory(it.name);
     if (cat === "photo" || cat === "gif") {
       if (isPlItem) return "/media/" + String(it.rel || it.name).split("/").filter(Boolean).map(encodeURIComponent).join("/");
@@ -1759,7 +1865,14 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     const rk = rowKey(it);
     // A thumbnail URL that 404s (no poster sibling, no embedded cover art)
     // falls back to the icon placeholder instead of a blank black tile.
-    const src = imgErr[rk] ? null : thrumb(it);
+    // Once a row is flagged err, it stays icon-only — EXCEPT when a `-poster.*`
+    // sibling now exists (`it.thumb`): the err flag predates the poster (e.g.
+    // a thumbgen run just wrote it), so render the poster URL and let <img>
+    // load it instead of keeping the stale icon. Resolve against the live
+    // listing (`thumbByKey`) rather than the tile prop, which can lag after
+    // in-place refreshes.
+    const liveThumb = thumbByKey.has(rk) ? thumbByKey.get(rk) : it.thumb;
+    const src = imgErr[rk] && !liveThumb ? null : thrumb(it, liveThumb);
     const isPrimary = selKey === rk;
     // Grid multi-select: `selKeys` drives the highlight (primary inside it).
     // List view / single selection: highlight == primary. `data-selected` stays
@@ -2608,6 +2721,27 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     else if (selKey) s.add(selKey);
     return s;
   }, [selKeys, selKey]);
+  // Shift+G popup: which of the currently selected tiles are videos in the
+  // current folder scope — the "Generate selected" target set.
+  const thumbGenSelectedKeys = useMemo(() => {
+    if (inPlaylistView) return [];
+    const sel = new Set(selectedKeysForStack);
+    return thumbGenVideos.filter((v) => sel.has(v.key)).map((v) => v.key);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [thumbGenVideos, selectedKeysForStack, inPlaylistView]);
+  // Live thumbnail lookup by row key. Tile `it` props can lag the listing
+  // after in-place refreshes (e.g. a thumbgen run wrote a poster the fresh
+  // listing already reports); resolving against current `items` keeps newly
+  // generated posters visible without a page reload.
+  const thumbByKey = useMemo(() => {
+    const map = new Map();
+    for (const it of items || []) {
+      if (!it || it.dir) continue;
+      map.set(rowKey(it), it.thumb || null);
+    }
+    return map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, isFlat]);
   // Stack picker thumbnails (plan 021): resolve each stack's visually-first
   // member from the current grid order (`filtered`, not `s.items[0]`) so the
   // context-menu thumbnail matches the pile's front card. No memo needed —
@@ -3705,6 +3839,48 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         onCancel={() => setFolderDel(null)}
         onConfirm={confirmDeleteFolder}
       />
+      {thumbGenOpen && (
+        <div
+          data-testid="thumbgen-popup"
+          onClick={closeThumbGen}
+          style={{ position: "fixed", inset: 0, zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, background: "rgba(6,8,18,0.55)", backdropFilter: "blur(6px)" }}
+        >
+          <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 420, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, boxShadow: "0 12px 32px rgba(0,0,0,.25)", overflow: "hidden" }}>
+            <div style={{ padding: "16px 18px 12px", borderBottom: "1px solid var(--border)" }}>
+              <div style={{ fontWeight: 700, fontSize: 14, color: "var(--text)" }}>Generate thumbnails</div>
+              <div style={{ marginTop: 8, fontSize: 13, color: "var(--muted)", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
+                {thumbGenBusy
+                  ? (thumbGenProgress && thumbGenProgress.total
+                    ? `Generating ${thumbGenProgress.index} / ${thumbGenProgress.total} · ${thumbGenProgress.file}`
+                    : "Generating… this may take a while on large folders. Keep this tab open.")
+                  : thumbGenResult
+                    ? (thumbGenResult.ok
+                      ? `Done: ${thumbGenResult.generated} generated · ${thumbGenResult.skipped} skipped · ${thumbGenResult.failed} failed`
+                      : `Failed: ${thumbGenResult.error || "unknown error"}`)
+                    : `Folder: ${folder || "Media root"} — ${thumbGenVideos.length} videos, ${thumbGenMissingCount} missing thumbnails${thumbGenSelectedKeys.length ? ` · ${thumbGenSelectedKeys.length} selected` : ""}.${isFlat ? " Current folder only (no recursion)." : ""}`}
+              </div>
+              {thumbGenBusy && thumbGenProgress && thumbGenProgress.total > 0 && (
+                <>
+                  <div className="progress" style={{ height: 6, marginTop: 10 }}>
+                    <div className="progress-bar" style={{ width: `${Math.round((thumbGenProgress.index / thumbGenProgress.total) * 100)}%` }} />
+                  </div>
+                  <div style={{ marginTop: 6, fontSize: 12, color: "var(--muted)" }}>{thumbGenProgress.generated} generated · {thumbGenProgress.skipped} skipped · {thumbGenProgress.failed} failed</div>
+                </>
+              )}
+            </div>
+            <div style={{ padding: 12, display: "flex", gap: 8, justifyContent: "flex-end", background: "var(--surface-2)", flexWrap: "wrap" }}>
+              {!thumbGenBusy && !thumbGenResult && (
+                <>
+                  <button data-testid="thumbgen-missing" className="btn btn-sm" disabled={thumbGenMissingCount === 0} onClick={() => runThumbGen("missing")} style={{ padding: "6px 14px" }}>Generate missing ({thumbGenMissingCount})</button>
+                  <button data-testid="thumbgen-all" className="btn btn-sm" disabled={thumbGenVideos.length === 0} onClick={() => runThumbGen("all")} style={{ padding: "6px 14px" }}>Regenerate all ({thumbGenVideos.length})</button>
+                  <button data-testid="thumbgen-selected" className="btn btn-sm btn-outline-secondary" disabled={thumbGenSelectedKeys.length === 0} onClick={() => runThumbGen("all", thumbGenSelectedKeys)} style={{ padding: "6px 14px" }}>Generate selected ({thumbGenSelectedKeys.length})</button>
+                </>
+              )}
+              <button data-testid="thumbgen-cancel" className="btn btn-sm btn-outline-secondary" onClick={closeThumbGen} style={{ padding: "6px 14px" }}>{thumbGenBusy || thumbGenResult ? "Close" : "Cancel"}</button>
+            </div>
+          </div>
+        </div>
+      )}
       </div>
     </div>
   );

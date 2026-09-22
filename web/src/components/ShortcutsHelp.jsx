@@ -14,6 +14,7 @@ const LIBRARY_SECTIONS = [
   { heading: "Sort & filter", rows: [
     { keys: ["g"], desc: "Toggle grid / list view" },
     { keys: ["j"], desc: "Toggle flatten (list all files recursively)" },
+    { keys: ["Shift", "G"], desc: "Generate video thumbnails (missing / all)" },
     { keys: ["2"], desc: "Cycle type filter (All → Img → Vid → GIF)" },
     { keys: ["Shift", "1–3"], desc: "Toggle sort Name / Size / Time" },
   ] },
