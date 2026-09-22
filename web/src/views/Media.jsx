@@ -461,9 +461,11 @@ export default function Media() {
   // (all stacks spread) · "locked" (piles that never open on select/navigate).
   const [stacksMode, setStacksMode] = useState("stacked");
   const pilesLocked = stacksMode === "locked";
-  // Stacks are a Gallery (custom) sort feature. Name/Size/Time sorts show
-  // every file as a plain tile in its sorted order — no piles, no stack rings.
+  // Stacks pile grouping is a Gallery (custom) sort feature. Name/Size/Time
+  // sorts show every file as a plain tile in its sorted order — no piles.
+  // Membership hint (ring) + file-level stack menu are grid-wide (032).
   const stacksActive = isGrid && !inPlaylistView && sort === "custom";
+  const stacksHintActive = isGrid && !inPlaylistView;
   useEffect(() => {
     // Drop ?spread= ids that don't exist in this folder.
     if (spreadStackId && folderStacks.length && !folderStacks.some((s) => s.id === spreadStackId)) setSpreadStackId(null);
@@ -1883,8 +1885,9 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     const isDir = !!it.dir;
     // Stack membership ring is the stack's own gradient color (independent of
     // selection): members of a stack always show their stack's ring; selection
-    // overrides with accent. Ring is a Gallery-only feature (stacksActive).
-    const inStack = stacksActive && !isDir && Array.isArray(it.stacks) && it.stacks.length > 0;
+    // overrides with accent. Ring shows in all grid sorts (032); piles
+    // collapse only in Gallery (stacksActive).
+    const inStack = stacksHintActive && !isDir && Array.isArray(it.stacks) && it.stacks.length > 0;
     const stackColor = inStack ? stackBorderColor((it.stacks || [])[0].id) : null;
     // `.gif` files that are actually MP4 bytes (mislabeled at download time,
     // e.g. reddit saves) fail in <img> — the server sniffs them as video/mp4.
@@ -3694,7 +3697,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         menu={ctxMenu}
         stacks={stackMenuEntries}
         selCount={selectedKeysForStack.size}
-        noStacks={!stacksActive}
+        noStacks={inPlaylistView}
         onClose={() => setCtxMenu(null)}
         onGotoFile={() => {
           const entry = ctxMenu && ctxMenu.entry;
