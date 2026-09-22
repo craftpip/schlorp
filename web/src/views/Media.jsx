@@ -3334,7 +3334,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     return null;
   };
   const handleStackPromptConfirm = async (v) => {
-    const id = promptState.id;
+    const id = String(promptState.id || "").replace(/^stack:/, "");
     setPromptState({ open: false, id: null, value: "" });
     try {
       await renameStack(id, v, folder);
