@@ -108,4 +108,35 @@ function splitStacksByCoverage(stacks, moveBases) {
   return { full, partialBases: [...partialSet] };
 }
 
-module.exports = { normalizeFolder, sanitizeMoveKey, isInsideMedia, mediaRelOf, resolveMoveSource, posterStemOf, findCompanionPosters, splitStacksByCoverage };
+// Custom-order slot memory (gallery moves): when a file with a manual
+// position leaves a folder scope, its index is stashed; if the same basename
+// returns to that scope it is re-inserted at the remembered slot (round-trip
+// stable). Files with no remembered slot stay out of the scope array and
+// render in the date-desc bucket (frontend applyViewOrder).
+const MOVED_SLOT_CAP_PER_SCOPE = 500;
+
+function stashMovedSlot(slots, scope, key, index) {
+  if (!slots || typeof slots !== "object") return;
+  if (!scope || !key) return;
+  const i = Number(index);
+  if (!Number.isFinite(i) || i < 0) return;
+  if (!slots[scope] || typeof slots[scope] !== "object") slots[scope] = {};
+  const bucket = slots[scope];
+  bucket[String(key)] = Math.floor(i);
+  const keys = Object.keys(bucket);
+  while (keys.length > MOVED_SLOT_CAP_PER_SCOPE) delete bucket[keys.shift()];
+}
+
+function takeMovedSlot(slots, scope, key) {
+  if (!slots || typeof slots !== "object" || !scope || !key) return null;
+  const bucket = slots[scope];
+  if (!bucket || typeof bucket !== "object") return null;
+  const k = String(key);
+  if (!(k in bucket)) return null;
+  const i = Number(bucket[k]);
+  delete bucket[k];
+  if (!Object.keys(bucket).length) delete slots[scope];
+  return Number.isFinite(i) && i >= 0 ? Math.floor(i) : null;
+}
+
+module.exports = { normalizeFolder, sanitizeMoveKey, isInsideMedia, mediaRelOf, resolveMoveSource, posterStemOf, findCompanionPosters, splitStacksByCoverage, stashMovedSlot, takeMovedSlot, MOVED_SLOT_CAP_PER_SCOPE };

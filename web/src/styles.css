@@ -615,6 +615,9 @@
       /* Type filter: icons hidden on desktop (text-only buttons) */
       [data-testid="media-type-filter"] .media-type-icon{display:none}
 
+      /* Sort bar: full "Gallery" label on desktop, abbreviated "Gal" on mobile */
+      .media-sort-abbr{display:none}
+
       /* Context-menu popup (plan 024): centered modal card + stack grid */
       .media-ctx-card{
         width:min(520px,100%);
@@ -693,6 +696,9 @@
         [data-testid="media-type-filter"] .media-type-icon{display:inline-flex !important}
         [data-testid="media-type-filter"] .media-type-label{display:none !important}
         [data-testid="media-type-filter"] .btn{padding:0 8px}
+        /* Sort bar: abbreviated "Gal" label on mobile */
+        .media-sort-full{display:none !important}
+        .media-sort-abbr{display:inline !important}
         /* Media library: full-bleed on mobile (break out of shell gutters) */
         .media-page{margin-left:-12px !important;margin-right:-12px !important}
         .media-page-title{padding-left:12px !important;padding-right:12px !important}

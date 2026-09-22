@@ -145,8 +145,10 @@ export default function Media() {
   const [err, setErr] = useState("");
   const filter = searchParams.get("q") || "";
   // Custom manual order (sort=custom): server-persisted per folder+flat scope.
-  // Loaded on demand when custom sort is active; files missing from the
-  // stored order append after ordered ones in listing order.
+  // Loaded on demand when custom sort is active. Rendering is date-desc with
+  // manual pins on top: stored items hold their saved slots, everything else
+  // flows around them latest-to-oldest (so Gallery matches Time-desc except
+  // where you dragged).
   const [customOrder, setCustomOrder] = useState([]);
   const [dropInfo, setDropInfo] = useState(null);
   const dragKeyRef = useRef(null);
@@ -191,8 +193,12 @@ export default function Media() {
   const [thumbGenBusy, setThumbGenBusy] = useState(false);
   const [thumbGenResult, setThumbGenResult] = useState(null);
   const [thumbGenProgress, setThumbGenProgress] = useState(null);
-  const thumbGenStateRef = useRef({ busy: false, result: null });
-  thumbGenStateRef.current = { busy: thumbGenBusy, result: thumbGenResult };
+  // Poster overwrites keep the same URL, so the browser serves the stale
+  // cached bytes after a regenerate. Bumped on every thumbgen refresh and
+  // appended to poster URLs to force a refetch of the new bytes.
+  const [thumbBust, setThumbBust] = useState(0);
+  const thumbGenStateRef = useRef({ busy: false, result: null, open: false });
+  thumbGenStateRef.current = { busy: thumbGenBusy, result: thumbGenResult, open: thumbGenOpen };
   const [ratios, setRatios] = useState({});
   const [imgErr, setImgErr] = useState({});
   const [thumbLoaded, setThumbLoaded] = useState({});
@@ -539,13 +545,16 @@ export default function Media() {
       dirs.sort((a, b) => col.compare(a.name, b.name));
       if (customOrderMap.size) {
         const keyOf = (it) => (isFlat ? it.rel || it.name : it.name);
-        const ordered = [];
-        const unordered = [];
-        for (const it of files) (customOrderMap.has(keyOf(it)) ? ordered : unordered).push(it);
-        ordered.sort((a, b) => customOrderMap.get(keyOf(a)) - customOrderMap.get(keyOf(b)));
-        // New files (not in saved order) should appear first, latest to oldest
-        unordered.sort((a, b) => new Date(b.created || b.mtime || 0) - new Date(a.created || a.mtime || 0));
-        return [...dirs, ...unordered, ...ordered];
+        const byDateDesc = (a, b) => new Date(b.created || b.mtime || 0) - new Date(a.created || a.mtime || 0);
+        // Date-desc base; manually-ordered files pin their saved slots.
+        const out = files.filter((it) => !customOrderMap.has(keyOf(it))).sort(byDateDesc);
+        const pinned = files.filter((it) => customOrderMap.has(keyOf(it)));
+        pinned.sort((a, b) => customOrderMap.get(keyOf(a)) - customOrderMap.get(keyOf(b)));
+        for (const it of pinned) {
+          const at = customOrderMap.get(keyOf(it));
+          out.splice(Math.min(Math.max(at, 0), out.length), 0, it);
+        }
+        return [...dirs, ...out];
       }
       // No custom order yet — inside a collection (folder) show latest to oldest,
       // so new downloads naturally prepend.
@@ -687,8 +696,8 @@ export default function Media() {
   // to the selection. Delete-triggered reloads must NOT scroll (plan 014).
   const refresh = () => { freshLoadRef.current = true; load(folder); };
   // Shift+G popup: POST to generate posters (missing-only or all), stream
-  // NDJSON per-file progress into the popup, refresh the grid when finished so
-  // new `-poster.jpg` siblings light up `it.thumb`.
+  // NDJSON per-file progress into the popup. The grid refreshes on popup
+  // close only — never while the popup is open.
   const runThumbGen = async (mode, keys) => {
     setThumbGenBusy(true);
     setThumbGenResult(null);
@@ -704,7 +713,12 @@ export default function Media() {
         const j = await r.json().catch(() => ({ ok: false, error: "invalid response" }));
         if (!r.ok || !j.ok) throw new Error(j.error || `HTTP ${r.status}`);
         setThumbGenResult(j);
-        refresh();
+        // Popup already closed (early close, job finished in background):
+        // refresh now so late files light up. Otherwise closeThumbGen does it.
+        if (!thumbGenStateRef.current.open) {
+          setThumbBust((v) => v + 1);
+          refresh();
+        }
         return;
       }
       if (!r.ok || !r.body) throw new Error(`HTTP ${r.status}`);
@@ -733,20 +747,30 @@ export default function Media() {
       if (!result) throw new Error("connection closed before the job finished");
       if (!result.ok) throw new Error(result.error || "generation failed");
       setThumbGenResult(result);
-      refresh();
+      // Same as above: only refresh here when the popup is already closed
+      // (background finish after an early close). Otherwise the close does it.
+      if (!thumbGenStateRef.current.open) {
+        setThumbBust((v) => v + 1);
+        refresh();
+      }
     } catch (e) {
       setThumbGenResult({ ok: false, error: e.message || String(e) });
     } finally {
       setThumbGenBusy(false);
     }
   };
-  // Closing the popup mid/post-run still updates the grid: posters written so
-  // far light up immediately; the stream keeps running and refreshes again on
-  // completion. Closing before any run does nothing.
+  // Grid refresh happens on popup close only: posters written so far light
+  // up immediately; if closed mid-run the stream keeps going and refreshes
+  // again on background completion. Closing before any run does nothing.
   const closeThumbGen = () => {
     setThumbGenOpen(false);
     const s = thumbGenStateRef.current;
-    if (s.busy || s.result) refresh();
+    if (s.busy || s.result) {
+      // Posters written so far may overwrite the same URLs — bust the cache
+      // so the grid fetches the new bytes instead of the stale cached ones.
+      setThumbBust((v) => v + 1);
+      refresh();
+    }
   };
   // Playlist detail fetch when ?pl is set
   useEffect(() => {
@@ -1784,8 +1808,14 @@ const collapseSpreadUnlessMember = (fid) => {
     if (!it || it.dir) return null;
     if (thumb === undefined) thumb = it.thumb;
     const isPlItem = !!it._isPlaylistItem;
-    if (thumb && !isPlItem) return toMediaUrl(folder, thumb);
-    if (isPlItem && thumb) return "/media/" + String(thumb).split("/").filter(Boolean).map(encodeURIComponent).join("/");
+    if (thumb && !isPlItem) {
+      const u = toMediaUrl(folder, thumb);
+      return thumbBust ? `${u}?v=${thumbBust}` : u;
+    }
+    if (isPlItem && thumb) {
+      const u = "/media/" + String(thumb).split("/").filter(Boolean).map(encodeURIComponent).join("/");
+      return thumbBust ? `${u}?v=${thumbBust}` : u;
+    }
     const cat = fileCategory(it.name);
     if (cat === "photo" || cat === "gif") {
       if (isPlItem) return "/media/" + String(it.rel || it.name).split("/").filter(Boolean).map(encodeURIComponent).join("/");

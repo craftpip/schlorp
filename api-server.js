@@ -7,7 +7,7 @@ const fs = require("fs/promises");
 const { run } = require("./scan-videos/index");
 const { buildBrowserFromLocalProfile } = require("./scan-videos/browser");
 const { scanSavedPage } = require("./scan-videos/scan-saved");
-const { sanitizeMoveKey, isInsideMedia, mediaRelOf, resolveMoveSource, findCompanionPosters, splitStacksByCoverage } = require("./scan-videos/media-move");
+const { sanitizeMoveKey, isInsideMedia, mediaRelOf, resolveMoveSource, findCompanionPosters, splitStacksByCoverage, stashMovedSlot, takeMovedSlot } = require("./scan-videos/media-move");
 const { loadAppConfig, normalizeAccountName, resolveAccountConfig, resolveProfileConfig, getStateFilePath, normalizeCdpUrl, ensureDefaultStateFiles } = require("./scan-videos/config");
 const { generatePosterThumbnail, selectPosterTargets, posterStemOf, isVideoFileName, POSTER_SIBLING_RE } = require("./scan-videos/download");
 const { WebSocketServer } = require("ws");
@@ -1004,6 +1004,7 @@ async function withMediaorderFile(fn) {
   return result;
 }
 let mediaorderCache = null; // { scopes: { scopeKey: [rowKey] } }
+let mediaorderSlotsCache = null; // { scopeKey: { rowKey: rememberedIndex } } — gallery move-out slot memory
 function mediaorderScope(folder, flat) {
   const f = String(folder || "").trim().replace(/\/+$/, "");
   return `${flat ? "flat:" : "folder:"}${f}`;
@@ -1014,16 +1015,23 @@ async function loadMediaorder() {
     const raw = await fs.readFile(mediaorderFile, "utf8");
     const parsed = JSON.parse(raw);
     mediaorderCache = parsed && typeof parsed === "object" && parsed.scopes && typeof parsed.scopes === "object" ? parsed.scopes : {};
+    mediaorderSlotsCache = parsed && typeof parsed === "object" && parsed.movedSlots && typeof parsed.movedSlots === "object" ? parsed.movedSlots : {};
   } catch (e) {
     if (!e || e.code !== "ENOENT") console.error("[mediaorder] load failed:", e && e.message);
     mediaorderCache = {};
+    mediaorderSlotsCache = {};
   }
   return mediaorderCache;
+}
+async function loadMovedSlots() {
+  await loadMediaorder();
+  if (!mediaorderSlotsCache || typeof mediaorderSlotsCache !== "object") mediaorderSlotsCache = {};
+  return mediaorderSlotsCache;
 }
 async function saveMediaorder() {
   await withMediaorderFile(async () => {
     await fs.mkdir(path.dirname(mediaorderFile), { recursive: true });
-    await fs.writeFile(mediaorderFile, JSON.stringify({ updatedAt: new Date().toISOString(), scopes: mediaorderCache || {} }), "utf8");
+    await fs.writeFile(mediaorderFile, JSON.stringify({ updatedAt: new Date().toISOString(), scopes: mediaorderCache || {}, movedSlots: mediaorderSlotsCache || {} }), "utf8");
   });
 }
 app.get("/api/mediaorder", async (req, res) => {
@@ -1057,6 +1065,9 @@ app.put("/api/mediaorder", async (req, res) => {
     const scope = mediaorderScope(folder, flat);
     const scopes = await loadMediaorder();
     scopes[scope] = clean;
+    // A fresh manual order supersedes remembered move-out slots.
+    const slots = await loadMovedSlots();
+    if (slots[scope]) delete slots[scope];
     await saveMediaorder();
     return res.json({ ok: true, scope, folder, flat, order: clean });
   } catch (error) {
@@ -1249,10 +1260,11 @@ async function cleanupMoveSidecar(oldRel, newRel) {
       await saveMediadims();
     }
   } catch {}
-  // Mediaorder — folder scopes are keyed by basename, flat scopes by the
-  // media-relative key: prune the basename from the source folder scope and
-  // oldRel from every flat scope; append the basename to the target folder
-  // scope and newRel to flat scopes that contained oldRel.
+  // Mediaorder — gallery position memory: moving out of a scope stashes the
+  // file's manual index; moving back into a scope restores the remembered
+  // slot, otherwise the file stays out of the scope and renders in the
+  // date-desc bucket (frontend applyViewOrder). Folder scopes are keyed by
+  // basename, flat scopes by the media-relative key.
   try {
     const oldParent = path.posix.dirname(oldRel);
     const oldFolder = oldParent === "." ? "" : oldParent;
@@ -1261,22 +1273,39 @@ async function cleanupMoveSidecar(oldRel, newRel) {
     const oldBase = path.posix.basename(oldRel);
     const newBase = path.posix.basename(newRel);
     const scopes = await loadMediaorder();
+    const slots = await loadMovedSlots();
     let mutated = false;
     const srcScope = mediaorderScope(oldFolder, false);
-    if (Array.isArray(scopes[srcScope]) && scopes[srcScope].includes(oldBase)) {
-      scopes[srcScope] = scopes[srcScope].filter((k) => k !== oldBase);
-      mutated = true;
+    if (Array.isArray(scopes[srcScope])) {
+      const at = scopes[srcScope].indexOf(oldBase);
+      if (at !== -1) {
+        scopes[srcScope] = scopes[srcScope].filter((k) => k !== oldBase);
+        stashMovedSlot(slots, srcScope, oldBase, at);
+        mutated = true;
+      }
     }
     const dstScope = mediaorderScope(newFolder, false);
-    if (!Array.isArray(scopes[dstScope])) scopes[dstScope] = [];
-    if (!scopes[dstScope].includes(newBase)) {
-      scopes[dstScope].push(newBase);
-      mutated = true;
+    const remembered = takeMovedSlot(slots, dstScope, newBase);
+    if (remembered !== null) {
+      if (!Array.isArray(scopes[dstScope])) scopes[dstScope] = [];
+      if (!scopes[dstScope].includes(newBase)) {
+        scopes[dstScope].splice(Math.min(remembered, scopes[dstScope].length), 0, newBase);
+        mutated = true;
+      } else {
+        // Already ordered (e.g. drag-saved mid-move): drop the stale memory.
+        mutated = true;
+      }
     }
     for (const [scope, arr] of Object.entries(scopes)) {
-      if (!scope.startsWith("flat:") || !Array.isArray(arr) || !arr.includes(oldRel)) continue;
+      if (!scope.startsWith("flat:") || !Array.isArray(arr)) continue;
+      const at = arr.indexOf(oldRel);
+      if (at === -1) continue;
       scopes[scope] = arr.filter((k) => k !== oldRel);
-      if (!scopes[scope].includes(newRel)) scopes[scope].push(newRel);
+      stashMovedSlot(slots, scope, oldRel, at);
+      const back = takeMovedSlot(slots, scope, newRel);
+      if (back !== null && !scopes[scope].includes(newRel)) {
+        scopes[scope].splice(Math.min(back, scopes[scope].length), 0, newRel);
+      }
       mutated = true;
     }
     if (mutated) await saveMediaorder();

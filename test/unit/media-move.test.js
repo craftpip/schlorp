@@ -11,6 +11,8 @@ const {
   posterStemOf,
   findCompanionPosters,
   splitStacksByCoverage,
+  stashMovedSlot,
+  takeMovedSlot,
 } = require("../../scan-videos/media-move");
 const { withTempDir } = require("../helpers/temp-state");
 
@@ -195,8 +197,7 @@ test("move: companion poster travels with the file, others untouched", async () 
   });
 });
 
-test("move: poster collision leaves the source poster in place", async () => {
-  await withTempDir(async (dir) => {
+test("move: poster collision leaves the source poster in place", async () => {  await withTempDir(async (dir) => {
     const mediaDir = path.join(dir, "media");
     await fs.mkdir(path.join(mediaDir, "src"), { recursive: true });
     await fs.mkdir(path.join(mediaDir, "dst"), { recursive: true });
@@ -210,4 +211,41 @@ test("move: poster collision leaves the source poster in place", async () => {
     assert.equal(String(await fs.readFile(path.join(mediaDir, "dst", "a-poster.jpg"))), "existing-poster");
     assert.equal(String(await fs.readFile(path.join(mediaDir, "src", "a-poster.jpg"))), "new-poster");
   });
+});
+
+test("moved slots: stash + take round-trips the remembered index", () => {
+  const slots = {};
+  stashMovedSlot(slots, "folder:a", "x.mp4", 0);
+  assert.equal(takeMovedSlot(slots, "folder:a", "x.mp4"), 0);
+  assert.equal(takeMovedSlot(slots, "folder:a", "x.mp4"), null);
+  assert.deepEqual(slots, {});
+});
+
+test("moved slots: take consumes only the requested key", () => {
+  const slots = {};
+  stashMovedSlot(slots, "folder:a", "x.mp4", 2);
+  stashMovedSlot(slots, "folder:a", "y.mp4", 5);
+  assert.equal(takeMovedSlot(slots, "folder:a", "x.mp4"), 2);
+  assert.equal(takeMovedSlot(slots, "folder:a", "y.mp4"), 5);
+  assert.deepEqual(slots, {});
+});
+
+test("moved slots: miss and invalid input yield null, never throw", () => {
+  assert.equal(takeMovedSlot({}, "folder:a", "x.mp4"), null);
+  assert.equal(takeMovedSlot(null, "folder:a", "x.mp4"), null);
+  assert.equal(takeMovedSlot({}, "", "x.mp4"), null);
+  const slots = {};
+  stashMovedSlot(slots, "folder:a", "x.mp4", -1);
+  stashMovedSlot(slots, "folder:a", "y.mp4", NaN);
+  stashMovedSlot(null, "folder:a", "z.mp4", 1);
+  assert.equal(takeMovedSlot(slots, "folder:a", "x.mp4"), null);
+  assert.deepEqual(slots, {});
+});
+
+test("moved slots: per-scope cap bounds growth", () => {
+  const slots = {};
+  for (let i = 0; i < 600; i++) stashMovedSlot(slots, "folder:a", `f${i}.mp4`, i);
+  assert.ok(Object.keys(slots["folder:a"]).length <= 500);
+  // newest entries survive the eviction of oldest-first keys
+  assert.equal(takeMovedSlot(slots, "folder:a", "f599.mp4"), 599);
 });
