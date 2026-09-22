@@ -1,5 +1,7 @@
 # 034 — Media grid range-ruler scrollbar
 
+> Range size: **100 files per range** (`MEDIA_RANGE_SIZE` in `.env`, default 100, clamped 10–5000). Served live via `GET /api/client-config` (no web rebuild needed); also editable in Settings → Core (writes `.env`).
+
 > Project: **xdl** — media grid UI (`web/src/views/Media.jsx` + `web/src/styles.css`, no backend change).
 > Date: 2026-09-22. Status: **Implemented** (2026-09-22: rail + minis + pile-atomic + scroll-spy in `Media.jsx`, styles in `styles.css`; `npm run lint` clean, `npm run build` OK).
 > Scope: grid view only (`?view != list`). List view unchanged.
@@ -38,7 +40,7 @@ Grid view gets a vertical range scrollbar on the right side, Google-Photos-timel
 ## 3. UI (Google-Photos-style rail)
 
 - Layout: flex row beside `media-grid-files` — files `flex:1`, rail fixed ~64px wide, borderless/transparent. Rail: `position: sticky; top: 76px; max-height: calc(100vh - 100px)` (stretches to viewport bottom); overflow-y auto.
-- Segment = `<button data-testid="media-range-ruler-seg">` with a **vertical stack of 2 full-bleed photo blocks** (range content as `background-image: cover`, full rail width, 52px+ each — no boxes/borders) + range label overlaid at the bottom (white + scrim gradient). **Highlight = opacity**: inactive `.45`, hover `.8`, active `1` (scroll-spy maps top-visible tile → range). **One-way follow (page→rail only, no scroll sync)**: body scroll brings the ACTIVE segment into view, centered in the rail box when possible. The rail never drives the page — use click-to-jump. rAF-throttled; rail glides via `scroll-behavior:smooth`, jumps via smooth `scrollTo`, reduced-motion falls back to instant. **Overflow shadows**: inset box-shadow on rail top/bottom whenever that side has more to scroll (refreshed on rail scroll incl. programmatic writes, show/segments change, window resize). Click-to-jump unchanged.
+- Segment = `<button data-testid="media-range-ruler-seg">` with a **vertical stack of 2 full-bleed photo blocks** (range content as `background-image: cover`, full rail width, 64px each — no boxes/borders) + range label overlaid at the bottom (white + scrim gradient). Hovering a photo pops a fixed preview sized to the image's real ratio (natural dims preloaded once per URL, cached, fit within 320px; cover fills exactly, no letterbox, no fill bg, full opacity). **Highlight = opacity**: inactive `.45`, hover `.8`, active `1` (scroll-spy maps top-visible tile → range). **One-way follow (page→rail only, no scroll sync)**: body scroll brings the ACTIVE segment into view, centered in the rail box when possible. The rail never drives the page — use click-to-jump. rAF-throttled; rail glides via `scroll-behavior:smooth`, jumps via smooth `scrollTo`, reduced-motion falls back to instant. **Overflow shadows**: inset box-shadow on rail top/bottom whenever that side has more to scroll (refreshed on rail scroll incl. programmatic writes, show/segments change, window resize). Click-to-jump unchanged.
 - No drag-scrub bubble (Photos shows a big overlay while dragging) — click-to-jump + active-follow only. Add later if wanted.
 
 ## 4. Thumbnails (2 per range)

@@ -1,4 +1,5 @@
 import { useEffect, useState, useRef, useMemo, useLayoutEffect } from "react";
+import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
 import FileViewer from "../components/FileViewer";
 import ShortcutsHelp from "../components/ShortcutsHelp";
@@ -204,6 +205,15 @@ export default function Media() {
   const [thumbLoaded, setThumbLoaded] = useState({});
   const [gifVideo, setGifVideo] = useState({});
   const [gridW, setGridW] = useState(0);
+  // Range-ruler rail (plan 034): files per range. Default 100; server value
+  // from GET /api/client-config (MEDIA_RANGE_SIZE) wins when it lands.
+  const [rangeSize, setRangeSize] = useState(100);
+  useEffect(() => {
+    fetch("/api/client-config").then((r) => r.json()).then((j) => {
+      const n = Number(j && j.rangeSize);
+      if (Number.isFinite(n) && n >= 10 && n <= 5000) setRangeSize(n);
+    }).catch(() => {});
+  }, []);
   const gridRef = useRef(null);
   const filterInputRef = useRef(null);
   const clampRatio = (r) => Math.min(2.2, Math.max(0.55, Number(r) || NaN));
@@ -231,8 +241,9 @@ export default function Media() {
   };
   const GRID_GAP = 8;
   const GRID_TARGET_H = gridW > 0 && gridW < 640 ? 140 : 240;
-  // Range-ruler rail (plan 034): 50 files per range segment.
-  const RANGE_SIZE = 50;
+  // Range-ruler rail (plan 034): files per range segment (rangeSize state,
+  // server-driven, default 100). RANGE_SIZE aliases it for the memo below.
+  const RANGE_SIZE = rangeSize;
   // Must match renderPile's PEEK (10): the closed pile shows a 10px strip of
   // each under-card. The footprint collapse below uses it to rebuild the pile's
   // exact PEEK offsets when the stack opens/closes.
@@ -2361,19 +2372,27 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
       const r = segOf(idx, key);
       if (segs[r]) segs[r].keys.push({ it, idx, key });
     });
-    // Two minis per range: first 2 assigned files (view order) with a thumb URL.
+    // Two minis per range: the first file + the file at half the range
+    // (first thumb-bearing file at/after the midpoint). Positions, not just
+    // the first two files.
     for (const seg of segs) {
-      for (const { it } of seg.keys) {
-        if (seg.minis.length >= 2) break;
+      const mid = Math.floor(seg.keys.length / 2);
+      for (let i = 0; i < seg.keys.length && seg.minis.length < 1; i++) {
         let url = null;
-        try { url = thrumb(it); } catch { url = null; }
-        if (url) seg.minis.push({ url, key: rowKey(it) });
+        try { url = thrumb(seg.keys[i].it); } catch { url = null; }
+        if (url) seg.minis.push({ url, key: seg.keys[i].key });
+      }
+      for (let i = mid; i < seg.keys.length && seg.minis.length < 2; i++) {
+        if (seg.minis.some((mm) => mm.key === seg.keys[i].key)) continue;
+        let url = null;
+        try { url = thrumb(seg.keys[i].it); } catch { url = null; }
+        if (url) seg.minis.push({ url, key: seg.keys[i].key });
       }
       // Jump target: first assigned file (view order = visual top of range).
       seg.target = seg.keys.length ? seg.keys[0] : null;
     }
     return segs;
-  }, [isGrid, gridW, filtered, playlistItemsForView, inPlaylistView, stacksActive, sort, folder]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [isGrid, gridW, filtered, playlistItemsForView, inPlaylistView, stacksActive, sort, folder, rangeSize]); // eslint-disable-line react-hooks/exhaustive-deps
   // Key -> range idx (for scroll-spy active state). Pile members map via
   // their pile's first member, matching the atomic assignment above.
   const keyRangeMap = useMemo(() => {
@@ -2396,6 +2415,10 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
   // Capped (30s) so a lost pointer-up can't pause the follow forever.
   const holdRailStart = () => { railHoldUntilRef.current = performance.now() + 30000; };
   const holdRailEnd = () => { railHoldUntilRef.current = performance.now() + RAIL_HOLD_GRACE_MS; };
+  // Jump pin: after click-to-jump, the rail holds the TARGET segment until
+  // the page glide arrives (spy says so) or 2.5s pass — no retargeting past
+  // intermediate ranges mid-flight, no glitch scroll.
+  const jumpRailRef = useRef(null);
 
   // Scroll-spy: active segment follows the top-visible tile (rAF-throttled).
   useEffect(() => {
@@ -2410,18 +2433,42 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         const sticky = document.querySelector('[data-testid="media-sticky"]');
         const offset = (sticky ? sticky.offsetHeight : 0) + 12;
         let best = null;
+        // Active = last range present in the first visible ROW: when the next
+        // range starts on the same line as the previous one, it highlights
+        // immediately (not only after the previous range leaves the window).
+        const rangeOfKey = (key) => {
+          let cur = keyRangeMap.get(key);
+          if (cur == null && String(key).startsWith("stack:")) {
+            const mem = pileMemberKeys(String(key).slice("stack:".length));
+            if (mem.length) cur = keyRangeMap.get(mem[0]);
+          }
+          return cur;
+        };
+        let rowTop = null;
+        let firstBelow = null;
         for (const el of grid.querySelectorAll("[data-filename]")) {
           if (el.classList.contains("media-tile-folder")) continue;
           if (el.getAttribute("data-testid") === "media-tile-file" && el.closest && el.closest('[data-testid="media-tile-pile"]')) continue;
           const r = el.getBoundingClientRect();
-          if (r.bottom > offset && r.top < window.innerHeight) { best = el.getAttribute("data-filename"); break; }
+          if (r.bottom <= offset || r.top >= window.innerHeight) continue;
+          const cur = rangeOfKey(el.getAttribute("data-filename"));
+          if (cur == null) continue;
+          if (rowTop == null) {
+            if (r.top <= offset + 4) { rowTop = r.top; best = cur; }
+            else { firstBelow = cur; break; }
+          } else {
+            if (Math.abs(r.top - rowTop) <= 12) { if (cur > best) best = cur; }
+            else break;
+          }
         }
-        if (best == null) return;
-        // A pile container reports its stack key: map to its first member's range.
-        let ridx = keyRangeMap.get(best);
-        if (ridx == null && String(best).startsWith("stack:")) {
-          const mem = pileMemberKeys(String(best).slice("stack:".length));
-          if (mem.length) ridx = keyRangeMap.get(mem[0]);
+        const ridx0 = best != null ? best : firstBelow;
+        if (ridx0 == null) return;
+        let ridx = ridx0;
+        // Jump pin: hold the clicked segment until the page glide arrives.
+        const jr = jumpRailRef.current;
+        if (jr) {
+          if (performance.now() >= jr.until || ridx === jr.idx) jumpRailRef.current = null;
+          else ridx = jr.idx;
         }
         if (ridx != null) setActiveRangeIdx((cur) => (cur === ridx ? cur : ridx));
         // Page→rail follow: bring the ACTIVE segment into view, centered in
@@ -2447,10 +2494,34 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => { window.removeEventListener("scroll", onScroll); if (raf) cancelAnimationFrame(raf); };
   }, [showRail, keyRangeMap]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Custom rail scrollbar (plan 034): native bars hidden, own physical lane.
+  // Thumb sized/positioned from rail metrics; drag + track-click supported.
+  const railTrackRef = useRef(null);
+  const railThumbRef = useRef(null);
+  const railDragRef = useRef(null); // { y, scroll } while dragging the thumb
+  const updateRailThumb = (rail) => {
+    const track = railTrackRef.current;
+    const thumb = railThumbRef.current;
+    if (!rail || !track || !thumb) return;
+    const rMax = rail.scrollHeight - rail.clientHeight;
+    const trackH = track.clientHeight;
+    if (rMax <= 0 || trackH <= 0) { track.style.visibility = "hidden"; return; }
+    track.style.visibility = "visible";
+    const th = Math.max(24, (rail.clientHeight / rail.scrollHeight) * trackH);
+    const top = (rail.scrollTop / rMax) * (trackH - th);
+    thumb.style.height = `${th}px`;
+    thumb.style.transform = `translateY(${top}px)`;
+  };
+  useEffect(() => {
+    if (!showRail) return undefined;
+    const update = () => updateRailThumb(document.querySelector('[data-testid="media-range-ruler"]'));
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, [showRail, rangeSegments]);
   // Rail overflow edges (for inset scroll shadows): refreshed on rail
   // scroll, on show/segments change, and on window resize.
-  const updateRailEdges = (rail) => {
-    if (!rail) return;
+  const updateRailEdges = (rail) => {    if (!rail) return;
     const canUp = rail.scrollTop > 2;
     const canDown = rail.scrollTop + rail.clientHeight < rail.scrollHeight - 2;
     setRailEdges((prev) => (prev.top === canUp && prev.bottom === canDown ? prev : { top: canUp, bottom: canDown }));
@@ -2466,6 +2537,47 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
   // to jump). The handler just refreshes overflow edge shadows.
   const onRailScroll = (e) => {
     updateRailEdges(e.currentTarget);
+    updateRailThumb(e.currentTarget);
+  };
+  const railThumbHeight = () => (railThumbRef.current ? railThumbRef.current.offsetHeight : 24);
+  const onRailThumbDown = (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const rail = document.querySelector('[data-testid="media-range-ruler"]');
+    if (!rail) return;
+    railDragRef.current = { y: e.clientY, scroll: rail.scrollTop };
+    rail.style.scrollBehavior = "auto"; // direct manipulation: no glide lag
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+  };
+  const onRailThumbMove = (e) => {
+    const d = railDragRef.current;
+    if (!d) return;
+    const rail = document.querySelector('[data-testid="media-range-ruler"]');
+    const track = railTrackRef.current;
+    if (!rail || !track) return;
+    const rMax = rail.scrollHeight - rail.clientHeight;
+    const span = track.clientHeight - railThumbHeight();
+    if (span <= 0 || rMax <= 0) return;
+    rail.scrollTop = d.scroll + ((e.clientY - d.y) / span) * rMax;
+  };
+  const onRailThumbUp = (e) => {
+    railDragRef.current = null;
+    const rail = document.querySelector('[data-testid="media-range-ruler"]');
+    if (rail) rail.style.scrollBehavior = "";
+    try { e.currentTarget.releasePointerCapture(e.pointerId); } catch {}
+  };
+  const onRailTrackDown = (e) => {
+    // Click (not drag) on the track lane: jump proportionally.
+    if (railThumbRef.current && railThumbRef.current.contains(e.target)) return;
+    const rail = document.querySelector('[data-testid="media-range-ruler"]');
+    const track = railTrackRef.current;
+    if (!rail || !track) return;
+    const rMax = rail.scrollHeight - rail.clientHeight;
+    if (rMax <= 0) return;
+    const rect = track.getBoundingClientRect();
+    const ratio = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
+    rail.style.scrollBehavior = "smooth";
+    rail.scrollTop = ratio * rMax;
   };
   const escSel = (key) => {
     try { return `[data-filename="${typeof CSS !== "undefined" && CSS.escape ? CSS.escape(key) : key}"]`; }
@@ -2474,10 +2586,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
   // Click a range: scroll the target tile/pile just below the sticky toolbar
   // (piles stay closed) and move selection there so arrows continue from it.
   // Clears the touch-hold so the rail follows to the jumped segment.
-  const jumpToRange = (seg) => {
-    if (!seg || !seg.target) return;
-    railHoldUntilRef.current = 0;
-    const { key } = seg.target;
+  const jumpToFileKey = (key, segIdx) => {
     const sid = (() => {
       const it = (inPlaylistView && playlistItemsForView ? playlistItemsForView : filtered.filter((x) => !x.dir)).find((x) => rowKey(x) === key);
       return it && Array.isArray(it.stacks) && it.stacks[0] && stacksActive ? it.stacks[0].id : null;
@@ -2496,7 +2605,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         setSelKeys(new Set([firstKey]));
         setAnchorKey(firstKey);
         setSelectedKey(firstKey);
-        setActiveRangeIdx(seg.idx);
+        if (segIdx != null) setActiveRangeIdx(segIdx);
         return;
       }
     }
@@ -2512,8 +2621,39 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     setSelKeys(new Set([key]));
     setAnchorKey(key);
     setSelectedKey(key);
-    setActiveRangeIdx(seg.idx);
+    if (segIdx != null) setActiveRangeIdx(segIdx);
   };
+  // Segment click → range start; 2nd mini click → that file's own position.
+  const jumpToRangeKey = (seg, key) => {
+    railHoldUntilRef.current = 0;
+    jumpRailRef.current = { idx: seg.idx, until: performance.now() + 2500 };
+    jumpToFileKey(key, seg.idx);
+  };
+  const jumpToRange = (seg) => {
+    if (!seg || !seg.target) return;
+    jumpToRangeKey(seg, seg.target.key);
+  };
+  // Rail hover preview: popup sized to the image's real ratio. Natural dims
+  // are preloaded once per URL and cached; the popup fits within 320px.
+  const [hoverPreview, setHoverPreview] = useState(null); // { url, w, h }
+  const ratioCacheRef = useRef(new Map());
+  const hoverUrlRef = useRef(null);
+  const onRailPhotoEnter = (url) => {
+    hoverUrlRef.current = url;
+    const cached = ratioCacheRef.current.get(url);
+    if (cached) { setHoverPreview({ url, w: cached.w, h: cached.h }); return; }
+    const img = new Image();
+    img.onload = () => {
+      const nw = img.naturalWidth || 1;
+      const nh = img.naturalHeight || 1;
+      const s = Math.min(320 / nw, 320 / nh, 40 * window.innerWidth / 100 / nw, 50 * window.innerHeight / 100 / nh);
+      const dims = { w: Math.max(1, Math.round(nw * s)), h: Math.max(1, Math.round(nh * s)) };
+      ratioCacheRef.current.set(url, dims);
+      if (hoverUrlRef.current === url) setHoverPreview({ url, ...dims });
+    };
+    img.src = url;
+  };
+  const onRailPhotoLeave = () => { hoverUrlRef.current = null; setHoverPreview(null); };
   const renderRangeRail = () => {
     if (!showRail) return null;
     // Inset scroll shadows on sides that have overflowed content.
@@ -2522,9 +2662,15 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
       railEdges.bottom ? "inset 0 -12px 10px -8px rgba(0,0,0,.4)" : null,
     ].filter(Boolean).join(", ") || "none";
     return (
+      <div className="media-range-railwrap">
       <div data-testid="media-range-ruler" className="media-range-rail" onScroll={onRailScroll} style={{ boxShadow: railShadow }}
         onPointerDown={holdRailStart} onPointerUp={holdRailEnd} onPointerCancel={holdRailEnd} onPointerLeave={holdRailEnd}
         onTouchStart={holdRailStart} onTouchEnd={holdRailEnd} onWheel={holdRailEnd}>
+        {hoverPreview && createPortal(
+          <div data-testid="media-range-popup" className="media-range-popup"
+            style={{ width: hoverPreview.w, height: hoverPreview.h, backgroundImage: `url("${hoverPreview.url}")` }} />,
+          document.body
+        )}
         {rangeSegments.map((seg) => {
           const active = activeRangeIdx === seg.idx || (activeRangeIdx == null && selKey && keyRangeMap.get(selKey) === seg.idx);
           return (
@@ -2532,14 +2678,30 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
               type="button" className="media-range-seg" onClick={() => jumpToRange(seg)}
               title={`Items ${seg.label}`}>
               <span className="media-range-minis">
-                {seg.minis.length ? seg.minis.map((mm) => (
-                  <span key={mm.key} className="media-range-photo" style={{ backgroundImage: `url("${mm.url}")` }} />
+                {seg.minis.length ? seg.minis.map((mm, mi) => (
+                  mi === 1 ? (
+                    <span key={mm.key} className="media-range-photo media-range-photo-jump" title="Jump to this file"
+                      style={{ backgroundImage: `url("${mm.url}")` }}
+                      onMouseEnter={() => onRailPhotoEnter(mm.url)} onMouseLeave={onRailPhotoLeave}
+                      onClick={(e) => { e.stopPropagation(); jumpToRangeKey(seg, mm.key); }} />
+                  ) : (
+                    <span key={mm.key} className="media-range-photo" style={{ backgroundImage: `url("${mm.url}")` }}
+                      onMouseEnter={() => onRailPhotoEnter(mm.url)} onMouseLeave={onRailPhotoLeave} />
+                  )
                 )) : <span className="media-range-mini-fallback"><i className="bi bi-image" /></span>}
               </span>
-              <span className="media-range-label">{seg.label}</span>
+              <span className="media-range-label" title={`Jump to range start (${seg.label})`}
+                onClick={(e) => { e.stopPropagation(); jumpToRange(seg); }}>{seg.label}</span>
             </button>
           );
         })}
+      </div>
+      <div ref={railTrackRef} className="media-range-scrolltrack" data-testid="media-range-scrolltrack"
+        onPointerDown={onRailTrackDown}>
+        <div ref={railThumbRef} className="media-range-scrollthumb" data-testid="media-range-scrollthumb"
+          onPointerDown={onRailThumbDown} onPointerMove={onRailThumbMove}
+          onPointerUp={onRailThumbUp} onPointerCancel={onRailThumbUp} />
+      </div>
       </div>
     );
   };
@@ -3801,7 +3963,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                     <span style={{ flex: 1 }} />
                     <button className="btn btn-sm btn-outline-secondary" onClick={closePlaylist} title="Back to Media"><i className="bi bi-arrow-90deg-up" /> Back</button>
                   </div>
-                  <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                  <div style={{ display: "flex", gap: 0, alignItems: "flex-start" }}>
                   <div data-testid="media-grid-files" ref={gridFilesRef} style={{ display: "flex", flexWrap: "wrap", gap: GRID_GAP, flex: 1, minWidth: 0 }}>
                     {fileRows.map((row) => renderTile(row.it, row.i, row.w, row.h))}
                   </div>
@@ -3824,7 +3986,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                   </div>
                 )}
                 {(gridVisibleWithWidths.length > 0 || (gridVisibleWithWidths.length === 0 && filtered.length === 0 && (folder || playlists.length === 0))) && (
-                  <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                  <div style={{ display: "flex", gap: 0, alignItems: "flex-start" }}>
                   <div data-testid="media-grid-files" ref={gridFilesRef} style={{ display: "flex", flexWrap: "wrap", gap: GRID_GAP, flex: 1, minWidth: 0 }}
                     onContextMenu={(e) => {
                       // Ctrl+click (macOS right-click emulation) only toggles

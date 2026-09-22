@@ -67,6 +67,7 @@
 - `INSTAGRAM_USER_AGENT` — custom UA for Instagram (default: iPhone Safari)
 - `AUTO_CONTINUE` (`!process.stdin.isTTY`) — auto-continue prompts without waiting
 - `AUTO_CONTINUE_WAIT_MS` (0) — ms to wait before auto-continue
+- `MEDIA_RANGE_SIZE` (100) — media grid rail: files per range
 
 ### Capture Timing
 - `AUTO_CAPTURE_TIMEOUT_MS` (30000) — max wait for media signals
