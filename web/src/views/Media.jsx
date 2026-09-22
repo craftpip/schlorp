@@ -529,6 +529,21 @@ export default function Media() {
   // Shared view ordering (filter text + type + sort, dirs first) so the
   // list render and the default-selection pick in load() agree.
   // Search/type filters apply to files only — folders are always visible.
+  // Numeric created-time cache (rowKey → ms): comparators below must not
+  // construct Dates per comparison (O(n log n) parsing on big folders).
+  const createdMsCache = useMemo(() => {
+    const m = new Map();
+    for (const it of items || []) {
+      if (!it || it.dir) continue;
+      m.set(isFlat ? it.rel || it.name : it.name, Date.parse(it.created || it.mtime || 0) || 0);
+    }
+    return m;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, isFlat]);
+  const createdMsOf = (it) => {
+    const hit = createdMsCache.get(isFlat ? it.rel || it.name : it.name);
+    return hit == null ? Date.parse(it.created || it.mtime || 0) || 0 : hit;
+  };
   const applyViewOrder = (list) => {
     const raw = filter.trim();
     const isNeg = raw.startsWith("!");
@@ -558,7 +573,7 @@ export default function Media() {
       dirs.sort((a, b) => col.compare(a.name, b.name));
       if (customOrderMap.size) {
         const keyOf = (it) => (isFlat ? it.rel || it.name : it.name);
-        const byDateDesc = (a, b) => new Date(b.created || b.mtime || 0) - new Date(a.created || a.mtime || 0);
+        const byDateDesc = (a, b) => createdMsOf(b) - createdMsOf(a);
         // Date-desc base; manually-ordered files pin their saved slots.
         const out = files.filter((it) => !customOrderMap.has(keyOf(it))).sort(byDateDesc);
         const pinned = files.filter((it) => customOrderMap.has(keyOf(it)));
@@ -572,7 +587,7 @@ export default function Media() {
       // No custom order yet — inside a collection (folder) show latest to oldest,
       // so new downloads naturally prepend.
       if (folder) {
-        files.sort((a, b) => new Date(b.created || b.mtime || 0) - new Date(a.created || a.mtime || 0));
+        files.sort((a, b) => createdMsOf(b) - createdMsOf(a));
       }
       return [...dirs, ...files];
     }
@@ -584,7 +599,7 @@ export default function Media() {
       const by = (a, b) => {
         if (sort === "name") return col.compare(a.name, b.name);
         if (sort === "size") return (a.size || 0) - (b.size || 0);
-        if (sort === "time") return new Date(a.created || a.mtime || 0) - new Date(b.created || b.mtime || 0);
+        if (sort === "time") return createdMsOf(a) - createdMsOf(b);
         return 0;
       };
       files.sort((a, b) => (sortDir === "desc" ? -by(a, b) : by(a, b)));
@@ -1997,8 +2012,9 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         onDoubleClick={() => openItem(it)}
         onContextMenu={(e) => { if (e.ctrlKey) { e.preventDefault(); toggleSelection({ kind: "file", it, key: rk }); return; } if (!isDir && (gridMulti || (it && it._isPlaylistItem))) { e.preventDefault(); openContextMenu(e, { kind: "file", it, key: rk }); } }}
         title={dragEnabled ? `${displayName(it)} — drag to reorder` : `${displayName(it)} — click to select, double-click to open`}
-        draggable={dragEnabled || (gridMulti && !isDir)}
+        draggable={isCoarse ? false : (dragEnabled || (gridMulti && !isDir))}
         onDragStart={(e) => {
+          if (isCoarse) return;
           if (!(dragEnabled || (gridMulti && !isDir))) return;
           // Dragging an unselected file carries just that file — never a
           // stale multi-selection (dragstart suppresses the click that
@@ -2031,7 +2047,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
           try { e.dataTransfer.setData("application/x-xdl-stack", JSON.stringify(carry)); } catch {}
         }}
         onDragEnd={() => { dragKeyRef.current = null; dragKeysRef.current = null; if (dropInfo) setDropInfo(null); }}
-        style={{ position: "relative", flex: isDir ? "0 0 auto" : "0 0 auto", width: w, height: h, overflow: (menuOpen || isDropTarget) ? "visible" : "hidden", zIndex: menuOpen ? 60 : "auto", borderRadius: highlight || stackColor ? 10 : 0, background: isDir ? "var(--surface-2)" : "var(--surface-2)", outline: highlight ? "4px solid #fff" : (stackColor ? `3px solid ${stackColor}` : "none"), cursor: dragEnabled ? "grab" : "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, contentVisibility: menuOpen ? "visible" : "auto", containIntrinsicSize: `${w}px ${h}px`, animation: anim || undefined, userSelect: "none", WebkitUserSelect: "none" }}
+        style={{ position: "relative", flex: isDir ? "0 0 auto" : "0 0 auto", width: w, height: h, overflow: (menuOpen || isDropTarget) ? "visible" : "hidden", zIndex: menuOpen ? 60 : "auto", borderRadius: highlight || stackColor ? 10 : 0, background: isDir ? "var(--surface-2)" : "var(--surface-2)", outline: highlight ? "4px solid #fff" : (stackColor ? `3px solid ${stackColor}` : "none"), cursor: dragEnabled ? "grab" : "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, contentVisibility: menuOpen ? "visible" : "auto", containIntrinsicSize: `${w}px ${h}px`, animation: anim || undefined, userSelect: "none", WebkitUserSelect: "none", touchAction: "manipulation" }}
       >
         {src ? (
           <span style={{ position: "relative", width: "100%", height: "100%", flex: 1, display: "block", background: "#000", borderRadius: highlight || stackColor ? 10 : 0, minHeight: 0, overflow: "hidden" }}>
@@ -2446,7 +2462,8 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         };
         let rowTop = null;
         let firstBelow = null;
-        for (const el of grid.querySelectorAll("[data-filename]")) {
+        const tiles = spyTilesRef.current.length ? spyTilesRef.current : grid.querySelectorAll("[data-filename]");
+        for (const el of tiles) {
           if (el.classList.contains("media-tile-folder")) continue;
           if (el.getAttribute("data-testid") === "media-tile-file" && el.closest && el.closest('[data-testid="media-tile-pile"]')) continue;
           const r = el.getBoundingClientRect();
@@ -2705,6 +2722,16 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
       </div>
     );
   };
+  // Scroll-spy tile cache: querying 7k+ nodes per scroll frame is the
+  // scroll-jank hotspot on big folders. Refresh on grid commits; frames
+  // reuse the array (fall back to a live query when empty/stale).
+  const spyTilesRef = useRef([]);
+  useEffect(() => {
+    if (!isGrid) { spyTilesRef.current = []; return; }
+    const grid = gridFilesRef.current;
+    if (!grid) { spyTilesRef.current = []; return; }
+    spyTilesRef.current = Array.from(grid.querySelectorAll("[data-filename]"));
+  }, [isGrid, gridVisibleWithWidths, fileRows]);
   // Live refs so the keyboard effect can always read fresh grid data
   const gridVisibleRef = useRef(gridVisible);
   gridVisibleRef.current = gridVisible;
@@ -2880,7 +2907,22 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     const shift = e?.shiftKey;
     const ctrl = e?.ctrlKey || e?.metaKey;
     // Coarse pointer (mobile): single tap selects, double-tap opens.
+    // Multi-select mode (033): taps toggle instead of replacing, and piles
+    // never spread/collapse — same as the desktop multi branch below.
     if (isCoarsePointer()) {
+      if (multiSelect) {
+        if (!isPile && isDoubleTap(k)) { openViewer(entry.it); return; }
+        if (!isPile) { toggleSelection(entry); return; }
+        const cur = selKeys.size ? selKeys : selKey ? new Set([selKey]) : new Set();
+        if (cellKeys.every((ck) => cur.has(ck))) {
+          setSelKeys((prev) => { const next = new Set(prev); for (const ck of cellKeys) next.delete(ck); return next; });
+        } else {
+          setSelKeys((prev) => { const next = new Set(prev.size ? prev : (selKey ? [selKey] : [])); for (const ck of cellKeys) next.add(ck); return next; });
+        }
+        setAnchorKey(cellKeys[0]);
+        setSelectedKey(cellKeys[0]);
+        return;
+      }
       if (isPile) {
         const ks = pilesLocked ? cellKeys : [cellKeys[0]];
         if (!pilesLocked) { capturePileRect(entry.stackId); setSpreadStackId(entry.stackId); }
@@ -3057,8 +3099,9 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
             setSelKeys(new Set([rowKey(members[0])]));
           }
         }}
-        draggable={isCustomReorder}
+        draggable={isCoarsePointer() ? false : isCustomReorder}
         onDragStart={(e) => {
+          if (isCoarsePointer()) return;
           if (!isCustomReorder) return;
           const mem = pileMemberKeys(stackId);
           if (!mem.length) return;
@@ -3108,7 +3151,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
           } catch {}
         }}
         title={isCustomReorder ? `${stackName} — ${count} files — drag to reorder` : `${stackName} — ${count} files`}
-        style={{ position: "relative", display: "flex", flexDirection: "row", alignItems: "stretch", width: memberW + PEEK * (members.length - 1), height: GRID_TARGET_H, flex: "0 0 auto", cursor: isCustomReorder ? "grab" : "pointer", borderRadius: 10, outline: pileOutline, userSelect: "none", WebkitUserSelect: "none" }}
+        style={{ position: "relative", display: "flex", flexDirection: "row", alignItems: "stretch", width: memberW + PEEK * (members.length - 1), height: GRID_TARGET_H, flex: "0 0 auto", cursor: isCustomReorder ? "grab" : "pointer", borderRadius: 10, outline: pileOutline, userSelect: "none", WebkitUserSelect: "none", touchAction: "manipulation" }}
       >
         {pileDropSide && (
           <div style={{ position: "absolute", top: 0, bottom: 0, [pileDropSide]: -3, width: 4, borderRadius: 2, background: "var(--accent)", zIndex: 10, pointerEvents: "none" }} />

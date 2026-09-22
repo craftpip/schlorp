@@ -618,6 +618,12 @@
       /* Sort bar: full "Gallery" label on desktop, abbreviated "Gal" on mobile */
       .media-sort-abbr{display:none}
 
+      /* Sticky overflow menu: toggle is mobile-only; desktop always shows all controls */
+      .media-menu-toggle{display:none !important}
+      /* Up sits with the breadcrumb (left), not on the right side */
+      [data-testid="media-breadcrumb-path"]{flex:0 1 auto !important}
+      [data-testid="media-up"]{margin-left:0 !important}
+
       /* Context-menu popup (plan 024): centered modal card + stack grid */
       .media-ctx-card{
         width:min(520px,100%);
@@ -672,6 +678,12 @@
         /* Media toolbar: filter takes full row */
         .media-toolbar{gap:6px !important}
         .media-filter{flex:1 1 100% !important;max-width:none !important}
+        /* Sticky overflow menu (mobile-only): closed shows only breadcrumbs
+           + toggle; open reveals toolbar + side controls, toggle becomes X */
+        .media-menu-toggle{display:inline-flex !important;margin-left:auto !important}
+        .media-sticky:not(.menu-open) .media-toolbar{display:none !important}
+        .media-sticky:not(.menu-open) .media-side-controls{display:none !important}
+        .media-sticky.menu-open .media-side-controls{order:-1 !important;flex:1 1 100% !important;flex-wrap:wrap !important;margin-left:0 !important}
         .media-sticky{margin-left:0 !important;margin-right:0 !important}
         /* Media list: Name + bookmark + Size + Actions, Time hidden */
         .media-lib-card .card-body{gap:0 8px !important}

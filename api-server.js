@@ -753,7 +753,16 @@ function fileEntryTimes(stat) {
 async function walkMediaFlat(dir, relPrefix, out, depth) {
   if (depth > 32) return;
   const entries = await fs.readdir(dir, { withFileTypes: true });
-  for (const entry of entries) {
+  const stats = await mapLimit(entries, 64, async (entry) => {
+    if (entry.isSymbolicLink() || entry.isDirectory()) return null;
+    try {
+      return await fs.stat(path.join(dir, entry.name));
+    } catch {
+      return null;
+    }
+  });
+  for (let k = 0; k < entries.length; k++) {
+    const entry = entries[k];
     if (entry.isSymbolicLink()) continue;
     const fullPath = path.join(dir, entry.name);
     const rel = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
@@ -762,13 +771,8 @@ async function walkMediaFlat(dir, relPrefix, out, depth) {
       await walkMediaFlat(fullPath, rel, out, depth + 1);
       continue;
     }
-    let stat;
-    try {
-      stat = await fs.stat(fullPath);
-    } catch {
-      continue;
-    }
-    if (!stat.isFile()) continue;
+    const stat = stats[k];
+    if (!stat || !stat.isFile()) continue;
     out.push({
       name: entry.name,
       rel,
@@ -778,6 +782,19 @@ async function walkMediaFlat(dir, relPrefix, out, depth) {
     });
   }
 }
+// Bounded parallel mapper (libuv threadpool-friendly batching for mass stat).
+async function mapLimit(list, limit, fn) {
+  const out = new Array(list.length);
+  let i = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, list.length)) }, async () => {
+    while (i < list.length) {
+      const idx = i++;
+      out[idx] = await fn(list[idx], idx);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
 
 async function listMediaDir(resolved, flat) {
   const items = [];
@@ -785,26 +802,31 @@ async function listMediaDir(resolved, flat) {
     await walkMediaFlat(resolved, "", items, 0);
   } else {
     const entries = await fs.readdir(resolved, { withFileTypes: true });
-    for (const entry of entries) {
-      const fullPath = path.join(resolved, entry.name);
-      let stat;
+    const stats = await mapLimit(entries, 64, async (entry) => {
       try {
-        stat = await fs.stat(fullPath);
+        return await fs.stat(path.join(resolved, entry.name));
       } catch {
-        continue;
+        return null;
       }
+    });
+    for (let k = 0; k < entries.length; k++) {
+      const entry = entries[k];
+      const stat = stats[k];
+      if (!stat) continue;
       items.push({
         name: entry.name,
         dir: entry.isDirectory(),
         size: stat.size,
+        mtimeMs: stat.mtimeMs,
         ...fileEntryTimes(stat),
       });
     }
     items.sort((a, b) => {
       if (a.dir !== b.dir) return a.dir ? -1 : 1;
-      if (!a.dir && !b.dir) return new Date(b.mtime) - new Date(a.mtime);
+      if (!a.dir && !b.dir) return b.mtimeMs - a.mtimeMs;
       return a.name.localeCompare(b.name);
     });
+    for (const it of items) delete it.mtimeMs;
   }
   // Filter out .xdlstack files from the listing (both branches)
   for (let i = items.length - 1; i >= 0; i--) {
