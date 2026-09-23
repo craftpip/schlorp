@@ -67,6 +67,8 @@ const {
   muxVideoAndAudio,
   mediaHasAudio,
   downloadMedia,
+  downloadStreamingManifestViaBrowser,
+  isImageSegmentUrl,
 } = require("./download");
 
 const SNAPSHOT_DIR =
@@ -610,6 +612,47 @@ async function run(options = {}) {
       const page = await browser.newPage();
       if (!(browser && browser.__isCdp)) {
         try { await page.bringToFront().catch(() => {}); } catch {}
+      }
+      // CDP network tap: records every request URL (page + workers +
+      // iframes) from birth. The engine's response handler misses worker
+      // traffic; the browser-relay downloader reads this tap to find the
+      // real stream manifest (e.g. MissAV/tsyndicate worker HLS).
+      page.__xdlNetUrls = [];
+      page.__xdlNetStatus = {};
+      try {
+        const cdpSession = await page.target().createCDPSession();
+        page.__xdlCdpSession = cdpSession;
+        await cdpSession.send("Network.enable");
+        cdpSession.on("Network.requestWillBeSent", (event) => {
+          try {
+            const u = String((event && event.request && event.request.url) || "");
+            if (!u || !/^https?:/i.test(u)) return;
+            const looksMedia = /\.(m3u8|mpd|mp4|ts|m4s|webm|mov|mkv)(\?|$)/i.test(u)
+              // extensionless manifests/endpoints (e.g. tsyndicate /do2/<id>/master)
+              || /\/(master|playlist|manifest|do2|hls)(\?|$|\/)/i.test(u);
+            if (!looksMedia) return;
+            // skip storyboards/thumbnails/ads at tap level (still visible to hooks)
+            if (isImageSegmentUrl(u)) return;
+            const tap = page.__xdlNetUrls;
+            if (Array.isArray(tap) && tap.length < 3000 && !tap.includes(u)) tap.push(u);
+            try {
+              const requestId = event && event.requestId;
+              if (requestId && page.__xdlNetStatus) page.__xdlNetStatus[u] = { requestId, status: 0 };
+            } catch {}
+          } catch {}
+        });
+        cdpSession.on("Network.responseReceived", (event) => {
+          try {
+            const response = (event && event.response) || {};
+            const u = String(response.url || "");
+            const status = Number(response.status || 0);
+            if (u && page.__xdlNetStatus && page.__xdlNetStatus[u]) {
+              page.__xdlNetStatus[u].status = status;
+            }
+          } catch {}
+        });
+      } catch (err) {
+        log(`Network tap unavailable: ${String((err && err.message) || err).slice(0, 100)}`);
       }
 
       try {
@@ -1573,7 +1616,33 @@ async function run(options = {}) {
                   await waitForInstagram429Cooldown(log, instagram429CooldownMs);
                   throw createInstagram429CooldownError("Instagram responded with 429. Suspending this run; retry later.");
                 }
-                throw err;
+                // Bot-guarded HLS (e.g. Cloudflare 403 on surrit for MissAV):
+                // ffmpeg/curl can't pass, but the live page can — relay the
+                // stream through the browser (works in Cloak + CDP Chrome).
+                if (
+                  !result &&
+                  isStreamingManifestUrl(candidate) &&
+                  /403|forbidden|access denied/i.test(String((err && err.message) || err || ""))
+                ) {
+                  try {
+                    log(`Direct fetch blocked (403) — retrying via browser relay: ${candidate}`);
+                    result = await downloadStreamingManifestViaBrowser(
+                      page,
+                      candidate,
+                      outputDir,
+                      filePrefix,
+                      {
+                        includeTimestamp: !isInstagramTarget && !isRedditTarget && !useUrlFilename,
+                        log,
+                        onProgress: (p) => onProgress({ ...p, stage: p.stage || "downloading", candidate }),
+                      }
+                    );
+                  } catch (relayErr) {
+                    throw relayErr;
+                  }
+                } else {
+                  throw err;
+                }
               }
 
               selectedCandidate = candidate;

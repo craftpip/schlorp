@@ -100,7 +100,7 @@
 scan-videos/index.js         → { run(urls, options) }
 scan-videos/browser.js       → { buildBrowserFromLocalProfile(options) }  // options.account supported
 scan-videos/config.js        → { shouldRunHeadless, shouldAutoContinuePrompts, getInstagramUserAgent, waitForEnter, normalizeUrl, resolveProfileConfig, loadAppConfig, resolveAccountConfig, getStateFilePath }
-scan-videos/download.js      → { hasFfmpeg, muxVideoAndAudio, mediaHasAudio, downloadMedia }
+scan-videos/download.js      → { hasFfmpeg, muxVideoAndAudio, mediaHasAudio, downloadMedia, downloadStreamingManifestViaBrowser, parseM3u8Playlist, parseM3u8Attributes, ... }
 scan-videos/extractors.js    → { extractXhamsterMediaData, extractXvideosMediaUrls, extractKvsMediaData, extractEpornerMediaData, extractBeegMediaData, extractSpankbangMediaData, extractJavMediaData, extractPornhubMediaData, getInstagramUsername, getInstagramUsernameFromOembed }
 scan-videos/instagram-utils.js → { isReservedInstagramName, extractInstagramShortcode, extractInstagramUsernameFromJsonText, extractInstagramMediaHintsFromJsonText, filterInstagramCandidatesForTarget }
 scan-videos/media-utils.js   → { isLikelyVideoUrl, stripByteRangeParams, isStreamingManifestUrl, isDirectFileUrl, extractQualityHint, metadataQualityScore, isInstagramAudioOnlyUrl, getInstagramAssetId, scoreDownloadCandidate, prioritizeInstagramCandidates, extractDownloadableVideoUrls, prioritizeXhamsterCandidates, isAdVideoUrl, isPreviewClipUrl, sanitizeFileToken }

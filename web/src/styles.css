@@ -850,6 +850,15 @@
         text-shadow:0 1px 4px rgba(0,0,0,.8);padding:8px 2px 5px;cursor:pointer;
         background:linear-gradient(transparent, rgba(0,0,0,.5));
       }
+      /* Range progress line: horizontal bar inside the ACTIVE segment only,
+         moves top 0% → 100% as the first visible row travels through the
+         range (position written per scroll frame from the scroll-spy). */
+      .media-range-progress{
+        position:absolute;left:0;right:0;top:0;height:2px;z-index:3;
+        background:#fff;box-shadow:0 0 6px rgba(99,102,241,.9), 0 1px 3px rgba(0,0,0,.5);
+        pointer-events:none;display:none;
+      }
+      .media-range-seg[data-active="true"] .media-range-progress{display:block}
       /* Season label by default (S1, S2…); range (1-100) on segment hover. */
       .media-range-range{display:none}
       .media-range-seg:hover .media-range-season{display:none}

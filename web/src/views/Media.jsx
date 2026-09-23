@@ -2463,21 +2463,35 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
           }
           return cur;
         };
+        // Resolve a tile key to its range-member key (pile containers map to
+        // their first member, matching the pile-atomic range assignment).
+        const resolveRangeKey = (key) => {
+          if (keyRangeMap.get(key) != null) return key;
+          if (String(key).startsWith("stack:")) {
+            const mem = pileMemberKeys(String(key).slice("stack:".length));
+            if (mem.length) return mem[0];
+          }
+          return key;
+        };
         let rowTop = null;
         let firstBelow = null;
+        let bestKey = null;
+        let firstBelowKey = null;
         const tiles = spyTilesRef.current.length ? spyTilesRef.current : grid.querySelectorAll("[data-filename]");
         for (const el of tiles) {
           if (el.classList.contains("media-tile-folder")) continue;
           if (el.getAttribute("data-testid") === "media-tile-file" && el.closest && el.closest('[data-testid="media-tile-pile"]')) continue;
           const r = el.getBoundingClientRect();
           if (r.bottom <= offset || r.top >= window.innerHeight) continue;
-          const cur = rangeOfKey(el.getAttribute("data-filename"));
+          const rawKey = el.getAttribute("data-filename");
+          const cur = rangeOfKey(rawKey);
           if (cur == null) continue;
+          const resKey = resolveRangeKey(rawKey);
           if (rowTop == null) {
-            if (r.top <= offset + 4) { rowTop = r.top; best = cur; }
-            else { firstBelow = cur; break; }
+            if (r.top <= offset + 4) { rowTop = r.top; best = cur; bestKey = resKey; }
+            else { firstBelow = cur; firstBelowKey = resKey; break; }
           } else {
-            if (Math.abs(r.top - rowTop) <= 12) { if (cur > best) best = cur; }
+            if (Math.abs(r.top - rowTop) <= 12) { if (cur > best) { best = cur; bestKey = resKey; } }
             else break;
           }
         }
@@ -2491,6 +2505,24 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
           else ridx = jr.idx;
         }
         if (ridx != null) setActiveRangeIdx((cur) => (cur === ridx ? cur : ridx));
+        // Range progress line: how far the first visible row sits inside the
+        // active range (0 = range top at viewport top). Tile-count based, so
+        // it survives variable tile heights and wrapped rows. Written straight
+        // to the DOM (no React state) to stay 60fps. Skipped while the jump
+        // pin holds another segment mid-glide.
+        if (ridx === ridx0) {
+          const visKey = best != null ? bestKey : firstBelowKey;
+          const seg = rangeSegments.find((s) => s.idx === ridx);
+          if (seg && visKey != null) {
+            const pos = seg.keys.findIndex((k) => k.key === visKey);
+            if (pos >= 0) {
+              const p = seg.keys.length < 2 ? 0 : Math.min(1, Math.max(0, pos / (seg.keys.length - 1)));
+              const rail0 = document.querySelector('[data-testid="media-range-ruler"]');
+              const line = rail0 && ridx != null ? rail0.querySelector(`[data-range-idx="${ridx}"] .media-range-progress`) : null;
+              if (line) line.style.top = `${p * 100}%`;
+            }
+          }
+        }
         // Page→rail follow: bring the ACTIVE segment into view, centered in
         // the rail box when possible (no proportional scroll sync). Paused
         // while the user is manually browsing the rail (touch-hold). The rail
@@ -2513,7 +2545,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     onScroll();
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => { window.removeEventListener("scroll", onScroll); if (raf) cancelAnimationFrame(raf); };
-  }, [showRail, keyRangeMap]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [showRail, keyRangeMap, rangeSegments]); // eslint-disable-line react-hooks/exhaustive-deps
   // Custom rail scrollbar (plan 034): native bars hidden, own physical lane.
   // Thumb sized/positioned from rail metrics; drag + track-click supported.
   const railTrackRef = useRef(null);
@@ -2713,6 +2745,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                   )
                 )) : <span className="media-range-mini-fallback"><i className="bi bi-image" /></span>}
               </span>
+              <span className="media-range-progress" />
               <span className="media-range-label" title={`Season ${season} · Items ${seg.label} — Jump to range start`}
                 onClick={(e) => { e.stopPropagation(); jumpToRange(seg); }}>
                 <span className="media-range-season">S{season}</span>
