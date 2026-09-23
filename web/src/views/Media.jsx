@@ -2693,10 +2693,13 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         )}
         {rangeSegments.map((seg) => {
           const active = activeRangeIdx === seg.idx || (activeRangeIdx == null && selKey && keyRangeMap.get(selKey) === seg.idx);
+          // Gallery counts ranges from 0 at the bottom, so seasons run reversed
+          // (bottom = S1, top = S{count}); other sorts run S1 at the top.
+          const season = isGalleryRail ? rangeSegments.length - seg.idx : seg.idx + 1;
           return (
             <button key={seg.idx} data-testid="media-range-ruler-seg" data-range-idx={seg.idx} data-active={active ? "true" : "false"}
               type="button" className="media-range-seg" onClick={() => jumpToRange(seg)}
-              title={`Items ${seg.label}`}>
+              title={`Season ${season} · Items ${seg.label}`}>
               <span className="media-range-minis">
                 {seg.minis.length ? seg.minis.map((mm, mi) => (
                   mi === 1 ? (
@@ -2710,8 +2713,11 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                   )
                 )) : <span className="media-range-mini-fallback"><i className="bi bi-image" /></span>}
               </span>
-              <span className="media-range-label" title={`Jump to range start (${seg.label})`}
-                onClick={(e) => { e.stopPropagation(); jumpToRange(seg); }}>{seg.label}</span>
+              <span className="media-range-label" title={`Season ${season} · Items ${seg.label} — Jump to range start`}
+                onClick={(e) => { e.stopPropagation(); jumpToRange(seg); }}>
+                <span className="media-range-season">S{season}</span>
+                <span className="media-range-range">{seg.label}</span>
+              </span>
             </button>
           );
         })}

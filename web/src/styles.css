@@ -850,6 +850,10 @@
         text-shadow:0 1px 4px rgba(0,0,0,.8);padding:8px 2px 5px;cursor:pointer;
         background:linear-gradient(transparent, rgba(0,0,0,.5));
       }
+      /* Season label by default (S1, S2…); range (1-100) on segment hover. */
+      .media-range-range{display:none}
+      .media-range-seg:hover .media-range-season{display:none}
+      .media-range-seg:hover .media-range-range{display:inline}
       @media(max-width:640px){
         .media-range-railwrap{display:none !important}
         .media-range-rail{display:none !important}
