@@ -45,10 +45,6 @@ Open `http://localhost:6767`. Five tabs, everything happens here:
 
 Set `UI_PANEL_PASSWORD` and the app hides behind a fake todo list until `ctrl+shift+L` summons the login — `esc` + `` ` `` slams the door shut instantly, and idle sessions time out after 10 minutes.
 
-## The sync daemon — the night shift
-
-`node sync-saved-downloads.js` grazes your saved collections on its own: picks lists at random, downloads with jittered breaks between items, retries failures, and quits on an Instagram 429 so you can run it again later. The lists it works are the ones you set up under Collections; progress lives in `.saved-sync-state.json` and `.download-queue.json`.
-
 ## Prefer the terminal?
 
 ```bash
