@@ -5,6 +5,11 @@ const { makeFakePage } = require("../helpers/make-fake-page");
 const {
   extractXhamsterMediaData,
   extractXvideosMediaUrls,
+  extractKvsMediaData,
+  extractEpornerMediaData,
+  extractBeegMediaData,
+  extractSpankbangMediaData,
+  extractJavMediaData,
   extractPornhubMediaData,
   expandPornhubGetMediaUrls,
   getInstagramUsername,
@@ -126,6 +131,199 @@ test("extractXvideosMediaUrls: html5player fields + script patterns, relative re
 test("extractXvideosMediaUrls: no player, no scripts returns empty", async () => {
   const page = makeFakePage({ url: "https://www.xvideos.com/v/1", document: fakeDocument() });
   assert.deepEqual(await extractXvideosMediaUrls(page), []);
+});
+
+test("extractXvideosMediaUrls: sUrl* aliases (current player, shared with XNXX)", async () => {
+  const page = makeFakePage({
+    url: "https://www.xnxx.com/video-1bgzl38a/top_10_most_viewed_videos",
+    window: {
+      html5player: {
+        sUrlHigh: "https://cdn.xnxx.com/high.mp4",
+        sUrlLow: "https://cdn.xnxx.com/low.mp4",
+        sUrlHls: "https://cdn.xnxx.com/h.m3u8",
+      },
+    },
+    document: fakeDocument({ query: {}, all: { script: [] } }),
+  });
+
+  assert.deepEqual(await extractXvideosMediaUrls(page), [
+    "https://cdn.xnxx.com/high.mp4",
+    "https://cdn.xnxx.com/low.mp4",
+    "https://cdn.xnxx.com/h.m3u8",
+  ]);
+});
+
+test("extractKvsMediaData: window.flashvars + script video_url patterns", async () => {
+  const page = makeFakePage({
+    url: "https://www.porntrex.com/video/3341125/walks-grades-snoop",
+    window: {
+      flashvars: {
+        video_url: "https://ptx.cdntrex.com/contents/videos/3341000/3341125/720p.mp4",
+        video_alt_url: "https://ptx.cdntrex.com/contents/videos/3341000/3341125/480p.mp4",
+      },
+    },
+    document: fakeDocument({
+      query: {},
+      all: {
+        script: [
+          { textContent: 'var flashvars = {"video_url":"https:\\/\\/ptx.cdntrex.com\\/v\\/1080p.mp4","hls_url":"https:\\/\\/ptx.cdntrex.com\\/v\\/hls.m3u8"};' },
+        ],
+      },
+    }),
+  });
+
+  const { urls } = await extractKvsMediaData(page);
+  assert.ok(urls.includes("https://ptx.cdntrex.com/contents/videos/3341000/3341125/720p.mp4"));
+  assert.ok(urls.includes("https://ptx.cdntrex.com/contents/videos/3341000/3341125/480p.mp4"));
+  assert.ok(urls.includes("https://ptx.cdntrex.com/v/1080p.mp4"));
+  assert.ok(urls.includes("https://ptx.cdntrex.com/v/hls.m3u8"));
+});
+
+test("extractEpornerMediaData: fetches /xhr/video/ JSON and collects mp4/m3u8", async () => {
+  const page = makeFakePage({
+    url: "https://www.eporner.com/hd-porn/1lbQXuy7Nrg/x/",
+    document: {
+      querySelectorAll: () => [],
+      documentElement: {
+        innerHTML: '<div data-xhr="/xhr/video/1lbQXuy7Nrg?hash=abc&domain=www.eporner.com"></div>',
+      },
+    },
+    fetchHandler: async () => ({
+      ok: true,
+      json: async () => ({
+        sources: [
+          { src: "https://g0.eporner.com/xhr1/720p.mp4" },
+          { file: "https://g0.eporner.com/xhr1/hls.m3u8" },
+        ],
+      }),
+    }),
+  });
+
+  const { urls } = await extractEpornerMediaData(page);
+  assert.deepEqual(urls, [
+    "https://g0.eporner.com/xhr1/720p.mp4",
+    "https://g0.eporner.com/xhr1/hls.m3u8",
+  ]);
+});
+
+test("extractEpornerMediaData: no xhr endpoint returns empty", async () => {
+  const page = makeFakePage({
+    url: "https://www.eporner.com/hd-porn/1lbQXuy7Nrg/x/",
+    document: {
+      querySelectorAll: () => [],
+      documentElement: { innerHTML: "<div>no player here</div>" },
+    },
+  });
+
+  const { urls } = await extractEpornerMediaData(page);
+  assert.deepEqual(urls, []);
+});
+
+test("extractBeegMediaData: facts API fallback mp4 + HLS ladders", async () => {
+  const page = makeFakePage({
+    url: "https://beeg.com/-0949602513022343",
+    document: fakeDocument({ query: {}, all: { script: [] } }),
+    fetchHandler: async () => ({
+      ok: true,
+      json: async () => ({
+        file: {
+          fallback: "key=abc,end=1,limit=10/data=deadbeef/480p/949602513022343.mp4",
+          hls_resources: {
+            fl_cdn_multi: "key=abc,end=1,limit=10/data=deadbeef/media=hls4A/multi=426x240:240p/_TPL_/949602513022343.mp4.m3u8",
+          },
+        },
+      }),
+    }),
+  });
+
+  const { urls } = await extractBeegMediaData(page);
+  assert.deepEqual(urls, [
+    "https://video.beeg.com/key=abc,end=1,limit=10/data=deadbeef/480p/949602513022343.mp4",
+    "https://video.beeg.com/key=abc,end=1,limit=10/data=deadbeef/media=hls4A/multi=426x240:240p/720p/949602513022343.mp4.m3u8",
+    "https://video.beeg.com/key=abc,end=1,limit=10/data=deadbeef/media=hls4A/multi=426x240:240p/480p/949602513022343.mp4.m3u8",
+  ]);
+});
+
+test("extractBeegMediaData: non-video URL returns empty", async () => {
+  const page = makeFakePage({
+    url: "https://beeg.com/",
+    document: fakeDocument({ query: {}, all: { script: [] } }),
+  });
+
+  const { urls } = await extractBeegMediaData(page);
+  assert.deepEqual(urls, []);
+});
+
+test("extractSpankbangMediaData: stream_data quality map + quality scoring", async () => {
+  const page = makeFakePage({
+    url: "https://spankbang.party/a588y/video/x/",
+    window: {
+      stream_data: {
+        "480p": ["https://vdownload-41.sb-cd.com/1/7/17040130-480p.mp4?secure=x"],
+        "1080p": ["https://vdownload-41.sb-cd.com/1/7/17040130-1080p.mp4?secure=x"],
+        "m3u8": ["https://hls-uranus.sb-cd.com/hls/1/7/17040130-master.m3u8?secure=x"],
+      },
+    },
+    document: fakeDocument({ query: {}, all: { script: [] } }),
+  });
+
+  const { urls, qualityByUrl } = await extractSpankbangMediaData(page);
+  assert.equal(urls.length, 3);
+  assert.ok(
+    qualityByUrl.get("https://vdownload-41.sb-cd.com/1/7/17040130-1080p.mp4?secure=x") >
+      qualityByUrl.get("https://vdownload-41.sb-cd.com/1/7/17040130-480p.mp4?secure=x")
+  );
+});
+
+test("extractSpankbangMediaData: no stream_data returns empty", async () => {
+  const page = makeFakePage({
+    url: "https://spankbang.com/a588y/video/x/",
+    window: {},
+    document: fakeDocument({ query: {}, all: { script: [] } }),
+  });
+
+  const { urls } = await extractSpankbangMediaData(page);
+  assert.deepEqual(urls, []);
+});
+
+test("extractJavMediaData: video sources + surrit/jav.si scripts, code-gated mediabook", async () => {
+  const sourceEl = (src) => ({
+    getAttribute: (name) => (name === "src" ? src : null),
+    src,
+  });
+  const page = makeFakePage({
+    url: "https://javtiful.com/video/107145/mida-625",
+    window: {},
+    document: {
+      title: "",
+      querySelector: () => null,
+      querySelectorAll: (sel) => {
+        if (sel === "video source[src], video[src]") {
+          return [sourceEl("https://fast-stream.jav.si/p/abc123")];
+        }
+        if (sel === "[data-mediabook]") {
+          return [
+            { getAttribute: () => "https://video.pornfhd.com/v/censored/111_MIDA-625.mp4" },
+            { getAttribute: () => "https://video.pornfhd.com/v/censored/222_SSIS-069.mp4" },
+          ];
+        }
+        if (sel === "script") {
+          return [
+            { textContent: 'var x = "https://surrit.com/uuid-1/playlist.m3u8";' },
+          ];
+        }
+        if (sel === "a, button") return [];
+        return [];
+      },
+    },
+  });
+
+  const { urls } = await extractJavMediaData(page);
+  assert.ok(urls.includes("https://fast-stream.jav.si/p/abc123"));
+  assert.ok(urls.includes("https://surrit.com/uuid-1/playlist.m3u8"));
+  assert.ok(urls.includes("https://video.pornfhd.com/v/censored/111_MIDA-625.mp4"));
+  // related video's preview (different code) must NOT be included
+  assert.ok(!urls.includes("https://video.pornfhd.com/v/censored/222_SSIS-069.mp4"));
 });
 
 test("extractPornhubMediaData: flashvars scan + get_media + quality scoring", async () => {

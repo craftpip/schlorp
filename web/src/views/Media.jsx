@@ -1869,7 +1869,10 @@ const collapseSpreadUnlessMember = (fid) => {
   const FOLDER_CHIP_W = 220;
   const FOLDER_CHIP_H = 56;
   const renderFolderChip = (it) => {
-    const selected = selKey === rowKey(it);
+    const rk = rowKey(it);
+    // Instant highlight from local selKeys (sync state); selKey (URL param)
+    // lands a tick later via router — without this the tap feels laggy.
+    const selected = selKey === rk || selKeys.has(rk);
     return (
       <div
         key={isFlat ? it.rel || it.name : it.name}
@@ -1882,7 +1885,7 @@ const collapseSpreadUnlessMember = (fid) => {
         onMouseEnter={() => setHoveredFolderKey(rowKey(it))}
         onMouseLeave={() => setHoveredFolderKey((cur) => (cur === rowKey(it) ? null : cur))}
         title={`${displayName(it)} — click to select, double-click to open`}
-        style={{ width: FOLDER_CHIP_W, height: FOLDER_CHIP_H, flex: "0 0 auto", display: "flex", alignItems: "center", gap: 10, padding: "0 12px", overflow: "hidden", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)", outline: selected ? "4px solid #fff" : "none", cursor: "pointer", position: "relative", userSelect: "none", WebkitUserSelect: "none" }}
+        style={{ width: FOLDER_CHIP_W, height: FOLDER_CHIP_H, flex: "0 0 auto", display: "flex", alignItems: "center", gap: 10, padding: "0 12px", overflow: "hidden", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)", outline: selected ? "4px solid #fff" : "none", cursor: "pointer", position: "relative", userSelect: "none", WebkitUserSelect: "none", touchAction: "manipulation", WebkitTapHighlightColor: "rgba(99,102,241,.25)" }}
       >
         <i className="bi bi-folder-fill" style={{ fontSize: 24, color: "#f59e0b", flex: "0 0 auto" }} />
         <span style={{ flex: 1, fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{displayName(it)}</span>

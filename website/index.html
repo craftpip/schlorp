@@ -334,8 +334,8 @@
   <div>
     <div class="eyebrow"><i class="bi bi-stars"></i> stealth browser goes brrr <em>since 2026</em></div>
     <h1>
-      <span class="wiggle">yoink</span> videos<br>
-      <span class="grad scribble">of all your funny cat videos.</span>
+        <span class="wiggle">yoink</span><br>
+        <span class="grad scribble">all your funny cat videos.</span>
     </h1>
     <p>
       <strong>Schlorp Machine</strong> is a tiny Node CLI + sneaky CloakBrowser that visits pages and <strong>yoinks the good bits</strong> — if it plays video, the worm can probably schlorp it ;) wink wink. HLS/DASH? <strong>ffmpeg muxes it</strong>. you click, it <em>schlorps</em>. enjoyyy ✨
@@ -417,7 +417,7 @@
     </div>
   </div>
 
-  <div class="method-toggle" role="tablist" aria-label="install method">
+  <div class="method-toggle" id="install-method-toggle" role="tablist" aria-label="install method">
     <button type="button" data-method="docker" role="tab"><i class="bi bi-box-seam"></i> docker</button>
     <button type="button" data-method="node" role="tab"><i class="bi bi-node-plus"></i> node</button>
   </div>
@@ -426,19 +426,24 @@
       <span class="method-tag docker"><i class="bi bi-box-seam"></i> method A · docker</span>
       <h3>the lazy way (recommended)</h3>
       <p>one command and the whole circus moves in: API + UI + stealth browser + VNC. batteries included.</p>
-      <div class="mini-label"><i class="bi bi-arrow-down-circle"></i> clone it first (no way around this one)</div>
-      <div class="code" id="code-docker-1"><span class="c"># grab the repo, then start the machine</span>
-<b>git clone</b> https://github.com/your/schlorp-machine.git
-<b>cd</b> schlorp-machine && <b>docker compose up --build -d</b>
+      <div class="mini-label"><i class="bi bi-arrow-down-circle"></i> get the code — pick one</div>
+      <div class="method-toggle" role="tablist" aria-label="get the code" data-code-scope="docker">
+        <button type="button" data-opt="git" role="tab" class="active"><i class="bi bi-git"></i> git clone</button>
+        <button type="button" data-opt="zip" role="tab"><i class="bi bi-file-earmark-zip"></i> download zip</button>
+      </div>
+      <div class="code" id="code-docker-1" data-code-block="docker" data-opt="git"><span class="c"># clone it, then start the machine</span>
+<b>git clone</b> https://github.com/craftpip/schlorp
+<b>cd</b> schlorp && <b>docker compose up --build -d</b>
 <span class="c"># → API + UI at http://localhost:6767</span>
 <button class="copy" data-copy="code-docker-1" aria-label="copy"><i class="bi bi-copy"></i></button></div>
-      <div class="mini-label"><i class="bi bi-terminal"></i> yoink from terminal (docker exec)</div>
-      <div class="code" id="code-docker-2"><span class="c"># container is named schlorp — single or many</span>
-<b>docker exec</b> schlorp node scan-videos.js https://example.com/video-page
-
-<span class="c"># smol file pls</span>
-<b>docker exec</b> schlorp node scan-videos.js --max-quality 720 https://...
-<button class="copy" data-copy="code-docker-2" aria-label="copy"><i class="bi bi-copy"></i></button></div>
+      <div class="method-hidden" data-code-block="docker" data-opt="zip" style="margin-bottom:10px">
+        <a class="btn btn-primary" href="https://github.com/craftpip/schlorp/archive/refs/heads/main.zip" download><i class="bi bi-github"></i> download zip from github</a>
+      </div>
+      <div class="code method-hidden" id="code-docker-1zip" data-code-block="docker" data-opt="zip"><span class="c"># unzip it, then start the machine</span>
+<b>cd</b> schlorp-main && <b>docker compose up --build -d</b>
+<span class="c"># → API + UI at http://localhost:6767</span>
+<button class="copy" data-copy="code-docker-1zip" aria-label="copy"><i class="bi bi-copy"></i></button></div>
+      <div class="hint"><i class="bi bi-emoji-smile"></i> then open <b style="font-family:var(--mono);color:var(--text)">http://localhost:6767</b> and yoink from the dashboard — paste links, no terminal needed. terminal way lives in the README.</div>
       <div class="hint"><i class="bi bi-broadcast"></i> logs: <b style="font-family:var(--mono);color:var(--text)">docker logs -f schlorp</b> · VNC at <b style="font-family:var(--mono);color:#a5b4fc">:6778/vnc.html</b></div>
     </div>
 
@@ -446,22 +451,37 @@
       <span class="method-tag node"><i class="bi bi-node-plus"></i> method B · node</span>
       <h3>the hands-on way</h3>
       <p>raw & manual. clone it, npm it, start it. for tinkerers who like touching the worm directly.</p>
-      <div class="mini-label"><i class="bi bi-arrow-up-circle"></i> install, all the way to npm start</div>
-      <div class="code" id="code-node-1"><span class="c"># clone & install — that's it</span>
-<b>git clone</b> https://github.com/your/schlorp-machine.git
-<b>cd</b> schlorp-machine && <b>npm install</b>
+      <div class="mini-label"><i class="bi bi-arrow-up-circle"></i> get the code — pick one</div>
+      <div class="method-toggle" role="tablist" aria-label="get the code" data-code-scope="node">
+        <button type="button" data-opt="git" role="tab" class="active"><i class="bi bi-git"></i> git clone</button>
+        <button type="button" data-opt="zip" role="tab"><i class="bi bi-file-earmark-zip"></i> download zip</button>
+      </div>
+      <div class="code" id="code-node-1" data-code-block="node" data-opt="git"><span class="c"># clone & install — that's it</span>
+<b>git clone</b> https://github.com/craftpip/schlorp
+<b>cd</b> schlorp && <b>npm install</b>
 <span class="c"># ffmpeg check (for HLS/DASH)</span>
 ffmpeg -version | head -n 1
 
 <span class="c"># start API + UI → http://localhost:6767</span>
 <b>npm start</b>
 <button class="copy" data-copy="code-node-1" aria-label="copy"><i class="bi bi-copy"></i></button></div>
+      <div class="method-hidden" data-code-block="node" data-opt="zip" style="margin-bottom:10px">
+        <a class="btn btn-primary" href="https://github.com/craftpip/schlorp/archive/refs/heads/main.zip" download><i class="bi bi-github"></i> download zip from github</a>
+      </div>
+      <div class="code method-hidden" id="code-node-1zip" data-code-block="node" data-opt="zip"><span class="c"># unzip it, then install</span>
+<b>cd</b> schlorp-main && <b>npm install</b>
+<span class="c"># ffmpeg check (for HLS/DASH)</span>
+ffmpeg -version | head -n 1
+
+<span class="c"># start API + UI → http://localhost:6767</span>
+<b>npm start</b>
+<button class="copy" data-copy="code-node-1zip" aria-label="copy"><i class="bi bi-copy"></i></button></div>
       <div class="mini-label"><i class="bi bi-terminal"></i> yoink from terminal (node)</div>
       <div class="code" id="code-node-2"><span class="c"># single or many — saves to ./media</span>
-<b>node</b> scan-videos.js https://example.com/video-page
+<b>node</b> schlorp-cli https://example.com/video-page
 
 <span class="c"># just print links, don't download</span>
-<b>node</b> scan-videos.js --link-only https://...
+<b>node</b> schlorp-cli --link-only https://...
 <button class="copy" data-copy="code-node-2" aria-label="copy"><i class="bi bi-copy"></i></button></div>
       <div class="hint"><i class="bi bi-folder2"></i> files land in <b style="color:var(--lime);font-family:var(--mono)">./media</b> — tidy.</div>
     </div>
@@ -476,7 +496,7 @@ ffmpeg -version | head -n 1
       </div>
     </div>
     <div class="step" style="padding:14px;display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap">
-      <span style="font-family:var(--mono);font-size:11px;color:var(--muted)"><i class="bi bi-info-circle"></i> still stuck? check <b style="color:var(--text)">README.md</b> for timeouts & env vars</span>
+      <span style="font-family:var(--mono);font-size:11px;color:var(--muted)"><i class="bi bi-info-circle"></i> still stuck? check <a href="https://github.com/craftpip/schlorp/blob/main/README.md" target="_blank" rel="noopener" style="color:var(--text);font-weight:700">README.md</a> for timeouts & env vars</span>
       <a href="#" class="btn btn-ghost" style="padding:8px 12px;font-size:12px" onclick="event.preventDefault();window.scrollTo({top:0,behavior:'smooth'})"><i class="bi bi-arrow-up"></i> back to top</a>
     </div>
   </div>
@@ -680,17 +700,35 @@ ffmpeg -version | head -n 1
     const m = name === 'node' ? 'node' : 'docker';
     document.getElementById('method-docker')?.classList.toggle('method-hidden', m !== 'docker');
     document.getElementById('method-node')?.classList.toggle('method-hidden', m !== 'node');
-    document.querySelectorAll('.method-toggle button').forEach(b=>b.classList.toggle('active', b.dataset.method === m));
+    document.querySelectorAll('#install-method-toggle button').forEach(b=>b.classList.toggle('active', b.dataset.method === m));
     if(push !== false){
       try{ history.replaceState(null,'', m === 'node' ? '#node-install' : '#docker-install'); }catch{}
     }
   }
-  document.querySelectorAll('.method-toggle button').forEach(b=>b.addEventListener('click',()=>selectInstallMethod(b.dataset.method)));
+  document.querySelectorAll('#install-method-toggle button').forEach(b=>b.addEventListener('click',()=>selectInstallMethod(b.dataset.method)));
   function methodFromHash(){ return location.hash === '#node-install' ? 'node' : 'docker'; }
   window.addEventListener('hashchange',()=>{
     if(location.hash === '#node-install' || location.hash === '#docker-install') selectInstallMethod(methodFromHash(), false);
   });
   selectInstallMethod(methodFromHash(), false);
+
+  // get-the-code tabs — git clone vs download zip, per install method (persists via localStorage)
+  function selectCodeOption(scope, opt){
+    document.querySelectorAll('[data-code-scope="' + scope + '"] button').forEach(b=>b.classList.toggle('active', b.getAttribute('data-opt') === opt));
+    document.querySelectorAll('[data-code-block="' + scope + '"]').forEach(bl=>{
+      bl.classList.toggle('method-hidden', bl.getAttribute('data-opt') !== opt);
+    });
+    try{ localStorage.setItem('schlorp-code-' + scope, opt); }catch{}
+  }
+  document.querySelectorAll('[data-code-scope]').forEach(scopeEl=>{
+    const scope = scopeEl.getAttribute('data-code-scope');
+    scopeEl.querySelectorAll('button').forEach(btn=>{
+      btn.addEventListener('click', ()=>selectCodeOption(scope, btn.getAttribute('data-opt')));
+    });
+    let saved = null;
+    try{ saved = localStorage.getItem('schlorp-code-' + scope); }catch{}
+    selectCodeOption(scope, saved === 'zip' ? 'zip' : 'git');
+  });
 
   // navbar: transparent at top, bg once scrolled (no radius, no borders)
   const navEl = document.querySelector('.nav');

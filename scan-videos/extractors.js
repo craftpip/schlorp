@@ -192,6 +192,12 @@ async function extractXvideosMediaUrls(page) {
       pushIfMedia(player.hlsurl);
       pushIfMedia(player.url_hls);
       pushIfMedia(player.url_dash);
+      // current player uses sUrl* aliases (xVideos + XNXX share this player)
+      pushIfMedia(player.sUrlHigh);
+      pushIfMedia(player.sUrlLow);
+      pushIfMedia(player.sUrlHls);
+      pushIfMedia(player.sUrlDash);
+      pushIfMedia(player.sVideoUrl);
     }
 
     const scripts = Array.from(document.querySelectorAll("script"));
@@ -222,7 +228,417 @@ async function extractXvideosMediaUrls(page) {
   return Array.isArray(result) ? result : [];
 }
 
+async function extractKvsMediaData(page) {
+  // Kernel Video Sharing (KVS) player — used by PornTrex, Txxx and many
+  // clones. The page embeds `var flashvars = { video_url: "...",
+  // video_alt_url: "...", ... }` plus a `kt_player` div. Live-verified on
+  // porntrex.com 2026-09-23 (video_url at ~351k, kt_player present).
+  const result = await page.evaluate(() => {
+    const toAbsolute = (value) => {
+      if (!value) return "";
+      const normalized = String(value)
+        .replace(/\\u002F/gi, "/")
+        .replace(/\\u0026/gi, "&")
+        .replace(/\\\//g, "/")
+        .trim();
+      if (!normalized) return "";
+      try {
+        return new URL(normalized, location.href).href;
+      } catch {
+        return "";
+      }
+    };
+
+    const out = [];
+    const seen = new Set();
+    const push = (value, quality = "") => {
+      const url = toAbsolute(value);
+      if (!url) return;
+      if (!/\.(mp4|webm|mov|mkv|avi|flv|m3u8|mpd)(\?|$)/i.test(url)) return;
+      if (seen.has(url)) return;
+      seen.add(url);
+      out.push({ url, quality: String(quality || "") });
+    };
+
+    // flashvars may live on window or only inside script text
+    try {
+      const fv = window.flashvars;
+      if (fv && typeof fv === "object") {
+        push(fv.video_url, fv.video_url_text || fv.quality || "");
+        push(fv.video_alt_url, fv.video_alt_url_text || "");
+        push(fv.video_alt_url2, fv.video_alt_url2_text || "");
+        push(fv.hls_url || fv.hlsUrl, "hls");
+        if (Array.isArray(fv.video_versions)) {
+          for (const v of fv.video_versions) {
+            if (v && typeof v === "object") push(v.url, v.label || v.quality || "");
+          }
+        }
+      }
+    } catch {}
+
+    const scripts = Array.from(document.querySelectorAll("script"));
+    const patterns = [
+      /["']video_url["']\s*:\s*["']([^"']+)["']/g,
+      /["']video_alt_url\d*["']\s*:\s*["']([^"']+)["']/g,
+      /["']hls_url["']\s*:\s*["']([^"']+)["']/g,
+      /https?:\/\/[^\s"'<>]+\.(?:mp4|m3u8|mpd)(?:[^\s"'<>]*)/gi,
+    ];
+
+    for (const script of scripts) {
+      const text = script.textContent || "";
+      if (!text) continue;
+      if (!/video_url|flashvars|kt_player|\.mp4|\.m3u8/i.test(text)) continue;
+      for (const pattern of patterns) {
+        pattern.lastIndex = 0;
+        let match;
+        while ((match = pattern.exec(text))) {
+          push(match[1] || match[0]);
+        }
+      }
+    }
+
+    // <video><source> fallback (some KVS skins render sources directly)
+    document.querySelectorAll("video source[src], video[src]").forEach((el) => {
+      push(el.getAttribute("src") || el.src || "");
+    });
+
+    return out;
+  });
+
+  const urls = [];
+  const qualityByUrl = new Map();
+  const seen = new Set();
+  for (const entry of Array.isArray(result) ? result : []) {
+    const cleaned = stripByteRangeParams(entry && entry.url ? entry.url : "");
+    if (!cleaned) continue;
+    const score = metadataQualityScore({ quality: entry.quality });
+    const current = Number(qualityByUrl.get(cleaned) || 0);
+    if (score > current) qualityByUrl.set(cleaned, score);
+    if (seen.has(cleaned)) continue;
+    seen.add(cleaned);
+    urls.push(cleaned);
+  }
+  return { urls, qualityByUrl };
+}
+
+async function extractEpornerMediaData(page) {
+  // Eporner serves sources via an in-page `/xhr/video/<id>?hash=...` JSON
+  // endpoint (live-verified 2026-09-23). Fetch it in page context (carries
+  // cookies) and deep-scan the JSON for mp4/m3u8/mpd URLs.
+  let entries = [];
+  try {
+    entries = await page.evaluate(async () => {
+      const out = [];
+      const seen = new Set();
+      const push = (value) => {
+        if (typeof value !== "string" || !value) return;
+        const normalized = value.replace(/\\\//g, "/").trim();
+        if (!/\.(mp4|m3u8|mpd)(\?|$)/i.test(normalized)) return;
+        try {
+          const abs = new URL(normalized, location.href).href;
+          if (seen.has(abs)) return;
+          seen.add(abs);
+          out.push(abs);
+        } catch {}
+      };
+      const scan = (node, depth = 0) => {
+        if (depth > 6 || node == null) return;
+        if (typeof node === "string") {
+          push(node);
+          return;
+        }
+        if (typeof node !== "object") return;
+        if (Array.isArray(node)) {
+          for (const item of node) scan(item, depth + 1);
+          return;
+        }
+        for (const v of Object.values(node)) scan(v, depth + 1);
+      };
+
+      // find the xhr endpoint: performance resources first, else page HTML
+      let xhrUrl = "";
+      try {
+        const resources = performance.getEntriesByType("resource").map((r) => r.name);
+        xhrUrl = resources.find((u) => /\/xhr\/video\//i.test(u)) || "";
+      } catch {}
+      if (!xhrUrl) {
+        try {
+          const m = document.documentElement.innerHTML.match(/(\/xhr\/video\/[^"'\s<>]+)/i);
+          if (m) xhrUrl = new URL(m[1], location.href).href;
+        } catch {}
+      }
+      if (!xhrUrl) return out;
+      try {
+        const resp = await fetch(xhrUrl, { credentials: "include" });
+        if (!resp.ok) return out;
+        const json = await resp.json().catch(() => null);
+        scan(json);
+      } catch {}
+      return out;
+    });
+  } catch {
+    entries = [];
+  }
+
+  const urls = [];
+  const qualityByUrl = new Map();
+  const seen = new Set();
+  for (const raw of Array.isArray(entries) ? entries : []) {
+    const cleaned = stripByteRangeParams(String(raw || "").trim());
+    if (!cleaned) continue;
+    if (seen.has(cleaned)) continue;
+    seen.add(cleaned);
+    urls.push(cleaned);
+  }
+  return { urls, qualityByUrl };
+}
+
+async function extractBeegMediaData(page) {
+  // Beeg serves video data via `store.externulls.com/facts/file/<fileId>`
+  // (no tag param needed). `file.fallback` is a signed direct-mp4 path and
+  // `file.hls_resources.fl_cdn_multi` a multi-bitrate HLS template (`_TPL_`
+  // resolves to e.g. 720p). Both live under `https://video.beeg.com/`.
+  // Live-verified 2026-09-23 (m3u8 200s on video.beeg.com).
+  let entries = [];
+  try {
+    entries = await page.evaluate(async () => {
+      const out = [];
+      const m = String(location.href).match(/(\d{12,})/);
+      const fileId = m ? m[1] : "";
+      if (!fileId) return out;
+      const push = (value) => {
+        if (!value) return;
+        try {
+          const abs = new URL(String(value), "https://video.beeg.com/").href;
+          if (/\.(mp4|m3u8|mpd)(\?|$)/i.test(abs)) out.push(abs);
+        } catch {}
+      };
+      try {
+        const resp = await fetch(
+          `https://store.externulls.com/facts/file/${encodeURIComponent(fileId)}`,
+          { credentials: "omit" }
+        );
+        if (!resp.ok) return out;
+        const json = await resp.json().catch(() => null);
+        const file = json && json.file ? json.file : null;
+        if (!file) return out;
+        if (file.fallback) push(`https://video.beeg.com/${String(file.fallback).replace(/^\/+/, "")}`);
+        const multi =
+          (file.hls_resources && file.hls_resources.fl_cdn_multi) ||
+          (file.hls_resources_tmp && file.hls_resources_tmp.fl_cdn_multi) ||
+          "";
+        if (multi) {
+          const clean = String(multi).replace(/^\/+/, "");
+          // _TPL_ template → concrete ladder entries the downloader can fetch
+          for (const q of ["720p", "480p"]) {
+            push(`https://video.beeg.com/${clean.replace("_TPL_", q)}`);
+          }
+        }
+      } catch {}
+      return out;
+    });
+  } catch {
+    entries = [];
+  }
+
+  const urls = [];
+  const qualityByUrl = new Map();
+  const seen = new Set();
+  for (const raw of Array.isArray(entries) ? entries : []) {
+    const cleaned = stripByteRangeParams(String(raw || "").trim());
+    if (!cleaned) continue;
+    if (seen.has(cleaned)) continue;
+    seen.add(cleaned);
+    urls.push(cleaned);
+  }
+  return { urls, qualityByUrl };
+}
+
+async function extractSpankbangMediaData(page) {
+  // SpankBang exposes `window.stream_data`: a quality-keyed map
+  // ({"240p": [mp4...], "1080p": [mp4...], "m3u8": [...], ...}) on
+  // sb-cd.com CDNs. Live-verified 2026-09-23.
+  const entries = await page.evaluate(() => {
+    const out = [];
+
+    const toAbsolute = (value) => {
+      if (!value) return "";
+      const normalized = String(value).trim();
+      if (!normalized) return "";
+      try {
+        return new URL(normalized, location.href).href;
+      } catch {
+        return "";
+      }
+    };
+
+    const push = (value, quality = "") => {
+      const url = toAbsolute(value);
+      if (!url) return;
+      if (!/\.(mp4|webm|mov|mkv|avi|flv|m3u8|mpd)(\?|$)/i.test(url)) return;
+      out.push({ url, quality: String(quality || "") });
+    };
+
+    try {
+      const sd = window.stream_data;
+      if (sd && typeof sd === "object") {
+        for (const [quality, list] of Object.entries(sd)) {
+          const urls = Array.isArray(list) ? list : [list];
+          for (const u of urls) push(u, quality);
+        }
+      }
+    } catch {}
+
+    document.querySelectorAll("video source[src], video[src]").forEach((el) => {
+      push(el.getAttribute("src") || el.src || "");
+    });
+
+    return out;
+  });
+
+  const urls = [];
+  const qualityByUrl = new Map();
+  const seen = new Set();
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const cleaned = stripByteRangeParams(entry && entry.url ? entry.url : "");
+    if (!cleaned) continue;
+    const score = metadataQualityScore({ quality: entry.quality });
+    const current = Number(qualityByUrl.get(cleaned) || 0);
+    if (score > current) qualityByUrl.set(cleaned, score);
+    if (seen.has(cleaned)) continue;
+    seen.add(cleaned);
+    urls.push(cleaned);
+  }
+  return { urls, qualityByUrl };
+}
+
+async function extractJavMediaData(page) {
+  // Shared extractor for JAV tubes (plan 036 §9). Two player families:
+  // A) Direct/self-hosted (MissAV surrit HLS, JAVtiful fast-stream source,
+  //    BestJavPorn data-mediabook mp4s) — collected from DOM + scripts.
+  // B) Click-to-load hoster buttons (SupJav server tabs, JavGuru
+  //    wp-btn-iframe, JAVMost select_part, BestJavPorn play-button,
+  //    SexTB V.I.P) — clicked so the embed (and its HLS/mp4) loads and the
+  //    engine's network interception captures the stream. Hoster embeds
+  //    themselves (dood/filemoon/voe/...) resolve via generic capture.
+  // Live-verified per-site 2026-09-23 (see plan 036 §3).
+  const found = await page.evaluate(async () => {
+    const out = [];
+    const seen = new Set();
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    const toAbsolute = (value) => {
+      if (!value) return "";
+      const normalized = String(value).replace(/\\\//g, "/").trim();
+      if (!normalized || normalized.startsWith("javascript:") || normalized.startsWith("data:")) return "";
+      try {
+        return new URL(normalized, location.href).href;
+      } catch {
+        return "";
+      }
+    };
+
+    const push = (value) => {
+      const url = toAbsolute(value);
+      if (!url || seen.has(url)) return;
+      // media by extension, or known extensionless JAV CDNs (jav.si /p/)
+      const mediaLike =
+        /\.(mp4|webm|mov|mkv|avi|flv|m3u8|mpd)(\?|$)/i.test(url) ||
+        /jav\.si\/p\//i.test(url);
+      if (!mediaLike) return;
+      seen.add(url);
+      out.push(url);
+    };
+
+    // page video code (e.g. ksbj-379, mida-180) — used to keep only the
+    // target's data-mediabook mp4s, never related videos' previews
+    const pageCode = (() => {
+      const m = location.pathname.match(/([a-z]+-?\d+[a-z]*)/i);
+      return m ? m[1].replace(/-/g, "").toLowerCase() : "";
+    })();
+
+    // A) direct sources already in DOM
+    document.querySelectorAll("video source[src], video[src]").forEach((el) => {
+      push(el.getAttribute("src") || el.src || "");
+    });
+    document.querySelectorAll("[data-mediabook]").forEach((el) => {
+      const raw = el.getAttribute("data-mediabook") || "";
+      if (!pageCode) return;
+      const norm = raw.replace(/-/g, "").toLowerCase();
+      if (norm.includes(pageCode)) push(raw);
+    });
+
+    // A) script regex (surrit/tsyndicate/jav.si/mp4/m3u8)
+    const scripts = Array.from(document.querySelectorAll("script"));
+    const patterns = [
+      /https?:\/\/[^\s"'<>]*surrit\.com[^\s"'<>]*\.(?:m3u8|mp4)[^\s"'<>]*/gi,
+      /https?:\/\/[^\s"'<>]*jav\.si\/p\/[^\s"'<>]*/gi,
+      /https?:\/\/[^\s"'<>]+\.(?:mp4|m3u8|mpd)(?:[^\s"'<>]*)/gi,
+    ];
+    for (const script of scripts) {
+      const text = (script.textContent || "").replace(/\\\//g, "/");
+      if (!text) continue;
+      if (!/surrit|jav\.si|\.mp4|\.m3u8|pornfhd|1024cdn/i.test(text)) continue;
+      for (const pattern of patterns) {
+        pattern.lastIndex = 0;
+        let match;
+        let guard = 0;
+        while ((match = pattern.exec(text)) && guard++ < 50) {
+          const url = match[0];
+          // skip ad/tracker creatives
+          if (/twinrdengine|diffusedpassion|myavlive|fluxtrck|whitetrafsa|mayzaent|mnaspm|eix304|adtng|trafficjunky/i.test(url)) continue;
+          push(url);
+        }
+      }
+    }
+
+    // B) click-to-load hoster buttons so embeds (and their streams) load
+    const clickables = [];
+    document.querySelectorAll("a, button").forEach((el) => {
+      const text = (el.textContent || "").trim();
+      const cls = String(el.className || "");
+      if (
+        /wp-btn-iframe__shortcode/i.test(cls) ||
+        /play-button/i.test(cls) ||
+        /^(server\s*\d*|part\s*\d+|stream\s*\w*|watch\s*\w*)$/i.test(text) ||
+        /^(tv|fst|st|voe|dood|filemoon|streamtape|mixdrop)$/i.test(text)
+      ) {
+        try {
+          const rect = el.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) clickables.push(el);
+        } catch {}
+      }
+    });
+    for (const el of clickables.slice(0, 5)) {
+      try {
+        el.click();
+        await sleep(1200);
+        document.querySelectorAll("video source[src], video[src]").forEach((node) => {
+          push(node.getAttribute("src") || node.src || "");
+        });
+      } catch {}
+    }
+
+    return out;
+  });
+
+  const urls = [];
+  const qualityByUrl = new Map();
+  const seen = new Set();
+  for (const raw of Array.isArray(found) ? found : []) {
+    const cleaned = stripByteRangeParams(String(raw || "").trim());
+    if (!cleaned) continue;
+    if (seen.has(cleaned)) continue;
+    seen.add(cleaned);
+    urls.push(cleaned);
+  }
+  return { urls, qualityByUrl };
+}
+
 async function extractPornhubMediaData(page) {
+  // Pornhub player (flashvars/mediaDefinitions/get_media). RedTube/YouPorn
+  // have moved to a lazy player without flashvars — those rely on generic
+  // DOM + network auto-capture instead of this extractor.
   const entries = await page.evaluate(() => {
     const maxNodes = 80_000;
     let scannedNodes = 0;
@@ -1163,6 +1579,11 @@ async function fetchRedgifsMediaUrls(page, redgifsId) {  if (!redgifsId) return 
 module.exports = {
   extractXhamsterMediaData,
   extractXvideosMediaUrls,
+  extractKvsMediaData,
+  extractEpornerMediaData,
+  extractBeegMediaData,
+  extractSpankbangMediaData,
+  extractJavMediaData,
   extractPornhubMediaData,
   expandPornhubGetMediaUrls,
   getInstagramUsername,

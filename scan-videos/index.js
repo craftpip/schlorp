@@ -2,6 +2,7 @@ const fs = require("fs/promises");
 const os = require("os");
 const path = require("path");
 const { buildBrowserFromLocalProfile } = require("./browser");
+const { hostMatchesSite } = require("./site-hosts");
 const {
   getInstagramUserAgent,
   shouldAutoContinuePrompts,
@@ -48,6 +49,11 @@ const {
 const {
   extractXhamsterMediaData,
   extractXvideosMediaUrls,
+  extractKvsMediaData,
+  extractEpornerMediaData,
+  extractBeegMediaData,
+  extractSpankbangMediaData,
+  extractJavMediaData,
   extractPornhubMediaData,
   expandPornhubGetMediaUrls,
   getInstagramUsername,
@@ -324,7 +330,7 @@ function parseCliArgs(rawArgs) {
 
   if (!args.length) {
     throw new Error(
-      "Usage: node scan-videos.js [--link-only] [--max-quality <p>] [--account <name>] <url1> [url2 ...] OR node scan-videos.js open-browser [--account <name>]"
+      "Usage: schlorp-cli [--link-only] [--max-quality <p>] [--account <name>] <url1> [url2 ...] OR schlorp-cli open-browser [--account <name>]"
     );
   }
 
@@ -550,7 +556,7 @@ async function run(options = {}) {
       const isInstagramTarget = (() => {
         try {
           const u = new URL(targetUrl);
-          return /(^|\.)instagram\.com$/i.test(u.hostname);
+          return hostMatchesSite(u.hostname, "instagram");
         } catch {
           return false;
         }
@@ -558,7 +564,7 @@ async function run(options = {}) {
       const isXhamsterTarget = (() => {
         try {
           const u = new URL(targetUrl);
-          return /(^|\.)xhamster\.com$/i.test(u.hostname);
+          return hostMatchesSite(u.hostname, "xhamster");
         } catch {
           return false;
         }
@@ -566,7 +572,7 @@ async function run(options = {}) {
       const isPornhubTarget = (() => {
         try {
           const u = new URL(targetUrl);
-          return /(^|\.)pornhub\.(com|org)$/i.test(u.hostname);
+          return hostMatchesSite(u.hostname, "pornhub");
         } catch {
           return false;
         }
@@ -574,7 +580,23 @@ async function run(options = {}) {
       const isRedditTarget = (() => {
         try {
           const u = new URL(targetUrl);
-          return /(^|\.)reddit\.com$/i.test(u.hostname);
+          return hostMatchesSite(u.hostname, "reddit");
+        } catch {
+          return false;
+        }
+      })();
+      const isSpankbangTarget = (() => {
+        try {
+          const u = new URL(targetUrl);
+          return hostMatchesSite(u.hostname, "spankbang");
+        } catch {
+          return false;
+        }
+      })();
+      const isJavTarget = (() => {
+        try {
+          const u = new URL(targetUrl);
+          return hostMatchesSite(u.hostname, "jav");
         } catch {
           return false;
         }
@@ -926,11 +948,65 @@ async function run(options = {}) {
         let extractedXvideosUrls = [];
         try {
           const current = new URL(targetUrl);
-          if (/(^|\.)xvideos\.com$/i.test(current.hostname)) {
+          if (hostMatchesSite(current.hostname, "xvideos")) {
             extractedXvideosUrls = await extractXvideosMediaUrls(page);
           }
         } catch {
           extractedXvideosUrls = [];
+        }
+
+        // KVS tubes (PornTrex, Txxx and clones share the kt_player/flashvars player)
+        let kvsData = { urls: [], qualityByUrl: new Map() };
+        try {
+          const current = new URL(targetUrl);
+          if (hostMatchesSite(current.hostname, "kvs")) {
+            kvsData = await extractKvsMediaData(page);
+          }
+        } catch {
+          kvsData = { urls: [], qualityByUrl: new Map() };
+        }
+
+        // Eporner serves sources via an in-page /xhr/video/ JSON endpoint
+        let epornerData = { urls: [], qualityByUrl: new Map() };
+        try {
+          const current = new URL(targetUrl);
+          if (hostMatchesSite(current.hostname, "eporner")) {
+            epornerData = await extractEpornerMediaData(page);
+          }
+        } catch {
+          epornerData = { urls: [], qualityByUrl: new Map() };
+        }
+
+        // Beeg serves sources via the externulls facts API (signed mp4 + HLS)
+        let beegData = { urls: [], qualityByUrl: new Map() };
+        try {
+          const current = new URL(targetUrl);
+          if (hostMatchesSite(current.hostname, "beeg")) {
+            beegData = await extractBeegMediaData(page);
+          }
+        } catch {
+          beegData = { urls: [], qualityByUrl: new Map() };
+        }
+
+        // SpankBang exposes window.stream_data (quality-keyed mp4 + HLS)
+        let spankbangData = { urls: [], qualityByUrl: new Map() };
+        if (isSpankbangTarget) {
+          try {
+            spankbangData = await extractSpankbangMediaData(page);
+          } catch {
+            spankbangData = { urls: [], qualityByUrl: new Map() };
+          }
+        }
+
+        // JAV tubes: direct/self-hosted players + click-to-load hoster
+        // buttons (embeds resolve via network interception)
+        let javData = { urls: [], qualityByUrl: new Map() };
+        if (isJavTarget) {
+          try {
+            javData = await extractJavMediaData(page);
+          } catch {
+            javData = { urls: [], qualityByUrl: new Map() };
+          }
         }
 
         // Reddit specific extraction (video/GIF + photos)
@@ -1029,6 +1105,11 @@ async function run(options = {}) {
             ...extractedXvideosUrls,
             ...xhamsterData.urls,
             ...pornhubData.urls,
+            ...kvsData.urls,
+            ...epornerData.urls,
+            ...beegData.urls,
+            ...spankbangData.urls,
+            ...javData.urls,
             ...(isRedditTarget ? redditData.urls : []),
             ...(isRedditTarget ? redgifsResolvedUrls : []),
           ])
@@ -1068,12 +1149,32 @@ async function run(options = {}) {
           forceIncludeForReddit = gifSet;
         }
 
+        // For JAV, allow extensionless CDN URLs (e.g. jav.si /p/) that the
+        // extractor already vetted as media
+        let forceIncludeForJav = null;
+        if (isJavTarget) {
+          const javSet = new Set();
+          for (const u of javData.urls) {
+            javSet.add(stripByteRangeParams(u));
+          }
+          forceIncludeForJav = javSet;
+        }
+
+        // targets are mutually exclusive (reddit vs jav), so at most one set
+        const forceIncludeUrls =
+          forceIncludeForReddit || forceIncludeForJav || null;
+
         const downloadableUrls = extractDownloadableVideoUrls(allVideos, {
           qualityByUrl: new Map([
             ...xhamsterData.qualityByUrl,
             ...pornhubData.qualityByUrl,
+            ...kvsData.qualityByUrl,
+            ...epornerData.qualityByUrl,
+            ...beegData.qualityByUrl,
+            ...spankbangData.qualityByUrl,
+            ...javData.qualityByUrl,
           ]),
-          ...(forceIncludeForReddit ? { forceIncludeUrls: forceIncludeForReddit } : {}),
+          ...(forceIncludeUrls ? { forceIncludeUrls } : {}),
         });
         // For reddit, filter to video/gif only (photos handled separately below)
         let filteredDownloadable = downloadableUrls;

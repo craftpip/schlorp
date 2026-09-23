@@ -8,8 +8,8 @@
 - **Language:** JavaScript (CommonJS)
 - **Packages:** `cloakbrowser ^0.4.10`, `dotenv ^17.3.1`, `express ^5.2.1`, `puppeteer-core ^24.37.5`
 - **External binary:** ffmpeg (required for HLS/DASH muxing)
-- **Entry points:** `scan-videos.js` (CLI), `api-server.js` (API), `sync-saved-downloads.js` (daemon)
-- **Scripts:** `npm start`/`npm run api` → `node api-server.js`; `npm run scan` → `node scan-videos.js`; docker scripts for compose
+- **Entry points:** `schlorp-cli` (CLI), `api-server.js` (API), `sync-saved-downloads.js` (daemon)
+- **Scripts:** `npm start`/`npm run api` → `node api-server.js`; `npm run scan` → `node schlorp-cli`; docker scripts for compose
 
 ## Directory Layout
 
@@ -25,7 +25,7 @@
   docker-compose.yml            # app (port 6767, 6777:6777, 6778:6778 via xdl-bridge)
   docker/entrypoint.sh          # Starts Xvfb + fluxbox + x11vnc + noVNC if ENABLE_VNC=1
   api-server.js                 # Express API (port 3000, single-job concurrency)
-  scan-videos.js                # CLI entry: loads dotenv, calls ./scan-videos/index.run()
+  schlorp-cli                   # CLI entry: loads dotenv, calls ./scan-videos/index.run()
   sync-saved-downloads.js       # Daemon: polls Instagram saved collections via API
   index.html                    # Download UI (inline SPApp)
   scan-saved.html               # Scan saved collection UI
@@ -101,10 +101,11 @@ scan-videos/index.js         → { run(urls, options) }
 scan-videos/browser.js       → { buildBrowserFromLocalProfile(options) }  // options.account supported
 scan-videos/config.js        → { shouldRunHeadless, shouldAutoContinuePrompts, getInstagramUserAgent, waitForEnter, normalizeUrl, resolveProfileConfig, loadAppConfig, resolveAccountConfig, getStateFilePath }
 scan-videos/download.js      → { hasFfmpeg, muxVideoAndAudio, mediaHasAudio, downloadMedia }
-scan-videos/extractors.js    → { extractXhamsterMediaData, extractXvideosMediaUrls, extractPornhubMediaData, getInstagramUsername, getInstagramUsernameFromOembed }
+scan-videos/extractors.js    → { extractXhamsterMediaData, extractXvideosMediaUrls, extractKvsMediaData, extractEpornerMediaData, extractBeegMediaData, extractSpankbangMediaData, extractJavMediaData, extractPornhubMediaData, getInstagramUsername, getInstagramUsernameFromOembed }
 scan-videos/instagram-utils.js → { isReservedInstagramName, extractInstagramShortcode, extractInstagramUsernameFromJsonText, extractInstagramMediaHintsFromJsonText, filterInstagramCandidatesForTarget }
 scan-videos/media-utils.js   → { isLikelyVideoUrl, stripByteRangeParams, isStreamingManifestUrl, isDirectFileUrl, extractQualityHint, metadataQualityScore, isInstagramAudioOnlyUrl, getInstagramAssetId, scoreDownloadCandidate, prioritizeInstagramCandidates, extractDownloadableVideoUrls, prioritizeXhamsterCandidates, isAdVideoUrl, isPreviewClipUrl, sanitizeFileToken }
 scan-videos/scan-saved.js    → { scanSavedPage({ browser, targetUrl, endUrls?, waitMs?, exitWaitMs?, maxIterations?, log? }) }
+scan-videos/site-hosts.js     → { SITE_HOSTS, hostMatchesSite, siteOfHostname }  // canonical + mirror hosts per site (plan 036 §8)
 ```
 
 ## Key Patterns
@@ -155,7 +156,7 @@ scan-videos/scan-saved.js    → { scanSavedPage({ browser, targetUrl, endUrls?,
 - `browser.js` `buildBrowserFromLocalProfile({ account: "name" })` looks up the account's profile config
 - `api-server.js` maintains `browsersByAccount` Map — a separate browser instance per account, created lazily
 - `POST /scan-saved` accepts optional `account` param; uses per-account browser if not "default"
-- CLI: `node scan-videos.js open-browser --account work` opens browser for that specific profile
+- CLI: `node schlorp-cli open-browser --account work` opens browser for that specific profile
 - Default account "default" uses `BROWSER_USER_DATA_DIR` / `BROWSER_PROFILE_DIR` env vars
 
 ### Error handling
