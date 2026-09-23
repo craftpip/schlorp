@@ -1245,8 +1245,24 @@ async function run(options = {}) {
           ]);
 
           const cookieByName = new Map();
+          // Only send cookies whose domain matches the candidate host.
+          // Sending page-domain cookies (e.g. missav.ws) to a third-party
+          // CDN (e.g. surrit.com) gets the request rejected (403).
+          const candidateHost = (() => {
+            try {
+              return new URL(candidateUrl).hostname.toLowerCase();
+            } catch {
+              return "";
+            }
+          })();
+          const cookieDomainMatches = (cookieDomain) => {
+            const d = String(cookieDomain || "").toLowerCase().replace(/^\./, "");
+            if (!d || !candidateHost) return false;
+            return candidateHost === d || candidateHost.endsWith(`.${d}`);
+          };
           for (const cookie of pageCookies) {
             if (!cookie || !cookie.name) continue;
+            if (!cookieDomainMatches(cookie.domain)) continue;
             cookieByName.set(cookie.name, cookie.value);
           }
           for (const cookie of candidateCookies) {
