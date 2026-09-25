@@ -25,7 +25,13 @@ function saveFileRotation(fp, deg) {
 }
 const TRACK_CAP = 480;
 const TRACK_TPL = 40;
+// The identity fingerprint reads a wider window than the match template. A
+// template-sized window holds a chunk of the subject, and any other subject has
+// some chunk that looks like it; a wider one covers enough of the subject that
+// something else would have to be the same subject to match.
+const TRACK_ID = 56;
 const TRACK_ROI = 52;
+const TRACK_ROI_MAX = 220;
 const TRACK_DEAD = 0.6;
 const TRACK_PAN_SMOOTH = 0.45;
 // The box stores the 0-10 display value; the pan lerp uses the inverted
@@ -34,7 +40,86 @@ const TRACK_SMOOTH_KEY = "xdl_viewer_smooth";
 const TRACK_SMOOTH_UI_MAX = 10;
 const readTrackSmoothUi = () => { try { const s = parseFloat(localStorage.getItem(TRACK_SMOOTH_KEY)); if (Number.isFinite(s)) return Math.min(TRACK_SMOOTH_UI_MAX, Math.max(0, s)); } catch {} return (1 - TRACK_PAN_SMOOTH) * TRACK_SMOOTH_UI_MAX; };
 const trackSmoothFactorOf = (ui) => Math.max(0.05, 1 - Math.min(TRACK_SMOOTH_UI_MAX, Math.max(0, ui)) / TRACK_SMOOTH_UI_MAX);
-const TRACK_STICK = 1500;
+// Auto-center: while stabilization runs, a deliberate off-center pan eases back
+// to the middle so the view cannot drift out of the window. Only the user pan
+// offset decays - the bg compensation and the tracked point are left alone, so
+// this never weakens the stabilization itself.
+const TRACK_AUTOCENTER_REACH = 0.2;
+const TRACK_AUTOCENTER_PULL = 0.35;
+const TRACK_AUTOCENTER_MAX = 2.2;
+const TRACK_AUTOCENTER_MAXDRIFT = 0.5;
+const TRACK_AUTOCENTER_EPS = 0.05;
+const TRACK_HOLD_MS = 350;
+// How hard a match is pulled towards the predicted position, per squared pixel.
+// This has to stay small next to the size of the differences it is meant to
+// overrule: a wrong match a few pixels away can easily be a couple of hundred
+// worse than the right one, so a large stick term simply pins the search to
+// where the subject was predicted to be. The subject then never actually gets
+// picked up, it lags behind fast movement, and it is eventually declared lost.
+const TRACK_STICK = 6;
+// The clicked subject is fingerprinted once and every later match has to still
+// look like that subject before it is accepted, so the point cannot slide off
+// onto the background -- which is what used to leave it stuck on the spot the
+// click was made at, unable to find the subject again when it came back.
+//
+// The fingerprint is a small brightness-normalised grid of one patch: one view,
+// not a search over rotations and sizes. That is a deliberate limit. Scoring a
+// patch against dozens of resampled views of the subject and taking the best
+// looks more tolerant, but the best of dozens of chances is high for anything --
+// measured here, a rotated view of the subject and a completely different
+// subject both land around 0.93, so a bar loose enough to accept one accepts
+// the other and the point jumps to a stranger. One view against one view
+// separates them by a mile: the same subject scores about 1.0, an unrelated
+// subject or a patch of background about 0.15.
+//
+// A subject that changes size or rotation while it is being followed is still
+// handled, by moving the fingerprint towards it a little every frame (see
+// subjectUpdate). Following a change as it happens is what makes the strict
+// comparison workable, and it is the only safe way to do it: a fingerprint that
+// was allowed to snap to whatever passed would drift onto the background within
+// a dozen frames and confirm itself there.
+const TRACK_DESC = 15;
+// Pixels averaged per fingerprint cell. A single pixel says very little about
+// identity -- in a smooth region every unrelated patch reads as the same soft
+// blob -- but too much averaging leaves so little structure that two different
+// patches line up with each other.
+const TRACK_DESC_BOX = 2;
+// Cells of shift the comparison allows for, in either direction. A grid sampled
+// at fixed positions describes a patch a couple of pixels away as different
+// texture, so without this the subject is lost the moment the point is not
+// exactly on it -- and a comparison that sharp cannot tell "still on it" from
+// "something else is here" at any threshold.
+const TRACK_DESC_SHIFT = 2;
+// What a match has to score to count as the subject. The same subject sits near
+// 1.0 and an unrelated one near 0.15, so this sits in a wide empty gap rather
+// than on a knife edge, and it also has to leave room for a subject that is
+// changing: the fingerprint is a few frames behind, not the click.
+const TRACK_KEEP = 0.75;
+// Picking the subject back up out of the whole frame is held to a slightly
+// higher bar than following it, because a full frame sweep offers a patch from
+// every part of the picture rather than a handful of candidates near where the
+// subject was last seen.
+const TRACK_REACQ_KEEP = 0.85;
+// How far the fingerprint moves towards an accepted patch per frame.
+//
+// This is the number that decides how much change the strict comparison above
+// has to tolerate, because the fingerprint is what it is compared against: at a
+// step of 0.15 it trails the subject by six or seven frames, and the comparison
+// only forgives about five degrees of rotation or a five percent change of size,
+// so anything turning or moving closer faster than that falls out of range and
+// the subject is lost. At 0.5 it trails by about a frame, which is inside what
+// the comparison forgives, and the memory of the original click is kept by the
+// comparison itself: an unrelated patch scores about 0.15 and is rejected before
+// it can move the fingerprint at all.
+const TRACK_ANCHOR_BLEND = 0.5;
+// A patch further from the fingerprint moves it faster, so a large change is
+// caught up with instead of trailed.
+const TRACK_ANCHOR_CATCHUP = 0.5;
+// While lost the search window grows around the last known position (plus its
+// velocity) until it can reach anywhere in the frame, so a subject that comes
+// back is found again. The subject check is what keeps the point from settling
+// on the background instead, so the window is allowed to grow wide.
+const TRACK_REACQ = 40;
 const TRACK_JUMP = 12;
 const TRACK_TEX_MIN = 150;
 const TRACK_BG_CLAMP = 0.35;
@@ -42,17 +127,28 @@ const TRACK_BG_DEAD = 0.15;
 const TRACK_BG_LEAK = 0.0012;
 const TRACK_BG_MISS = 10;
 function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+// Median of an already-sorted array (the caller sorts; don't re-sort here).
+// The mean of the two middle entries, not the upper one: picking a[n>>1] on an
+// even count is the upper median, and these samples are fractional positions,
+// so that index sits above the true median by a positive amount. Fed straight
+// into a velocity that becomes a constant one-way creep, which is why the view
+// used to drift up and left.
+function medOf(a) {
+  const n = a.length;
+  if (!n) return 0;
+  return n % 2 ? a[n >> 1] : (a[n / 2 - 1] + a[n / 2]) / 2;
+}
 function rotDeg(x, y, deg) {
   const d = ((deg % 360) + 360) % 360;
   if (d === 0) return [x, y];
   const a = (d * Math.PI) / 180, c = Math.cos(a), s = Math.sin(a);
   return [x * c - y * s, x * s + y * c];
 }
-function capturePatch(img, rw, rh, cx, cy, size) {
+function capturePatchInto(img, rw, rh, cx, cy, size, buf) {
   const tw = Math.min(size, rw), th = Math.min(size, rh);
   const tx0 = clamp(Math.round(cx - tw / 2), 0, rw - tw);
   const ty0 = clamp(Math.round(cy - th / 2), 0, rh - th);
-  const d = img.data, m = new Int32Array(tw * th);
+  const d = img.data, m = buf && buf.length >= tw * th ? buf : new Int32Array(tw * th);
   let vi = 0;
   for (let y = 0; y < th; y++) {
     let fi = ((ty0 + y) * rw + tx0) << 2;
@@ -60,13 +156,180 @@ function capturePatch(img, rw, rh, cx, cy, size) {
   }
   return { tpl: m, tplW: tw, tplH: th };
 }
+function capturePatch(img, rw, rh, cx, cy, size) {
+  return capturePatchInto(img, rw, rh, cx, cy, size, null);
+}
 function captureTemplate(img, st, cx, cy) {
   const p = capturePatch(img, img.width, img.height, cx, cy, TRACK_TPL);
   st.tpl = p.tpl; st.tplW = p.tplW; st.tplH = p.tplH;
 }
+// Brightness-normalised grid over a patch: a short vector of how the light is
+// spread across the middle of the patch. Unit length, so the dot product of two
+// of them is their correlation. The length before normalising is kept too --
+// it is how much texture the patch has, and a smooth patch correlates with
+// whatever else is smooth, so it has to count for less.
+function patchGrid(p, w, h) {
+  const g = new Float64Array(TRACK_DESC * TRACK_DESC);
+  // How far the grid reaches is worked out from the patch rather than fixed, so
+  // every cell is a real pixel of the subject whatever size the patch is.
+  const box = TRACK_DESC_BOX;
+  const step2 = ((Math.min(w, h) / 2 - box * 1.6) * Math.SQRT2) / TRACK_DESC;
+  let sum = 0;
+  for (let gy = 0; gy < TRACK_DESC; gy++) {
+    for (let gx = 0; gx < TRACK_DESC; gx++) {
+      const dx = (gx + 0.5 - TRACK_DESC / 2) * step2, dy = (gy + 0.5 - TRACK_DESC / 2) * step2;
+      const px = Math.round(dx + w / 2 - 0.5), py = Math.round(dy + h / 2 - 0.5);
+      // Average a small box per cell rather than reading one pixel. Sparse
+      // single-pixel samples say very little about identity -- in a smooth
+      // region (skin, wall, sky) every unrelated patch ends up looking like the
+      // same soft blob, and they all correlate with the subject.
+      let v = 0, n = 0;
+      for (let oy = 0; oy < box; oy++) {
+        for (let ox = 0; ox < box; ox++) {
+          const qx = px + ox, qy = py + oy;
+          if (qx < 0 || qy < 0 || qx >= w || qy >= h) continue;
+          v += p[qy * w + qx]; n++;
+        }
+      }
+      const gv = n ? v / n : 0;
+      g[gy * TRACK_DESC + gx] = gv; sum += gv;
+    }
+  }
+  const mean = sum / g.length;
+  let norm = 0;
+  for (let i = 0; i < g.length; i++) { g[i] -= mean; norm += g[i] * g[i]; }
+  norm = Math.sqrt(norm) || 1;
+  for (let i = 0; i < g.length; i++) g[i] /= norm;
+  return { g, e: norm };
+}
+// Correlation of two grids, each cell compared against its neighbour sx, sy cells
+// away, scaled back up to the full grid so that comparing fewer cells is not
+// mistaken for a weaker match.
+function gridDot(a, b, sx, sy) {
+  const d = TRACK_DESC;
+  const x0 = sx > 0 ? sx : 0, x1 = d - (sx < 0 ? -sx : 0);
+  const y0 = sy > 0 ? sy : 0, y1 = d - (sy < 0 ? -sy : 0);
+  let dot = 0, n = 0;
+  for (let gy = y0; gy < y1; gy++) {
+    const ai = gy * d, bi = (gy - sy) * d;
+    for (let gx = x0; gx < x1; gx++) { dot += a[ai + gx] * b[bi + gx - sx]; n++; }
+  }
+  return n ? (dot * d * d) / n : 0;
+}
+// The fingerprint of the clicked subject: one grid, plus how much texture it
+// has, which is what later patches are counted against.
+function subjectFingerprint(img, st, cx, cy) {
+  const p = capturePatch(img, st.rw, st.rh, cx, cy, TRACK_ID);
+  const v = patchGrid(p.tpl, p.tplW, p.tplH);
+  st.tplD = v;
+  st.tplE = v.e;
+  return v;
+}
+// How much does this patch look like the subject? Near 1 for the subject itself,
+// near 0.1 to 0.2 for anything else.
+function subjectSame(st, patch) {
+  const b = patchGrid(patch.tpl, patch.tplW, patch.tplH);
+  // A patch with almost no detail correlates with whatever else has almost no
+  // detail: normalising it on its own turns the leftover rounding error into a
+  // shape, and then a wall or a sky lines up with any other wall. Scaling the
+  // score by how much detail the patch really has stops that from counting as
+  // the subject, and does it without asking the patch to match the subject's
+  // exact brightness or contrast.
+  const w = st.tplE > 0 ? Math.min(1, b.e / st.tplE) : 1;
+  let m = -1;
+  for (let sy = -TRACK_DESC_SHIFT; sy <= TRACK_DESC_SHIFT; sy++) {
+    for (let sx = -TRACK_DESC_SHIFT; sx <= TRACK_DESC_SHIFT; sx++) {
+      const d = gridDot(st.tplD.g, b.g, sx, sy);
+      if (d > m) m = d;
+    }
+  }
+  return m * w;
+}
+// Nudge the fingerprint towards a patch that has just been accepted as the
+// subject. This is what lets a subject that is turning or moving closer be
+// followed: the comparison above is deliberately strict, and the fingerprint is
+// kept a little behind the subject so that a change spread over several frames
+// stays inside what the strict comparison accepts. Only patches that already
+// passed reach here, and the step grows with how far the patch is from the
+// fingerprint, so a large change is caught up with sooner rather than trailing
+// the subject for dozens of frames.
+function subjectUpdate(st, patch) {
+  const b = patchGrid(patch.tpl, patch.tplW, patch.tplH);
+  const a = st.tplD;
+  let dot = 0;
+  for (let k = 0; k < a.g.length; k++) dot += a.g[k] * b.g[k];
+  const step = clamp(TRACK_ANCHOR_BLEND + (1 - TRACK_ANCHOR_BLEND) * TRACK_ANCHOR_CATCHUP * (1 - dot), TRACK_ANCHOR_BLEND, 0.9);
+  let norm = 0;
+  for (let i = 0; i < a.g.length; i++) { a.g[i] += (b.g[i] - a.g[i]) * step; norm += a.g[i] * a.g[i]; }
+  norm = Math.sqrt(norm) || 1;
+  for (let i = 0; i < a.g.length; i++) a.g[i] /= norm;
+  st.tplE += (b.e - st.tplE) * step;
+}
+
+// Sweep the whole frame for the subject by identity, not by how well it still
+// fits the old picture of it. While lost this is the only search that can work:
+// the SSD ranks candidates by resemblance to a fixed template, so a subject that
+// came back turned or resized sorts behind a stranger that happens to look more
+// like the old picture, and it is never even considered. Peaks are refined on
+// the identity itself, which is what knows the subject.
+function identitySearch(img, st) {
+  if (!st.tplD) return null;
+  const halfX = TRACK_ID >> 1, halfY = TRACK_ID >> 1;
+  const buf = st.sweepBuf && st.sweepBuf.length >= TRACK_ID * TRACK_ID ? st.sweepBuf : (st.sweepBuf = new Int32Array(TRACK_ID * TRACK_ID));
+  const stride = 8, peaks = [];
+  // The whole sweep asks one question, the same question the strict gate will
+  // ask: is the subject still here, unchanged, somewhere else in the frame.
+  // One view and one shift search, so a position the sweep keeps is a position
+  // the gate can accept. The sample grid can sit half a stride off the real
+  // centre, so it is scored loosely here and exactly once the peak is walked
+  // in; nothing is adopted on the loose score.
+  const score = (x, y) => subjectSame(st, capturePatchInto(img, st.rw, st.rh, x, y, TRACK_ID, buf));
+  const fit = (px, py, r, step) => {
+    let bx = px, by = py, bm = -1;
+    for (let dy = -r; dy <= r; dy += step) {
+      for (let dx = -r; dx <= r; dx += step) {
+        const x = px + dx, y = py + dy;
+        if (x < halfX || y < halfY || x > st.rw - halfX || y > st.rh - halfY) continue;
+        const m = score(x, y);
+        if (m > bm) { bm = m; bx = x; by = y; }
+      }
+    }
+    return { x: bx, y: by, m: bm };
+  };
+  for (let y = halfY; y <= st.rh - halfY; y += stride) {
+    for (let x = halfX; x <= st.rw - halfX; x += stride) {
+      const m = score(x, y);
+      if (m < 0.6) continue;
+      // keep the best of each cluster, so one subject cannot fill the list with
+      // neighbouring samples of itself
+      let dup = false;
+      for (const pk of peaks) {
+        if (Math.abs(pk.x - x) <= stride && Math.abs(pk.y - y) <= stride) { dup = true; if (m > pk.m) { pk.x = x; pk.y = y; pk.m = m; } break; }
+      }
+      if (!dup) peaks.push({ x, y, m });
+    }
+  }
+  if (!peaks.length) return null;
+  peaks.sort((a, b) => b.m - a.m);
+  let best = null;
+  for (const pk of peaks.slice(0, 6)) {
+    // the stride can leave the peak several pixels off, so walk it in
+    const coarse = fit(pk.x, pk.y, stride, 4);
+    const fine = fit(coarse.x, coarse.y, 4, 1);
+    if (fine.m < TRACK_REACQ_KEEP) continue;
+    if (!best || fine.m > best.m) best = fine;
+    if (fine.m > 0.97) break;
+  }
+  return best;
+}
 function refreshGrid(img, st) {
   const rw = st.rw, rh = st.rh, s = 32, m = s / 2 + 4;
-  const pts = [[m, m], [rw / 2, m], [rw - m, m], [m, rh / 2], [rw - m, rh / 2], [m, rh - m], [rw / 2, rh - m], [rw - m, rh - m]];
+  // The two midpoint points have to land on whole pixels. capturePatchInto
+  // rounds where it reads, so a fractional point reads one patch and is then
+  // recorded at the fractional coordinate, and every frame that cell reports a
+  // displacement that is offset by that fraction for the life of the grid.
+  const mx = Math.round(rw / 2), my = Math.round(rh / 2);
+  const pts = [[m, m], [mx, m], [rw - m, m], [m, my], [rw - m, my], [m, rh - m], [mx, rh - m], [rw - m, rh - m]];
   st.grid = pts.map(([x, y]) => {
     const p = capturePatch(img, rw, rh, x, y, s);
     p.fx = clamp(x, 0, rw - 1); p.fy = clamp(y, 0, rh - 1); p.vx = 0; p.vy = 0;
@@ -82,7 +345,33 @@ function ssdAt(lum, st, base) {
   }
   return s;
 }
-function bestTemplateSearch(img, st, predX, predY, wide, roi, stick) {
+function refineSpot(lum, st, bx, by, minX, maxX, minY, maxY, predX, predY, stickK, rad) {
+  const halfX = st.tplW >> 1, halfY = st.tplH >> 1;
+  let best = Infinity, bestRaw = Infinity, bxx = bx, byy = by;
+  for (let dy = -rad; dy <= rad; dy++) {
+    const cy = clamp(by + dy, minY, maxY);
+    const baseY = (cy - halfY) * st.rw;
+    for (let dx = -rad; dx <= rad; dx++) {
+      const cx = clamp(bx + dx, minX, maxX);
+      const s = ssdAt(lum, st, baseY + cx - halfX);
+      const p = s + stickK * ((cx - predX) * (cx - predX) + (cy - predY) * (cy - predY));
+      if (p < best) { best = p; bestRaw = s; bxx = cx; byy = cy; }
+    }
+  }
+  let fx = bxx, fy = byy;
+  if (bxx > minX && bxx < maxX && byy > minY && byy < maxY) {
+    const s0 = ssdAt(lum, st, (byy - halfY) * st.rw + bxx - halfX);
+    const sxm = ssdAt(lum, st, (byy - halfY) * st.rw + bxx - 1 - halfX);
+    const sxp = ssdAt(lum, st, (byy - halfY) * st.rw + bxx + 1 - halfX);
+    const sym = ssdAt(lum, st, (byy - 1 - halfY) * st.rw + bxx - halfX);
+    const syp = ssdAt(lum, st, (byy + 1 - halfY) * st.rw + bxx - halfX);
+    const dxn = sxm - 2 * s0 + sxp, dyn = sym - 2 * s0 + syp;
+    if (dxn > 0) fx = bxx + clamp((sxm - sxp) / (2 * dxn), -0.5, 0.5);
+    if (dyn > 0) fy = byy + clamp((sym - syp) / (2 * dyn), -0.5, 0.5);
+  }
+  return { x: fx, y: fy, score: bestRaw };
+}
+function bestTemplateSearch(img, st, predX, predY, wide, roi, stick, topN) {
   const len = st.rw * st.rh;
   let lum = st.lum;
   if (!lum || lum.length < len) { lum = new Int32Array(len); st.lum = lum; }
@@ -92,42 +381,44 @@ function bestTemplateSearch(img, st, predX, predY, wide, roi, stick) {
   const step = wide ? 6 : 3;
   const rng = roi || TRACK_ROI;
   const stickK = stick == null ? TRACK_STICK : stick;
-  const minX = wide ? halfX : Math.max(halfX, Math.round(predX) - rng);
-  const maxX = wide ? st.rw - halfX : Math.min(st.rw - halfX, Math.round(predX) + rng);
-  const minY = wide ? halfY : Math.max(halfY, Math.round(predY) - rng);
-  const maxY = wide ? st.rh - halfY : Math.min(st.rh - halfY, Math.round(predY) + rng);
+  // The scan has to land on whole pixels. A fractional start (which is what a
+  // fractional window radius produces) walks the whole sample grid off the
+  // pixel grid, so the position the subject is actually on is never sampled
+  // and the search reports a worse match somewhere else instead.
+  const minX = Math.max(halfX, Math.min(st.rw - halfX, Math.round(predX - rng)));
+  const maxX = Math.min(st.rw - halfX, Math.max(halfX, Math.round(predX + rng)));
+  const minY = Math.max(halfY, Math.min(st.rh - halfY, Math.round(predY - rng)));
+  const maxY = Math.min(st.rh - halfY, Math.max(halfY, Math.round(predY + rng)));
   let best = Infinity, bestRaw = Infinity, bx = Math.round(predX), by = Math.round(predY);
   if (maxX < minX || maxY < minY) return { x: bx, y: by, score: bestRaw };
+  // topN keeps the best few peaks instead of only the best one, so a caller
+  // that has a second opinion (the identity check) can pick between them.
+  const keep = topN > 1 ? [] : null;
   for (let cy = minY; cy <= maxY; cy += step) {
     const baseY = (cy - halfY) * st.rw;
     for (let cx = minX; cx <= maxX; cx += step) {
       const s = ssdAt(lum, st, baseY + cx - halfX);
       const p = s + stickK * ((cx - predX) * (cx - predX) + (cy - predY) * (cy - predY));
       if (p < best) { best = p; bestRaw = s; bx = cx; by = cy; }
+      if (keep) {
+        let near = false;
+        for (const k of keep) if (Math.abs(k.x - cx) <= step && Math.abs(k.y - cy) <= step) { near = true; break; }
+        if (!near) {
+          keep.push({ p, x: cx, y: cy });
+          keep.sort((a, b) => a.p - b.p);
+          if (keep.length > topN) keep.length = topN;
+        }
+      }
     }
   }
-  for (let dy = -2; dy <= 2; dy++) {
-    const cy = clamp(by + dy, minY, maxY);
-    const baseY = (cy - halfY) * st.rw;
-    for (let dx = -2; dx <= 2; dx++) {
-      const cx = clamp(bx + dx, minX, maxX);
-      const s = ssdAt(lum, st, baseY + cx - halfX);
-      const p = s + stickK * ((cx - predX) * (cx - predX) + (cy - predY) * (cy - predY));
-      if (p < best) { best = p; bestRaw = s; bx = cx; by = cy; }
-    }
-  }
-  let fx = bx, fy = by;
-  if (bx > minX && bx < maxX && by > minY && by < maxY) {
-    const s0 = ssdAt(lum, st, (by - halfY) * st.rw + bx - halfX);
-    const sxm = ssdAt(lum, st, (by - halfY) * st.rw + bx - 1 - halfX);
-    const sxp = ssdAt(lum, st, (by - halfY) * st.rw + bx + 1 - halfX);
-    const sym = ssdAt(lum, st, (by - 1 - halfY) * st.rw + bx - halfX);
-    const syp = ssdAt(lum, st, (by + 1 - halfY) * st.rw + bx - halfX);
-    const dxn = sxm - 2 * s0 + sxp, dyn = sym - 2 * s0 + syp;
-    if (dxn > 0) fx = bx + clamp((sxm - sxp) / (2 * dxn), -0.5, 0.5);
-    if (dyn > 0) fy = by + clamp((sym - syp) / (2 * dyn), -0.5, 0.5);
-  }
-  return { x: fx, y: fy, score: bestRaw };
+  // A wide scan steps further between samples, so the refinement has to reach
+  // the whole stride, otherwise the best sample can sit up to a stride off the
+  // real position and never get corrected.
+  const rad = wide ? 3 : 2;
+  if (!keep) return refineSpot(lum, st, bx, by, minX, maxX, minY, maxY, predX, predY, stickK, rad);
+  const spots = keep.map((k) => refineSpot(lum, st, k.x, k.y, minX, maxX, minY, maxY, predX, predY, stickK, rad));
+  spots.sort((a, b) => a.score - b.score);
+  return spots;
 }
 function parseFolderBase(fp) {
   const raw = String(fp || "");
@@ -197,6 +488,36 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const trackGenRef = useRef(0);
   const trackViewRef = useRef({ tracking: false, zoom: 1, pan: { x: 0, y: 0 }, transform: "" });
   const trackSmoothRef = useRef(trackSmoothFactorOf(readTrackSmoothUi()));
+  // Auto-center is on by default; holding the recenter button toggles it.
+  const [autoCenter, setAutoCenter] = useState(true);
+  const autoCenterRef = useRef(true);
+  const holdRef = useRef({ timer: null, fired: false });
+  const clearHoldTimer = () => {
+    const h = holdRef.current;
+    if (h.timer) { clearTimeout(h.timer); h.timer = null; }
+  };
+  const toggleAutoCenter = () => {
+    const next = !autoCenterRef.current;
+    autoCenterRef.current = next;
+    setAutoCenter(next);
+  };
+  // Holding T mirrors holding the recenter button: it toggles auto-centering and
+  // never touches tracking. A short press still recenters, and a hold must not
+  // also fire that.
+  const tHoldRef = useRef({ timer: null, fired: false });
+  const clearHold = (r) => {
+    if (r.current.timer) { clearTimeout(r.current.timer); r.current.timer = null; }
+  };
+  const beginHold = (r, fn) => {
+    clearHold(r);
+    r.current.fired = false;
+    r.current.timer = setTimeout(() => { r.current.timer = null; r.current.fired = true; fn(); }, TRACK_HOLD_MS);
+  };
+  const heldRecently = (r) => {
+    if (!r.current.fired) return false;
+    r.current.fired = false;
+    return true;
+  };
   // Single writer for the smooth value: the typed onChange and the wheel
   // listener both go through here. The wheel path cannot rely on React's
   // onChange — setting el.value directly is swallowed by React's value
@@ -244,6 +565,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const doDeleteFileRef = useRef(null);
   const startBgRef = useRef(null);
   const cycleTrackRef = useRef(null);
+  const autoCenterToggleRef = useRef(null);
   const recenterRef = useRef(null);
   const trackPrefRef = useRef(trackPref);
   trackPrefRef.current = trackPref;
@@ -639,7 +961,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     const st = {
       canvas: document.createElement("canvas"),
       ctx: null, rw: 0, rh: 0, cPerCanvas: 1, lum: null,
-      tpl: null, tplW: 0, tplH: 0,
+      tpl: null, tplW: 0, tplH: 0, tplD: null,
       fx: 0, fy: 0, vx: 0, vy: 0, age: 0, recapture: false, offX: 0, offY: 0, lost: false, misses: 0, frames: 0,
       rvfc: typeof v.requestVideoFrameCallback === "function",
       raf: 0, tTime: -1, gen: ++trackGenRef.current,
@@ -656,6 +978,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     st.fx = clamp(cpx / st.cPerCanvas, 0, rw - 1);
     st.fy = clamp(cpy / st.cPerCanvas, 0, rh - 1);
     captureTemplate(img, st, st.fx, st.fy);
+    st.tplD = subjectFingerprint(img, st, st.fx, st.fy);
     let tMean = 0;
     const tLen = st.tpl ? st.tpl.length : 0;
     for (let ti = 0; ti < tLen; ti++) tMean += st.tpl[ti];
@@ -824,6 +1147,52 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     const ctx = st.ctx;
     ctx.drawImage(v, 0, 0, rw, rh);
     const img = ctx.getImageData(0, 0, rw, rh);
+    // Keep the view from ever sitting far outside the frame. In bg mode the
+    // compensation itself is allowed to run out to TRACK_BG_CLAMP of the frame
+    // and then just stops there, so the picture can sit half a frame off with
+    // nothing pulling it back; here the visible drift is measured every tick and
+    // eased back, firmly once it is past a small band. The pull is applied
+    // through offX/offY so the compensation and the tracked point keep working
+    // untouched. Paused while the user drags, and skipped when auto-center is off.
+    if (autoCenterRef.current && !dragRef.current.dragging) {
+      const now = performance.now();
+      const dt = st.acT ? Math.min(0.25, (now - st.acT) / 1000) : 0;
+      st.acT = now;
+      if (dt > 0) {
+        const z = trackViewRef.current.zoom;
+        // tX/tY is the offX/offY that puts the view back on its reference, and
+        // (offX - tX) is the drift you can see. In bg mode the reference is the
+        // stabilized view; in subject mode it is the video's own center, since
+        // offX is exactly the dot's on-screen offset there and easing it to 0
+        // would re-center the dot instead of the video.
+        let tX = 0, tY = 0;
+        if (st.mode !== "bg") {
+          const base = computeCenterPan(st, z, rect, rot);
+          tX = (st.offX || 0) - base.x;
+          tY = (st.offY || 0) - base.y;
+        }
+        const short = rect ? Math.min(rect.width, rect.height) : 357;
+        const reach = Math.max(8, short * TRACK_AUTOCENTER_REACH);
+        const fullAt = Math.max(reach + 1, short * TRACK_AUTOCENTER_MAXDRIFT);
+        const vMin = short * TRACK_AUTOCENTER_PULL;
+        const vMax = short * TRACK_AUTOCENTER_MAX;
+        // One line, no tiers: up to TRACK_AUTOCENTER_REACH out the pull is
+        // quadratic, so the view is left to roam and the stabilization stays
+        // visible. Past that it comes in at TRACK_AUTOCENTER_PULL, and the pull
+        // speed keeps climbing the further out the view drifts until it is
+        // TRACK_AUTOCENTER_MAX by TRACK_AUTOCENTER_MAXDRIFT out.
+        const pull = (off, t) => {
+          const d = t - off, a = Math.abs(d);
+          const f = Math.sin((Math.PI / 2) * Math.min(a / reach, 1));
+          const sp = (vMin + (vMax - vMin) * Math.min(a / fullAt, 1)) * dt;
+          return off + Math.sign(d) * Math.min(sp, f * a);
+        };
+        st.offX = pull(st.offX || 0, tX);
+        st.offY = pull(st.offY || 0, tY);
+        if (Math.abs(st.offX - tX) < TRACK_AUTOCENTER_EPS) st.offX = tX;
+        if (Math.abs(st.offY - tY) < TRACK_AUTOCENTER_EPS) st.offY = tY;
+      }
+    }
     if (st.mode === "bg") {
       if (st.recapture) {
         st.recapture = false;
@@ -856,7 +1225,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       st.frames++;
       if (gdx.length >= 3) {
         gdx.sort((a, b) => a - b); gdy.sort((a, b) => a - b);
-        const medDx = gdx[gdx.length >> 1], medDy = gdy[gdy.length >> 1];
+        const medDx = medOf(gdx), medDy = medOf(gdy);
         const gd = Math.hypot(medDx, medDy);
         let cx = 0, cy = 0;
         if (gd > TRACK_BG_DEAD) {
@@ -891,23 +1260,82 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     if (st.recapture) {
       st.recapture = false;
       captureTemplate(img, st, st.fx, st.fy);
+      // A seek lands on new content, so the subject is re-fingerprinted there.
+      st.tplD = subjectFingerprint(img, st, st.fx, st.fy);
       refreshGrid(img, st);
       st.vx = 0; st.vy = 0;
     }
     if (st.frames % 90 === 0) refreshGrid(img, st);
-    const dynRoi = st.lost ? undefined : Math.min(160, TRACK_ROI + st.misses * 8);
-    const res = (!st.lost || (st.frames % 2 === 0)) ? bestTemplateSearch(img, st, st.fx + st.vx * 0.5, st.fy + st.vy * 0.5, st.lost, dynRoi) : null;
+    // How fast the subject is already moving decides how far it can travel
+    // before the next frame. A fixed window means a fast subject is outside it
+    // by the time the next frame arrives, so the match is thrown away, the
+    // point stops moving and falls behind, and after ten of those it is
+    // declared lost. The window follows the tracked velocity instead, and one
+    // that wide is scanned with the coarse stride to stay affordable.
+    const speed = Math.hypot(st.vx, st.vy);
+    // While lost the window grows around where the subject was last seen plus
+    // its velocity until it can reach anywhere in the frame. What keeps it from
+    // locking onto the spot the click was made at, or onto whatever walks in
+    // next, is the subject check below, not a narrow window: a subject that
+    // leaves and comes back somewhere else has to be findable again.
+    const dynRoi = st.lost
+      ? Math.max(TRACK_ROI, Math.min(Math.max(st.rw, st.rh), TRACK_ROI + st.misses * TRACK_REACQ))
+      : Math.max(TRACK_ROI, Math.min(TRACK_ROI_MAX, TRACK_ROI + speed * 1.5 + st.misses * 8));
+    // A wider window samples further between positions, and the cost of a
+    // sample is a full template comparison. Stepping over the one position that
+    // actually matches is much worse than paying for the samples: a coarse
+    // scan that misses the subject reports some other spot as the best match,
+    // and the identity check then throws the frame away. So the sample step only
+    // opens up once the window is wide enough that the cost really bites, which
+    // is the lost case, where the coarse result is only a hint and the subject
+    // itself is checked before anything is adopted.
+    const wide = st.lost || dynRoi > 150;
+    // Nothing beyond the window is considered, so the window is also what
+    // bounds how far the point can be moved by a match. A separate jump limit
+    // on top of that only ever threw away the subject: the further behind the
+    // point had fallen, the smaller its velocity, the smaller the limit, and
+    // the less chance it had of catching up again.
+    // The stick term pulls the match towards where the subject was, which is
+    // right while it is being followed but wrong while lost: squared distance
+    // beats quality, so a good match across the frame would always lose to a
+    // poor one next to the old spot and the subject could never be found again.
+    const resRaw = (!st.lost || (st.frames % 2 === 0)) ? bestTemplateSearch(img, st, st.fx + st.vx * 0.5, st.fy + st.vy * 0.5, wide, dynRoi, st.lost ? 0 : null, st.lost ? 5 : 1) : null;
+    // While lost the search hands back several peaks and the identity check
+    // picks between them. The SSD template is neither scale nor rotation
+    // invariant, so where the subject came back does not always rank first on
+    // resemblance to the old picture of it, and ranking on SSD alone would hide
+    // it behind a neighbour that happened to look more like it.
+    let res = resRaw;
+    if (Array.isArray(resRaw)) {
+      res = resRaw.length ? resRaw[0] : null;
+      let bestM = -1;
+      for (const c of resRaw) {
+        if (c.score / (st.tplW * st.tplH) >= 3600) continue;
+        const m = st.tplD ? subjectSame(st, capturePatch(img, st.rw, st.rh, c.x, c.y, TRACK_ID)) : 1;
+        if (m > bestM) { bestM = m; res = c; }
+      }
+      // None of the peaks look like the subject. Fall back to sweeping the
+      // whole frame for it by identity, which does not care where it was.
+      if (bestM < (st.tplD ? TRACK_REACQ_KEEP : 0)) {
+        const found = st.tplD ? identitySearch(img, st) : null;
+        if (found) res = { x: found.x, y: found.y, score: 0 };
+      }
+    }
     const resOK = res && res.score / (st.tplW * st.tplH) < 3600;
     let resDX = 0, resDY = 0, resD = Infinity;
     if (resOK) { resDX = res.x - st.fx; resDY = res.y - st.fy; resD = Math.hypot(resDX, resDY); }
     let medDx = 0, medDy = 0, gridOK = false;
-    if ((!resOK || resD > TRACK_JUMP) && st.grid) {
+    if ((!resOK || resD > dynRoi) && st.grid) {
+      // The grid patches ride along with the same motion, so their window and
+      // step have to grow with it too or they stop contributing exactly when
+      // the frame moves fastest.
+      const gRoi = Math.max(28, Math.min(160, 28 + speed * 1.5));
       const gdx = [], gdy = [];
       for (const g of st.grid) {
-        const gr = bestTemplateSearch(img, { rw: st.rw, rh: st.rh, tpl: g.tpl, tplW: g.tplW, tplH: g.tplH, lum: st.lum }, g.fx, g.fy, false, 28);
+        const gr = bestTemplateSearch(img, { rw: st.rw, rh: st.rh, tpl: g.tpl, tplW: g.tplW, tplH: g.tplH, lum: st.lum }, g.fx, g.fy, gRoi > 90, gRoi);
         if (gr.score / (g.tplW * g.tplH) < 3600) {
           const ddx = gr.x - g.fx, ddy = gr.y - g.fy;
-          if (Math.hypot(ddx, ddy) < TRACK_JUMP) {
+          if (Math.hypot(ddx, ddy) < gRoi) {
             const np = capturePatch(img, st.rw, st.rh, gr.x, gr.y, 32);
             g.tpl = np.tpl; g.tplW = np.tplW; g.tplH = np.tplH;
             g.fx += ddx * 0.5; g.fy += ddy * 0.5;
@@ -921,10 +1349,27 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
         gridOK = true;
       }
     }
-    if (resOK && resD <= TRACK_JUMP) {
+    // A match only counts if what is under it still looks like the subject that
+    // was clicked. The template itself is re-captured freely, so a subject that
+    // changes size or rotation is still followed, but a match that has drifted
+    // onto the background is rejected and counted as a miss instead. What the
+    // match has to clear is this check, not a distance: the window already
+    // bounds how far away it can be, and it has to be allowed to be that far
+    // or a subject that moved quickly can never be picked back up.
+    // What has to clear this is the comparison, not a distance: the window
+    // already bounds how far away a match can be, and it has to be allowed to
+    // be that far or a subject that moved quickly can never be picked back up.
+    // The bar is a little higher while lost, because then the candidate is a
+    // patch from anywhere in the frame rather than one of a few matches near
+    // where the subject was last seen.
+    const cand = resOK ? capturePatch(img, st.rw, st.rh, res.x, res.y, TRACK_TPL) : null;
+    const idc = cand ? capturePatch(img, st.rw, st.rh, res.x, res.y, TRACK_ID) : null;
+    const onSubject = idc ? (!st.tplD || subjectSame(st, idc) >= (st.lost ? TRACK_REACQ_KEEP : TRACK_KEEP)) : false;
+    if (cand && onSubject) {
       const wasLost = st.lost;
       st.lost = false; st.misses = 0;
-      captureTemplate(img, st, res.x, res.y);
+      st.tpl = cand.tpl; st.tplW = cand.tplW; st.tplH = cand.tplH;
+      if (st.tplD) subjectUpdate(st, idc);
       if (wasLost) { refreshGrid(img, st); st.vx = 0; st.vy = 0; setTrackLost(false); }
         if (resD > TRACK_DEAD) {
           const k = (resD - TRACK_DEAD) / resD;
@@ -937,19 +1382,43 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
           st.vx *= 0.85; st.vy *= 0.85;
         }
     } else if (gridOK) {
-      st.misses = 0;
       const gd = Math.hypot(medDx, medDy);
-      st.vx = st.vx * 0.7 + medDx * 0.3;
-      st.vy = st.vy * 0.7 + medDy * 0.3;
       if (gd > TRACK_DEAD) {
         const k = (gd - TRACK_DEAD) / gd;
-        st.fx += medDx * k * 0.3;
-        st.fy += medDy * k * 0.3;
+        const nfx = st.fx + medDx * k * 0.3;
+        const nfy = st.fy + medDy * k * 0.3;
+        // The grid only measures how the neighbourhood moved, it says nothing
+        // about what is there now, so a subject that walked in would drag the
+        // point onto itself. Only let it move the point while the clicked
+        // subject is still under the new spot.
+        // The identity descriptor is sampled on its own size, so this has to
+        // be a patch of that size: compare a smaller one and the two are not
+        // describing the same pixels at all, and the check passes on anything.
+        const probe = capturePatch(img, st.rw, st.rh, nfx, nfy, TRACK_ID);
+        if (!st.tplD || subjectSame(st, probe) >= TRACK_KEEP) {
+          st.fx = nfx;
+          st.fy = nfy;
+          st.misses = 0;
+          st.vx = st.vx * 0.7 + medDx * 0.3;
+          st.vy = st.vy * 0.7 + medDy * 0.3;
+        } else {
+          st.misses++;
+          st.vx *= 0.9;
+          st.vy *= 0.9;
+          if (!st.lost && st.misses >= 10) { st.lost = true; setTrackLost(true); }
+        }
+      } else {
+        st.misses = 0;
+        st.vx *= 0.7;
+        st.vy *= 0.7;
       }
-    } else if (res) {
+    } else if (cand || res) {
       st.misses++;
       st.vx *= 0.9; st.vy *= 0.9;
-      if (!st.lost && st.misses >= 10) { st.lost = true; st.vx = 0; st.vy = 0; setTrackLost(true); }
+      // The velocity is deliberately left running when the point is declared
+      // lost: it is what carries the re-acquisition window along the path the
+      // subject was taking, and it decays on its own while lost.
+      if (!st.lost && st.misses >= 10) { st.lost = true; setTrackLost(true); }
     }
     st.frames++;
     const cz = trackViewRef.current.zoom;
@@ -1225,7 +1694,8 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
         const tv = videoRef.current;
         if (tv && tv.tagName === "VIDEO" && !showImageRef.current && e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA" && !e.target.isContentEditable) {
           e.preventDefault();
-          if (recenterRef.current) recenterRef.current();
+          // Short press recenters on keyup; holding toggles stabilization.
+          if (!e.repeat) beginHold(tHoldRef, () => { if (autoCenterToggleRef.current) autoCenterToggleRef.current(); });
         }
       } else if (e.key.toLowerCase() === "c" && !e.ctrlKey && !e.altKey && !e.metaKey) {
         if (e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA" && !e.target.isContentEditable) { e.preventDefault(); stepRate(-0.1); }
@@ -1273,7 +1743,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
         }
       } else if (isUp) { if (endModeRef.current === "random" || hasPrev) { e.preventDefault(); dispatchPrevRef.current(); } }
       else if (isDown) { if (endModeRef.current === "random" || hasNext) { e.preventDefault(); dispatchNextRef.current(); } }
-      else if (e.key.toLowerCase() === "y" && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      else if (e.key.toLowerCase() === "p" && !e.ctrlKey && !e.altKey && !e.metaKey) {
         if (e.repeat) return;
         e.preventDefault();
         const now = Date.now();
@@ -1290,10 +1760,26 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
         }
       }
     };
+    // Keyup finishes the T gesture: a hold already toggled stabilization, a
+    // short press recenters on the spot. Losing focus mid-hold cancels it so a
+    // gesture can never get stuck on.
+    const onKeyUp = (e) => {
+      if (e.key.toLowerCase() !== "t") return;
+      const tv = videoRef.current;
+      if (!(tv && tv.tagName === "VIDEO") || showImageRef.current) return;
+      if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable)) return;
+      clearHold(tHoldRef);
+      if (heldRecently(tHoldRef)) return;
+      if (e.shiftKey) return;
+      if (recenterRef.current) recenterRef.current();
+    };
+    const onBlur = () => { clearHold(tHoldRef); clearHold(holdRef); };
     document.addEventListener("keydown", onKey);
+    document.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
     const prev = document.body.style.overflow;
     document.body.style.overflow = "hidden";
-    return () => { document.removeEventListener("keydown", onKey); document.body.style.overflow = prev; };
+    return () => { document.removeEventListener("keydown", onKey); document.removeEventListener("keyup", onKeyUp); window.removeEventListener("blur", onBlur); document.body.style.overflow = prev; };
   }, [onClose, hasPrev, hasNext, onPrev, onNext, showImage, duration, seekFrames, rate, showHelp, seekTo]);
   // Hold-F: keep the save popup open while F is held; letter toggles the
   // first matching list, 1-9 toggles extras by number.
@@ -1447,6 +1933,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   doDeleteFileRef.current = doDeleteFile;
   startBgRef.current = startBgTracking;
   cycleTrackRef.current = cycleTracking;
+  autoCenterToggleRef.current = toggleAutoCenter;
   recenterRef.current = recenterView;
   applyTrackPrefRef.current = applyTrackPref;
 
@@ -1478,8 +1965,8 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
           </div>
           <span style={{ flex: 1 }} />
           <div style={{ display: "flex", alignItems: "flex-start", gap: 8, pointerEvents: "auto" }}>
-            {yConfirm && <span style={{ fontSize: 11, fontWeight: 600, color: "#fff", background: "#ef4444", padding: "4px 8px", borderRadius: 999, border: "1px solid rgba(255,255,255,.2)", whiteSpace: "nowrap", alignSelf: "center" }}>Press y again to confirm delete</span>}
-            <button type="button" tabIndex={-1} onClick={handleDelete} disabled={deleting} className="btn btn-sm" aria-label="Delete file" title={yConfirm ? "Press y again to confirm — or click to delete" : "Delete file (press y twice)"} style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: yConfirm ? "1px solid #ef4444" : "1px solid rgba(255,255,255,.18)", background: yConfirm ? "#ef4444" : "rgba(0,0,0,.55)", color: yConfirm ? "#fff" : "#ff8080", backdropFilter: "blur(6px)", animation: yConfirm ? "pulse 0.6s ease infinite" : "none" }}><i className="bi bi-trash" /></button>
+            {yConfirm && <span style={{ fontSize: 11, fontWeight: 600, color: "#fff", background: "#ef4444", padding: "4px 8px", borderRadius: 999, border: "1px solid rgba(255,255,255,.2)", whiteSpace: "nowrap", alignSelf: "center" }}>Press p again to confirm delete</span>}
+            <button type="button" tabIndex={-1} onClick={handleDelete} disabled={deleting} className="btn btn-sm" aria-label="Delete file" title={yConfirm ? "Press p again to confirm — or click to delete" : "Delete file (press p twice)"} style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: yConfirm ? "1px solid #ef4444" : "1px solid rgba(255,255,255,.18)", background: yConfirm ? "#ef4444" : "rgba(0,0,0,.55)", color: yConfirm ? "#fff" : "#ff8080", backdropFilter: "blur(6px)", animation: yConfirm ? "pulse 0.6s ease infinite" : "none" }}><i className="bi bi-trash" /></button>
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               <button type="button" tabIndex={-1} onClick={onClose} className="btn btn-sm" aria-label="Close" style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}><i className="bi bi-x-lg" /></button>
               <div
@@ -1610,7 +2097,19 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
             </span>
             <div onTouchStart={(e) => e.stopPropagation()} onTouchMove={(e) => e.stopPropagation()} onTouchEnd={(e) => e.stopPropagation()} onTouchCancel={(e) => e.stopPropagation()} style={{ position: "absolute", right: 12, bottom: 12, zIndex: 4, display: "flex", alignItems: "center", gap: 6, maxWidth: "calc(100% - 24px)", pointerEvents: "none" }}>
               <div style={{ flex: "0 1 auto", minWidth: 0, background: "rgba(0,0,0,.35)", border: "1px solid rgba(255,255,255,.12)", color: "#fff", fontSize: 11, padding: "5px 10px", borderRadius: 999, pointerEvents: "none", whiteSpace: "nowrap", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", backdropFilter: "blur(2px)" }}>{trackLost ? (trackBg ? "Background motion lost — camera view will drift" : "Tracking lost — move subject back into view") : ((trackStateRef.current && trackStateRef.current.tex < TRACK_TEX_MIN && !trackBg) ? "Low-detail spot — pick a busier area" : "tracking smoothness")} <input type="number" ref={smoothInputRef} min={0} max={10} step={0.5} defaultValue={readTrackSmoothUi()} title="Scroll to adjust" onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()} onFocus={(e) => e.target.select()} onChange={(e) => { const s = parseFloat(e.target.value); if (!Number.isFinite(s)) return; applyTrackSmoothUiRef.current(s); }} style={{ width: 44, fontSize: 11, background: "rgba(255,255,255,.12)", border: "1px solid rgba(255,255,255,.25)", borderRadius: 6, color: "#fff", textAlign: "center", padding: "1px 4px", pointerEvents: "auto", outline: "none" }} /></div>
-              <button type="button" tabIndex={-1} className="btn btn-sm" onClick={(e) => { e.stopPropagation(); recenterView(); }} title="Recenter view (T)" style={{ flex: "0 0 auto", width: 30, height: 30, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)", pointerEvents: "auto" }}><i className="bi bi-bullseye" /></button>
+              <button
+                type="button"
+                tabIndex={-1}
+                className={`btn btn-sm ${autoCenter ? "btn-primary" : "btn-outline-secondary"}`}
+                title={autoCenter ? "Recenter view (T) — auto-center on, hold to turn off" : "Recenter view (T) — auto-center off, hold to turn on"}
+                style={{ flex: "0 0 auto", width: 30, height: 30, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: autoCenter ? "#6366f1" : "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)", pointerEvents: "auto", touchAction: "manipulation", WebkitTouchCallout: "none", userSelect: "none" }}
+                onPointerDown={(e) => { e.stopPropagation(); clearHoldTimer(); holdRef.current.fired = false; holdRef.current.timer = setTimeout(() => { holdRef.current.timer = null; holdRef.current.fired = true; toggleAutoCenter(); }, TRACK_HOLD_MS); }}
+                onPointerUp={(e) => { e.stopPropagation(); clearHoldTimer(); }}
+                onPointerCancel={() => clearHoldTimer()}
+                onPointerLeave={() => clearHoldTimer()}
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => { e.stopPropagation(); if (holdRef.current.fired) { holdRef.current.fired = false; return; } recenterView(); }}
+              ><i className="bi bi-bullseye" /></button>
             </div>
             </>
           )}

@@ -1394,10 +1394,10 @@ const collapseSpreadUnlessMember = (fid) => {
         else if (e.code === "Digit2") toggleSort("size");
         else toggleSort("time");
       }
-      else if (lowK === "y" && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      else if (lowK === "p" && !e.ctrlKey && !e.altKey && !e.metaKey) {
         if (e.repeat) return;
         e.preventDefault();
-        // Grid multi-select: y y deletes all selected files
+        // Grid multi-select: p p deletes all selected files
         const multiKeys = isGrid && !inPlaylistView ? [...selectedKeysForStack].filter((k) => { const it = filtered.find((x) => rowKey(x) === k); return it && !it.dir && !it._isPlaylist; }) : [];
         if (multiKeys.length > 1) {
           const armKey = "multi:" + multiKeys.slice().sort().join("|");
@@ -4684,7 +4684,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
           onClick={() => { setYArmKey(null); yArmRef.current = null; lastYRef.current = 0; }}
           style={{ position: "fixed", bottom: 18, left: "50%", transform: "translateX(-50%)", zIndex: 120, fontSize: 12, fontWeight: 600, color: "#fff", background: "#ef4444", padding: "6px 12px", borderRadius: 999, border: "1px solid rgba(255,255,255,.2)", whiteSpace: "nowrap", cursor: "pointer" }}
         >
-          Press y again to confirm delete
+          Press p again to confirm delete
         </div>
       )}
       <AlertModal open={alertState.open} title={alertState.title} message={alertState.message} onClose={() => setAlertState({ open: false, title: "", message: "" })} />

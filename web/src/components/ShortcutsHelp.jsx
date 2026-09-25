@@ -24,7 +24,7 @@ const LIBRARY_SECTIONS = [
     { keys: ["1–9"], desc: "While holding F: add / remove extra list by number (lists sharing a first letter)" },
   ] },
   { heading: "Danger", rows: [
-    { keys: ["y", "y"], desc: "Delete selected file (press twice to confirm)" },
+    { keys: ["p", "p"], desc: "Delete selected file (press twice to confirm)" },
   ] },
   { heading: "Guide", rows: [
     { keys: ["/"], desc: "Show this shortcut guide" },
@@ -53,7 +53,7 @@ const VIEWER_SECTIONS = [
     { keys: ["hold F"], desc: "Keep save popup open for this file" },
     { keys: ["A–Z"], desc: "While holding F: add / remove file in the first list starting with that letter" },
     { keys: ["1–9"], desc: "While holding F: add / remove extra list by number (lists sharing a first letter)" },
-    { keys: ["y", "y"], desc: "Delete file (press twice to confirm)" },
+    { keys: ["p", "p"], desc: "Delete file (press twice to confirm)" },
   ] },
   { heading: "Leave", rows: [
     { keys: ["q", "Esc"], desc: "Close player" },

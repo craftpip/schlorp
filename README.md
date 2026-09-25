@@ -35,7 +35,7 @@ Open `http://localhost:6767`. Five tabs, everything happens here:
 
 **Dashboard — the feeding trough.** Paste one link or twenty (one per line), pick which folder they land in, optionally cap the quality. Everything queues up and downloads itself with a breather between items — set a fixed gap or a random range like `5m`–`15m` (`90s`/`5m` format). Watch the logs stream, click a finished row to play it right there. Clearing entries never deletes the files.
 
-**Media — the hoard.** Your `/media` folder as a browsable library: grid or list, flatten subfolders into one view, stacks for series, playlists, rename/move/delete. The built-in player is keyboard-first — `space` plays, `←/→` or `a/d` seeks, `w/s` hops files, `m` mutes, `c/v` changes speed, `f` + a letter files things into a list, `y y` deletes, `/` shows every shortcut.
+**Media — the hoard.** Your `/media` folder as a browsable library: grid or list, flatten subfolders into one view, stacks for series, playlists, rename/move/delete. The built-in player is keyboard-first — `space` plays, `←/→` or `a/d` seeks, `w/s` hops files, `m` mutes, `c/v` changes speed, `f` + a letter files things into a list, `p p` deletes, `/` shows every shortcut.
 
 **Collections — the trap.** Paste an Instagram saved-collection link and scan it for new posts, optionally stopping when it reaches one you've already seen. Send what it finds straight to the download queue or into the background sync queue. The same tab manages your auto-sync lists (collection URL + folder + account) and shows the sync queue's pending and finished items.
 
