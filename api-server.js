@@ -3940,32 +3940,55 @@ function getQueueFilePath() {
   );
 }
 
+const STATE_READ_ATTEMPTS = 5;
+const STATE_READ_RETRY_MS = 20;
+const emptySyncState = () => ({ config: { accounts: [], savedLists: [] }, lists: {}, updatedAt: null });
+
 async function readStateFile() {
-  try {
-    const raw = await fs.readFile(getStateFilePath(), "utf8");
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") {
-      return { config: { accounts: [], savedLists: [] }, lists: {}, updatedAt: null };
+  const filePath = getStateFilePath();
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const raw = await fs.readFile(filePath, "utf8");
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object") {
+        return emptySyncState();
+      }
+      if (!parsed.config || typeof parsed.config !== "object") {
+        parsed.config = { accounts: [], savedLists: [] };
+      }
+      if (!Array.isArray(parsed.config.accounts)) parsed.config.accounts = [];
+      if (!Array.isArray(parsed.config.savedLists)) parsed.config.savedLists = [];
+      if (!parsed.lists || typeof parsed.lists !== "object") parsed.lists = {};
+      return parsed;
+    } catch (error) {
+      if (error && error.code === "ENOENT") {
+        return emptySyncState();
+      }
+      // A non-atomic writer can leave a half-written file behind; retry before failing.
+      if (error instanceof SyntaxError && attempt < STATE_READ_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, STATE_READ_RETRY_MS));
+        continue;
+      }
+      throw error;
     }
-    if (!parsed.config || typeof parsed.config !== "object") {
-      parsed.config = { accounts: [], savedLists: [] };
-    }
-    if (!Array.isArray(parsed.config.accounts)) parsed.config.accounts = [];
-    if (!Array.isArray(parsed.config.savedLists)) parsed.config.savedLists = [];
-    if (!parsed.lists || typeof parsed.lists !== "object") parsed.lists = {};
-    return parsed;
-  } catch (error) {
-    if (error && error.code === "ENOENT") {
-      return { config: { accounts: [], savedLists: [] }, lists: {}, updatedAt: null };
-    }
-    throw error;
   }
 }
 
+let stateWriteSeq = 0;
+
 async function writeStateFile(state) {
   const filePath = getStateFilePath();
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, JSON.stringify(state, null, 2), "utf8");
+  const dir = path.dirname(filePath);
+  await fs.mkdir(dir, { recursive: true });
+  // Write to a unique temp file and rename: readers never observe a partial file.
+  const tmpPath = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${stateWriteSeq++}.tmp`);
+  await fs.writeFile(tmpPath, JSON.stringify(state, null, 2), "utf8");
+  try {
+    await fs.rename(tmpPath, filePath);
+  } catch (error) {
+    await fs.rm(tmpPath, { force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 async function readQueueFile() {
