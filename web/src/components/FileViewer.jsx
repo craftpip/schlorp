@@ -31,6 +31,10 @@ const TRACK_PAN_SMOOTH = 0.45;
 const TRACK_STICK = 1500;
 const TRACK_JUMP = 12;
 const TRACK_TEX_MIN = 150;
+const TRACK_BG_CLAMP = 0.35;
+const TRACK_BG_DEAD = 0.15;
+const TRACK_BG_LEAK = 0.0012;
+const TRACK_BG_MISS = 10;
 function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
 function rotDeg(x, y, deg) {
   const d = ((deg % 360) + 360) % 360;
@@ -59,7 +63,7 @@ function refreshGrid(img, st) {
   const pts = [[m, m], [rw / 2, m], [rw - m, m], [m, rh / 2], [rw - m, rh / 2], [m, rh - m], [rw / 2, rh - m], [rw - m, rh - m]];
   st.grid = pts.map(([x, y]) => {
     const p = capturePatch(img, rw, rh, x, y, s);
-    p.fx = clamp(x, 0, rw - 1); p.fy = clamp(y, 0, rh - 1);
+    p.fx = clamp(x, 0, rw - 1); p.fy = clamp(y, 0, rh - 1); p.vx = 0; p.vy = 0;
     return p;
   });
 }
@@ -72,7 +76,7 @@ function ssdAt(lum, st, base) {
   }
   return s;
 }
-function bestTemplateSearch(img, st, predX, predY, wide, roi) {
+function bestTemplateSearch(img, st, predX, predY, wide, roi, stick) {
   const len = st.rw * st.rh;
   let lum = st.lum;
   if (!lum || lum.length < len) { lum = new Int32Array(len); st.lum = lum; }
@@ -81,6 +85,7 @@ function bestTemplateSearch(img, st, predX, predY, wide, roi) {
   const halfX = st.tplW >> 1, halfY = st.tplH >> 1;
   const step = wide ? 6 : 3;
   const rng = roi || TRACK_ROI;
+  const stickK = stick == null ? TRACK_STICK : stick;
   const minX = wide ? halfX : Math.max(halfX, Math.round(predX) - rng);
   const maxX = wide ? st.rw - halfX : Math.min(st.rw - halfX, Math.round(predX) + rng);
   const minY = wide ? halfY : Math.max(halfY, Math.round(predY) - rng);
@@ -91,7 +96,7 @@ function bestTemplateSearch(img, st, predX, predY, wide, roi) {
     const baseY = (cy - halfY) * st.rw;
     for (let cx = minX; cx <= maxX; cx += step) {
       const s = ssdAt(lum, st, baseY + cx - halfX);
-      const p = s + TRACK_STICK * ((cx - predX) * (cx - predX) + (cy - predY) * (cy - predY));
+      const p = s + stickK * ((cx - predX) * (cx - predX) + (cy - predY) * (cy - predY));
       if (p < best) { best = p; bestRaw = s; bx = cx; by = cy; }
     }
   }
@@ -101,7 +106,7 @@ function bestTemplateSearch(img, st, predX, predY, wide, roi) {
     for (let dx = -2; dx <= 2; dx++) {
       const cx = clamp(bx + dx, minX, maxX);
       const s = ssdAt(lum, st, baseY + cx - halfX);
-      const p = s + TRACK_STICK * ((cx - predX) * (cx - predX) + (cy - predY) * (cy - predY));
+      const p = s + stickK * ((cx - predX) * (cx - predX) + (cy - predY) * (cy - predY));
       if (p < best) { best = p; bestRaw = s; bx = cx; by = cy; }
     }
   }
@@ -169,6 +174,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const [isFs, setIsFs] = useState(false);
   const [tracking, setTracking] = useState(false);
   const [trackLost, setTrackLost] = useState(false);
+  const [trackBg, setTrackBg] = useState(false);
   const [trackHover, setTrackHover] = useState(false);
   const [dotVisible, setDotVisible] = useState(false);
   const dotTimerRef = useRef(0);
@@ -185,6 +191,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const trackGenRef = useRef(0);
   const trackViewRef = useRef({ tracking: false, zoom: 1, pan: { x: 0, y: 0 }, transform: "" });
   const trackSmoothRef = useRef(TRACK_PAN_SMOOTH);
+  const smoothInputRef = useRef(null);
   const trackStateRef = useRef(null);
   const dragRef = useRef({ dragging: false, startX: 0, startY: 0, origX: 0, origY: 0 });
   const wasPlayingRef = useRef(false);
@@ -197,6 +204,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const [duration, setDuration] = useState(0);
   const [seekFrames, setSeekFrames] = useState(() => { try { return localStorage.getItem("xdl_viewer_seekFrames") === "1"; } catch { return false; } });
   const [muted, setMuted] = useState(() => { try { return localStorage.getItem("xdl_viewer_muted") === "1"; } catch { return false; } });
+  const [trackPref, setTrackPref] = useState(() => { try { const p = localStorage.getItem("xdl_viewer_track"); return p === "bg" || p === "point" ? p : "none"; } catch { return "none"; } });
   const [endMode, setEndMode] = useState(() => { try { const v = localStorage.getItem("xdl_viewer_endMode"); if (v === "stop") return "next"; if (v === "repeat" || v === "random") return v; return "none"; } catch { return "none"; } });
   const [randHistory, setRandHistory] = useState([]);
   const [randCursor, setRandCursor] = useState(-1);
@@ -217,6 +225,12 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const lastYRef = useRef(0);
   const yConfirmTimerRef = useRef(null);
   const doDeleteFileRef = useRef(null);
+  const startBgRef = useRef(null);
+  const cycleTrackRef = useRef(null);
+  const recenterRef = useRef(null);
+  const trackPrefRef = useRef(trackPref);
+  trackPrefRef.current = trackPref;
+  const applyTrackPrefRef = useRef(null);
   const randCursorRef = useRef(-1);
   const fmtTime = (s) => { if (!s || Number.isNaN(s)) return "0:00"; const m = Math.floor(s/60); const sec = String(Math.floor(s%60)).padStart(2,"0"); return `${m}:${sec}`; };
   const mediaUrl = effSrc;
@@ -277,6 +291,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   useEffect(() => { if (videoRef.current) videoRef.current.playbackRate = rate; }, [rate, loadedUrl]);
   useEffect(() => { if (videoRef.current) videoRef.current.muted = muted; }, [muted, loadedUrl]);
   useEffect(() => { try { localStorage.setItem("xdl_viewer_muted", muted ? "1" : "0"); } catch {} }, [muted]);
+  useEffect(() => { try { localStorage.setItem("xdl_viewer_track", trackPref); } catch {} }, [trackPref]);
   useEffect(() => { try { localStorage.setItem("xdl_viewer_rate", String(rate)); } catch {} }, [rate]);
   useEffect(() => { try { localStorage.setItem("xdl_viewer_seekFrames", seekFrames ? "1" : "0"); } catch {} }, [seekFrames]);
   const stopTracking = useCallback(() => {
@@ -293,6 +308,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     trackViewRef.current = { tracking: false, zoom: 1, pan: { x: 0, y: 0 }, transform: "" };
     setTracking(false);
     setTrackLost(false);
+    setTrackBg(false);
     setTrackHover(false);
     if (dotTimerRef.current) clearTimeout(dotTimerRef.current);
     setDotVisible(false);
@@ -303,6 +319,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   useEffect(() => { try { localStorage.setItem("xdl_viewer_endMode", endMode); } catch {} }, [endMode]);
   useEffect(() => { if (rotLoadedRef.current !== filePathEff) return; saveFileRotation(filePathEff, rotate); }, [rotate, filePathEff]);
   useEffect(() => { stopTracking(); rotLoadedRef.current = filePathEff; setZoom(1); setOrigin("50% 50%"); setPan({x:0,y:0}); setRotate(readFileRotation(filePathEff)); setCurrent(0); setDuration(0); setGifAsVideo(false); setMediaReady(false); setYConfirm(false); lastYRef.current = 0; animRef.current = null; pendingSeekRef.current = null; if (yConfirmTimerRef.current) { clearTimeout(yConfirmTimerRef.current); yConfirmTimerRef.current = null; } setTimeout(() => videoRef.current?.focus(), 50); }, [loadedUrl, filePathEff, stopTracking]);
+  useEffect(() => { if (!mediaReady) return; if (applyTrackPrefRef.current) applyTrackPrefRef.current(); }, [mediaReady, loadedUrl]);
   // Drive the seekbar with requestAnimationFrame: read the video's live
   // currentTime every frame so the thumb glides instead of stepping with the
   // ~4/s timeupdate events. Any seek (keyboard, wheel, ±10s, track click, or
@@ -532,7 +549,9 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       const z = Math.min(4, Math.max(1, trackViewRef.current.zoom * Math.exp(-e.deltaY * perLine * 0.0022)));
       if (z === trackViewRef.current.zoom) return;
       const rot = rotateRef.current;
-      const pan = computeCenterPan(st, z, rect, rot);
+      const pan = st.mode === "bg"
+        ? { x: st.bgX * st.cPerCanvas * z + (st.offX || 0), y: st.bgY * st.cPerCanvas * z + (st.offY || 0) }
+        : computeCenterPan(st, z, rect, rot);
       trackViewRef.current.zoom = z;
       trackViewRef.current.pan = pan;
       trackViewRef.current.transform = `translate(${pan.x}px, ${pan.y}px) rotate(${rot}deg) scale(${z})`;
@@ -652,6 +671,114 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     st.step();
     return true;
   };
+  const startBgTracking = () => {
+    const v = videoRef.current;
+    if (!v || v.tagName !== "VIDEO" || showImageRef.current) return false;
+    const rect = containerRef.current && containerRef.current.getBoundingClientRect();
+    if (!rect || rect.width < 4 || rect.height < 4) return false;
+    const rot = rotateRef.current;
+    const rotT = rot === 90 || rot === 270;
+    const sw = rect.width, sh = rect.height;
+    const dimW = rotT ? sh : sw, dimH = rotT ? sw : sh;
+    const vw = v.videoWidth, vh = v.videoHeight;
+    if (!vw || !vh) return false;
+    const fit = Math.min(dimW / vw, dimH / vh);
+    const cw = vw * fit, ch = vh * fit;
+    stopTracking();
+    const st = {
+      canvas: document.createElement("canvas"),
+      ctx: null, rw: 0, rh: 0, cPerCanvas: 1, lum: null,
+      tpl: null, tplW: 0, tplH: 0,
+      fx: 0, fy: 0, vx: 0, vy: 0, age: 0, recapture: false, offX: 0, offY: 0, lost: false, misses: 0, frames: 0,
+      mode: "bg", grid: null, gridRW: -1, gridRH: -1, warm: 3,
+      bgX: 0, bgY: 0, bgVX: 0, bgVY: 0, bgMaxX: 0, bgMaxY: 0,
+      rvfc: typeof v.requestVideoFrameCallback === "function",
+      raf: 0, tTime: -1, gen: ++trackGenRef.current,
+      onSeeked: () => { const s = trackStateRef.current; if (s) { s.recapture = true; s.bgVX = 0; s.bgVY = 0; } },
+    };
+    const k = Math.min(TRACK_CAP / cw, TRACK_CAP / ch, 1);
+    const rw = Math.max(4, Math.round(cw * k)), rh = Math.max(4, Math.round(ch * k));
+    st.canvas.width = rw; st.canvas.height = rh;
+    st.rw = rw; st.rh = rh;
+    st.cPerCanvas = cw / rw;
+    st.ctx = st.canvas.getContext("2d", { willReadFrequently: true });
+    st.ctx.drawImage(v, 0, 0, rw, rh);
+    const img = st.ctx.getImageData(0, 0, rw, rh);
+    refreshGrid(img, st);
+    st.gridRW = rw; st.gridRH = rh;
+    st.bgMaxX = rw * TRACK_BG_CLAMP; st.bgMaxY = rh * TRACK_BG_CLAMP;
+    trackStateRef.current = st;
+    trackingRef.current = true;
+    const cz = Math.max(1, zoom);
+    const pan0 = { x: st.offX, y: st.offY };
+    trackViewRef.current = { tracking: true, zoom: cz, pan: pan0, transform: `translate(${pan0.x}px, ${pan0.y}px) rotate(${rot}deg) scale(${cz})` };
+    v.style.transformOrigin = "50% 50%";
+    v.style.transform = trackViewRef.current.transform;
+    v.addEventListener("seeked", st.onSeeked);
+    trackArmedRef.current = false;
+    setTrackArmed(false);
+    setTrackLost(false);
+    setTrackHover(false);
+    setTrackBg(true);
+    setZoom(cz);
+    setPan(pan0);
+    setOrigin("50% 50%");
+    setTracking(true);
+    st.step = () => {
+      if (trackGenRef.current !== st.gen || !trackingRef.current) return;
+      if (st.rvfc) { v.requestVideoFrameCallback(st.step); trackingTick(); }
+      else { st.raf = requestAnimationFrame(st.step); trackingTick(); }
+    };
+    st.step();
+    return true;
+  };
+  const recenterView = () => {
+    const st = trackStateRef.current;
+    const tracking = !!st && trackingRef.current;
+    const v = videoRef.current;
+    const rot = rotateRef.current;
+    const z = tracking ? trackViewRef.current.zoom : zoom;
+    if (tracking) {
+      st.bgX = 0; st.bgY = 0; st.bgVX = 0; st.bgVY = 0;
+      st.offX = 0; st.offY = 0;
+      if (st.mode !== "bg") {
+        const rect = containerRef.current && containerRef.current.getBoundingClientRect();
+        const base = rect ? computeCenterPan(st, z, rect, rot) : { x: 0, y: 0 };
+        st.offX = -base.x; st.offY = -base.y;
+      }
+    }
+    const pan = { x: 0, y: 0 };
+    if (tracking) {
+      trackViewRef.current.pan = pan;
+      trackViewRef.current.transform = `translate(${pan.x}px, ${pan.y}px) rotate(${rot}deg) scale(${z})`;
+    }
+    if (v) v.style.transform = `translate(${pan.x}px, ${pan.y}px) rotate(${rot}deg) scale(${z})`;
+    setZoom(z);
+    setPan(pan);
+    setOrigin("50% 50%");
+  };
+  const startPointCenterTracking = () => {
+    const el = containerRef.current;
+    const r = el && el.getBoundingClientRect();
+    if (!r) return false;
+    return startTracking(r.left + r.width / 2, r.top + r.height / 2);
+  };
+  const applyTrackPref = () => {
+    const st = trackStateRef.current;
+    if (st && trackingRef.current) return;
+    const el = videoRef.current;
+    if (!el || el.tagName !== "VIDEO" || showImageRef.current) return;
+    const p = trackPrefRef.current;
+    if (p === "bg") startBgTracking();
+    else if (p === "point") startPointCenterTracking();
+  };
+  const cycleTracking = () => {
+    const st = trackStateRef.current;
+    if (!st) { setTrackPref("bg"); if (startBgRef.current) startBgRef.current(); return; }
+    if (st.mode === "bg") { setTrackPref("point"); startPointCenterTracking(); return; }
+    setTrackPref("none");
+    stopTracking();
+  };
   const trackingTick = () => {
     const st = trackStateRef.current;
     if (!st || !trackingRef.current || st.gen !== trackGenRef.current) return;
@@ -677,6 +804,70 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     const ctx = st.ctx;
     ctx.drawImage(v, 0, 0, rw, rh);
     const img = ctx.getImageData(0, 0, rw, rh);
+    if (st.mode === "bg") {
+      if (st.recapture) {
+        st.recapture = false;
+        refreshGrid(img, st);
+        st.gridRW = st.rw; st.gridRH = st.rh;
+        st.bgVX = 0; st.bgVY = 0; st.bgX = 0; st.bgY = 0; st.warm = 3;
+      }
+      if (st.gridRW !== st.rw || st.gridRH !== st.rh) {
+        refreshGrid(img, st);
+        st.gridRW = st.rw; st.gridRH = st.rh;
+        st.bgVX = 0; st.bgVY = 0; st.warm = 3;
+      }
+      if (st.frames % 90 === 0) refreshGrid(img, st);
+      if (st.warm > 0) { st.warm--; refreshGrid(img, st); st.frames++; return; }
+      const gdx = [], gdy = [];
+      for (const g of st.grid) {
+        const px = g.fx + (g.vx || 0), py = g.fy + (g.vy || 0);
+        const gr = bestTemplateSearch(img, { rw: st.rw, rh: st.rh, tpl: g.tpl, tplW: g.tplW, tplH: g.tplH, lum: st.lum }, px, py, false, 28, 60);
+        if (gr.score / (g.tplW * g.tplH) < 3600) {
+          const ddx = gr.x - g.fx, ddy = gr.y - g.fy;
+          if (Math.hypot(ddx, ddy) < TRACK_JUMP) {
+            const np = capturePatch(img, st.rw, st.rh, gr.x, gr.y, 32);
+            g.tpl = np.tpl; g.tplW = np.tplW; g.tplH = np.tplH;
+            g.vx = ddx; g.vy = ddy;
+            g.fx = gr.x; g.fy = gr.y;
+            gdx.push(ddx); gdy.push(ddy);
+          }
+        }
+      }
+      st.frames++;
+      if (gdx.length >= 3) {
+        gdx.sort((a, b) => a - b); gdy.sort((a, b) => a - b);
+        const medDx = gdx[gdx.length >> 1], medDy = gdy[gdy.length >> 1];
+        const gd = Math.hypot(medDx, medDy);
+        let cx = 0, cy = 0;
+        if (gd > TRACK_BG_DEAD) {
+          const kk = (gd - TRACK_BG_DEAD) / gd;
+          cx = -medDx * kk; cy = -medDy * kk;
+        }
+        st.bgVX = st.bgVX * 0.6 + cx * 0.4;
+        st.bgVY = st.bgVY * 0.6 + cy * 0.4;
+        st.bgX += st.bgVX - st.bgX * TRACK_BG_LEAK;
+        st.bgY += st.bgVY - st.bgY * TRACK_BG_LEAK;
+        st.bgX = clamp(st.bgX, -st.bgMaxX, st.bgMaxX);
+        st.bgY = clamp(st.bgY, -st.bgMaxY, st.bgMaxY);
+        if (st.lost) { st.lost = false; setTrackLost(false); }
+        st.misses = 0;
+      } else {
+        st.misses++;
+        st.bgVX *= 0.9; st.bgVY *= 0.9;
+        if (!st.lost && st.misses >= TRACK_BG_MISS) { st.lost = true; st.bgVX = 0; st.bgVY = 0; setTrackLost(true); }
+      }
+      const czBg = trackViewRef.current.zoom;
+      const prevBg = trackViewRef.current.pan;
+      const cpc = st.cPerCanvas * czBg;
+      const tBgX = st.bgX * cpc + (st.offX || 0), tBgY = st.bgY * cpc + (st.offY || 0);
+      const panBg = { x: prevBg.x + (tBgX - prevBg.x) * trackSmoothRef.current, y: prevBg.y + (tBgY - prevBg.y) * trackSmoothRef.current };
+      if (Math.abs(panBg.x - prevBg.x) > 0.01 || Math.abs(panBg.y - prevBg.y) > 0.01) {
+        trackViewRef.current.pan = panBg;
+        trackViewRef.current.transform = `translate(${panBg.x}px, ${panBg.y}px) rotate(${rot}deg) scale(${czBg})`;
+        if (v.style.transform !== trackViewRef.current.transform) v.style.transform = trackViewRef.current.transform;
+      }
+      return;
+    }
     if (st.recapture) {
       st.recapture = false;
       captureTemplate(img, st, st.fx, st.fy);
@@ -764,6 +955,24 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     el.addEventListener("wheel", onWheelNative, { passive: false });
     return () => el.removeEventListener("wheel", onWheelNative);
   }, []);
+  // The smooth box lives in the pill, which only exists while tracking, so the
+  // wheel listener is (re)bound whenever tracking toggles. Native + non-passive
+  // so preventDefault blocks the container's zoom handler from also firing.
+  useEffect(() => {
+    const el = smoothInputRef.current;
+    if (!el) return;
+    const onWheelSmooth = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const cur = parseFloat(el.value);
+      const base = Number.isFinite(cur) ? cur : (1 - TRACK_PAN_SMOOTH) * 10;
+      const next = Math.min(10, Math.max(0, Math.round((base + (e.deltaY < 0 ? 0.5 : -0.5)) * 2) / 2));
+      el.value = String(next);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    el.addEventListener("wheel", onWheelSmooth, { passive: false });
+    return () => el.removeEventListener("wheel", onWheelSmooth);
+  }, [tracking]);
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -986,6 +1195,18 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
         if (e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA" && !e.target.isContentEditable) { e.preventDefault(); cycleEndModeRef.current(); }
       } else if (e.key.toLowerCase() === "r" && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
         if (e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA" && !e.target.isContentEditable) { e.preventDefault(); rotateFile(); }
+      } else if (e.key.toLowerCase() === "t" && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        const tv = videoRef.current;
+        if (tv && tv.tagName === "VIDEO" && !showImageRef.current && e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA" && !e.target.isContentEditable) {
+          e.preventDefault();
+          if (cycleTrackRef.current) cycleTrackRef.current();
+        }
+      } else if (e.key.toLowerCase() === "t" && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        const tv = videoRef.current;
+        if (tv && tv.tagName === "VIDEO" && !showImageRef.current && e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA" && !e.target.isContentEditable) {
+          e.preventDefault();
+          if (recenterRef.current) recenterRef.current();
+        }
       } else if (e.key.toLowerCase() === "c" && !e.ctrlKey && !e.altKey && !e.metaKey) {
         if (e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA" && !e.target.isContentEditable) { e.preventDefault(); stepRate(-0.1); }
       } else if (e.key.toLowerCase() === "v" && !e.ctrlKey && !e.altKey && !e.metaKey) {
@@ -1204,6 +1425,10 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     await doDeleteFile();
   };
   doDeleteFileRef.current = doDeleteFile;
+  startBgRef.current = startBgTracking;
+  cycleTrackRef.current = cycleTracking;
+  recenterRef.current = recenterView;
+  applyTrackPrefRef.current = applyTrackPref;
 
   return (
     <>
@@ -1219,9 +1444,9 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       >
         <div className="fv-header" style={{ position: "absolute", top: 0, left: 0, right: 0, zIndex: 5, display: "flex", alignItems: "flex-start", gap: 8, padding: "8px 10px", background: "transparent", border: "none", pointerEvents: "none" }}>
           <div className="fv-nav" style={{ display: "flex", alignItems: "center", gap: 6, pointerEvents: "auto", position: "relative" }}>
-            <button type="button" tabIndex={-1} className="btn btn-sm" onClick={(e) => { e.stopPropagation(); dispatchPrevRef.current(); }} onTouchStart={(e) => e.stopPropagation()} disabled={endMode !== "random" && !hasPrev} title="Previous (↑)" style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}><i className="bi bi-chevron-up" /></button>
-            <span className="badge" style={{ fontFamily: "var(--mono)", fontSize: 11, minWidth: 54, justifyContent: "center", background: "rgba(0,0,0,.55)", border: "1px solid rgba(255,255,255,.18)", color: "#fff", backdropFilter: "blur(6px)" }}>{endMode === "random" && randHistory.length > 1 ? `${randCursor + 1}/${randHistory.length} · ` : ""}{idx + 1} / {total}</span>
             <button type="button" tabIndex={-1} className="btn btn-sm" onClick={(e) => { e.stopPropagation(); dispatchNextRef.current(); }} onTouchStart={(e) => e.stopPropagation()} disabled={endMode !== "random" && !hasNext} title="Next (↓)" style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}><i className="bi bi-chevron-down" /></button>
+            <span className="badge" style={{ fontFamily: "var(--mono)", fontSize: 11, minWidth: 54, justifyContent: "center", background: "rgba(0,0,0,.55)", border: "1px solid rgba(255,255,255,.18)", color: "#fff", backdropFilter: "blur(6px)" }}>{endMode === "random" && randHistory.length > 1 ? `${randCursor + 1}/${randHistory.length} · ` : ""}{idx + 1} / {total}</span>
+            <button type="button" tabIndex={-1} className="btn btn-sm" onClick={(e) => { e.stopPropagation(); dispatchPrevRef.current(); }} onTouchStart={(e) => e.stopPropagation()} disabled={endMode !== "random" && !hasPrev} title="Previous (↑)" style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}><i className="bi bi-chevron-up" /></button>
             {(() => {
               const { base } = parseFolderBase(filePathEff);
               const label = base || titleEff;
@@ -1239,7 +1464,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
               <button type="button" tabIndex={-1} onClick={onClose} className="btn btn-sm" aria-label="Close" style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}><i className="bi bi-x-lg" /></button>
               <div
                 ref={playlistHoverRef}
-                onMouseEnter={() => { if (playlistCloseTimer.current) { clearTimeout(playlistCloseTimer.current); playlistCloseTimer.current = null; } setShowPlaylist(true); }}
+                onMouseEnter={() => { if (playlistCloseTimer.current) { clearTimeout(playlistCloseTimer.current); playlistCloseTimer.current = null; } try { if (window.matchMedia && window.matchMedia("(pointer: coarse)").matches) return; } catch {} setShowPlaylist(true); }}
                 onMouseLeave={() => { if (playlistCloseTimer.current) clearTimeout(playlistCloseTimer.current); playlistCloseTimer.current = setTimeout(() => setShowPlaylist(false), 120); }}
                 style={{ position: "relative" }}
               >
@@ -1361,10 +1586,10 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
           )}
           {tracking && (
             <>
-            <span onClick={(e) => { e.stopPropagation(); const d = dragRef.current; if (d && d.downX !== undefined && Math.hypot(e.clientX - d.downX, e.clientY - d.downY) > 6) return; stopTracking(); }} onMouseEnter={() => { setTrackHover(true); if (dotTimerRef.current) clearTimeout(dotTimerRef.current); }} onMouseLeave={() => { setTrackHover(false); pokeDot(); }} style={{ position: "absolute", left: `calc(50% + ${((trackStateRef.current && trackStateRef.current.offX) || 0)}px)`, top: `calc(50% + ${((trackStateRef.current && trackStateRef.current.offY) || 0)}px)`, width: 22, height: 22, transform: "translate(-50%,-50%)", border: `1.5px solid rgba(${trackLost ? "248,113,113" : "129,140,248"},${trackHover ? ".95" : ".35"})`, borderRadius: "50%", boxShadow: `0 0 0 3px rgba(0,0,0,${trackHover ? ".5" : ".2"})`, zIndex: 3, pointerEvents: dotVisible ? "auto" : "none", cursor: "pointer", opacity: (dotVisible || trackHover) ? 1 : 0, transition: "opacity .25s" }}>
+            <span onClick={(e) => { e.stopPropagation(); const d = dragRef.current; if (d && d.downX !== undefined && Math.hypot(e.clientX - d.downX, e.clientY - d.downY) > 6) return; setTrackPref("none"); stopTracking(); }} onMouseEnter={() => { setTrackHover(true); if (dotTimerRef.current) clearTimeout(dotTimerRef.current); }} onMouseLeave={() => { setTrackHover(false); pokeDot(); }} style={{ position: "absolute", left: `calc(50% + ${((trackStateRef.current && trackStateRef.current.offX) || 0)}px)`, top: `calc(50% + ${((trackStateRef.current && trackStateRef.current.offY) || 0)}px)`, width: 22, height: 22, transform: "translate(-50%,-50%)", border: `1.5px solid rgba(${trackLost ? "248,113,113" : "129,140,248"},${trackHover ? ".95" : ".35"})`, borderRadius: "50%", boxShadow: `0 0 0 3px rgba(0,0,0,${trackHover ? ".5" : ".2"})`, zIndex: 3, pointerEvents: dotVisible ? "auto" : "none", cursor: "pointer", opacity: (dotVisible || trackHover) ? 1 : 0, transition: "opacity .25s", display: trackBg ? "none" : "block" }}>
               <span style={{ position: "absolute", left: "50%", top: "50%", width: 5, height: 5, transform: "translate(-50%,-50%)", borderRadius: "50%", background: `rgba(${trackLost ? "248,113,113" : "129,140,248"},${trackHover ? ".95" : ".45"})` }} />
             </span>
-            <div style={{ position: "absolute", right: 12, bottom: 12, zIndex: 4, background: "rgba(0,0,0,.35)", border: "1px solid rgba(255,255,255,.12)", color: "#fff", fontSize: 11, padding: "5px 10px", borderRadius: 999, pointerEvents: "none", whiteSpace: "nowrap", backdropFilter: "blur(2px)" }}>{trackLost ? "Tracking lost — move subject back into view · " : ((trackStateRef.current && trackStateRef.current.tex < TRACK_TEX_MIN) ? "Low-detail spot — pick a busier area · " : "Tracking on — ")}smooth <input type="number" min={0} max={10} step={0.5} defaultValue={(1 - TRACK_PAN_SMOOTH) * 10} onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()} onFocus={(e) => e.target.select()} onChange={(e) => { const s = parseFloat(e.target.value); if (!Number.isFinite(s)) return; trackSmoothRef.current = Math.max(0.05, 1 - Math.min(10, Math.max(0, s)) / 10); }} style={{ width: 44, fontSize: 11, background: "rgba(255,255,255,.12)", border: "1px solid rgba(255,255,255,.25)", borderRadius: 6, color: "#fff", textAlign: "center", padding: "1px 4px", pointerEvents: "auto", outline: "none" }} />{trackLost ? " · drag to move · click to re-place" : " · drag to move · scroll to adjust zoom · click the dot to stop"}</div>
+            <div style={{ position: "absolute", right: 12, bottom: 12, zIndex: 4, background: "rgba(0,0,0,.35)", border: "1px solid rgba(255,255,255,.12)", color: "#fff", fontSize: 11, padding: "5px 10px", borderRadius: 999, pointerEvents: "none", whiteSpace: "nowrap", backdropFilter: "blur(2px)" }}>{trackBg ? (trackLost ? "Background motion lost — camera view will drift · " : "Background tracking on — ") : (trackLost ? "Tracking lost — move subject back into view · " : ((trackStateRef.current && trackStateRef.current.tex < TRACK_TEX_MIN) ? "Low-detail spot — pick a busier area · " : "Tracking on — "))}smooth <input type="number" ref={smoothInputRef} min={0} max={10} step={0.5} defaultValue={(1 - TRACK_PAN_SMOOTH) * 10} title="Scroll to adjust" onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()} onFocus={(e) => e.target.select()} onChange={(e) => { const s = parseFloat(e.target.value); if (!Number.isFinite(s)) return; trackSmoothRef.current = Math.max(0.05, 1 - Math.min(10, Math.max(0, s)) / 10); }} style={{ width: 44, fontSize: 11, background: "rgba(255,255,255,.12)", border: "1px solid rgba(255,255,255,.25)", borderRadius: 6, color: "#fff", textAlign: "center", padding: "1px 4px", pointerEvents: "auto", outline: "none" }} />{trackBg ? " · drag to move · scroll to adjust zoom" : (trackLost ? " · drag to move · click to re-place" : " · drag to move · scroll to adjust zoom · click the dot to stop")}</div>
             </>
           )}
           {trackMiss && (
@@ -1392,7 +1617,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
             </div>
             <span style={{ flex: 1 }} />
             {tracking && (
-              <button type="button" tabIndex={-1} className="btn btn-sm btn-outline-secondary" onClick={stopTracking} title="Stop tracking and reset the view" style={{ padding: "4px 8px", fontSize: 11 }}><i className="bi bi-bullseye" /> Tracking</button>
+              <button type="button" tabIndex={-1} className="btn btn-sm btn-primary" onClick={() => { setTrackPref("none"); stopTracking(); }} title={`${trackBg ? "BG tracking" : "Subject tracking"} on (⇧T switches mode) — click to stop and reset`} style={{ padding: "4px 8px", fontSize: 11 }}><i className="bi bi-camera-video" /> {trackBg ? "BG tracking" : "Subject tracking"}</button>
             )}
             {(isImage || isVideo || gifAsVideoEff) && (
               <button type="button" tabIndex={-1} className="btn btn-sm btn-outline-secondary" onClick={rotateFile} title={`Rotate 90° (⇧R)` + (rotate ? ` · now ${rotate}°` : "")} style={{ padding: "4px 8px", fontSize: 11 }}><i className="bi bi-arrow-clockwise" /> Rotate</button>
