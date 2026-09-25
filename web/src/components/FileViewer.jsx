@@ -63,23 +63,6 @@ function refreshGrid(img, st) {
     return p;
   });
 }
-function blendTemplate(img, st, cx, cy, alpha) {
-  if (!st.tpl) return;
-  const rw = img.width, rh = img.height;
-  const tplW = st.tplW, tplH = st.tplH;
-  const tx0 = clamp(Math.round(cx - tplW / 2), 0, rw - tplW);
-  const ty0 = clamp(Math.round(cy - tplH / 2), 0, rh - tplH);
-  const d = img.data;
-  let vi = 0;
-  for (let y = 0; y < tplH; y++) {
-    let fi = ((ty0 + y) * rw + tx0) << 2;
-    for (let x = 0; x < tplW; x++) {
-      const l = (d[fi] * 3 + d[fi + 1] * 6 + d[fi + 2]) >> 3;
-      st.tpl[vi] += (l - st.tpl[vi]) * alpha;
-      vi++; fi += 4;
-    }
-  }
-}
 function ssdAt(lum, st, base) {
   const tpl = st.tpl, tplW = st.tplW, tplH = st.tplH, rw = st.rw;
   let vi = 0, s = 0;
@@ -122,7 +105,18 @@ function bestTemplateSearch(img, st, predX, predY, wide, roi) {
       if (p < best) { best = p; bestRaw = s; bx = cx; by = cy; }
     }
   }
-  return { x: bx, y: by, score: bestRaw };
+  let fx = bx, fy = by;
+  if (bx > minX && bx < maxX && by > minY && by < maxY) {
+    const s0 = ssdAt(lum, st, (by - halfY) * st.rw + bx - halfX);
+    const sxm = ssdAt(lum, st, (by - halfY) * st.rw + bx - 1 - halfX);
+    const sxp = ssdAt(lum, st, (by - halfY) * st.rw + bx + 1 - halfX);
+    const sym = ssdAt(lum, st, (by - 1 - halfY) * st.rw + bx - halfX);
+    const syp = ssdAt(lum, st, (by + 1 - halfY) * st.rw + bx - halfX);
+    const dxn = sxm - 2 * s0 + sxp, dyn = sym - 2 * s0 + syp;
+    if (dxn > 0) fx = bx + clamp((sxm - sxp) / (2 * dxn), -0.5, 0.5);
+    if (dyn > 0) fy = by + clamp((sym - syp) / (2 * dyn), -0.5, 0.5);
+  }
+  return { x: fx, y: fy, score: bestRaw };
 }
 function parseFolderBase(fp) {
   const raw = String(fp || "");
@@ -176,6 +170,15 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const [tracking, setTracking] = useState(false);
   const [trackLost, setTrackLost] = useState(false);
   const [trackHover, setTrackHover] = useState(false);
+  const [dotVisible, setDotVisible] = useState(false);
+  const dotTimerRef = useRef(0);
+  const pokeDot = () => {
+    setDotVisible(true);
+    if (dotTimerRef.current) clearTimeout(dotTimerRef.current);
+    dotTimerRef.current = setTimeout(() => setDotVisible(false), 400);
+  };
+  const [trackMiss, setTrackMiss] = useState(false);
+  const missTimerRef = useRef(0);
   const [trackArmed, setTrackArmed] = useState(false);
   const trackArmedRef = useRef(false);
   const trackingRef = useRef(false);
@@ -291,6 +294,8 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     setTracking(false);
     setTrackLost(false);
     setTrackHover(false);
+    if (dotTimerRef.current) clearTimeout(dotTimerRef.current);
+    setDotVisible(false);
     setZoom(1);
     setOrigin("50% 50%");
     setPan({ x: 0, y: 0 });
@@ -561,19 +566,25 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     const v = videoRef.current;
     if (!v || v.tagName !== "VIDEO" || showImageRef.current) return;
     e.preventDefault();
-    startTracking(e.clientX, e.clientY);
+    if (!startTracking(e.clientX, e.clientY)) {
+      setTrackMiss(true);
+      if (missTimerRef.current) clearTimeout(missTimerRef.current);
+      missTimerRef.current = setTimeout(() => setTrackMiss(false), 1400);
+    } else {
+      setTrackMiss(false);
+    }
   };
   const startTracking = (clientX, clientY) => {
     const v = videoRef.current;
-    if (!v || v.tagName !== "VIDEO" || showImageRef.current) return;
+    if (!v || v.tagName !== "VIDEO" || showImageRef.current) return false;
     const rect = containerRef.current && containerRef.current.getBoundingClientRect();
-    if (!rect || rect.width < 4 || rect.height < 4) return;
+    if (!rect || rect.width < 4 || rect.height < 4) return false;
     const rot = rotateRef.current;
     const rotT = rot === 90 || rot === 270;
     const sw = rect.width, sh = rect.height;
     const dimW = rotT ? sh : sw, dimH = rotT ? sw : sh;
     const vw = v.videoWidth, vh = v.videoHeight;
-    if (!vw || !vh) return;
+    if (!vw || !vh) return false;
     const fit = Math.min(dimW / vw, dimH / vh);
     const cw = vw * fit, ch = vh * fit;
     const eff = trackingRef.current ? trackViewRef.current : { zoom, pan };
@@ -584,7 +595,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     const elX = ux + dimW / 2, elY = uy + dimH / 2;
     const tlX = (dimW - cw) / 2, tlY = (dimH - ch) / 2;
     const cpx = elX - tlX, cpy = elY - tlY;
-    if (cpx < 3 || cpy < 3 || cpx > cw - 3 || cpy > ch - 3) return;
+    if (cpx < 3 || cpy < 3 || cpx > cw - 3 || cpy > ch - 3) return false;
     stopTracking();
     const st = {
       canvas: document.createElement("canvas"),
@@ -628,6 +639,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     setTrackArmed(false);
     setTrackLost(false);
     setTrackHover(false);
+    pokeDot();
     setZoom(cz);
     setPan(pan0);
     setOrigin("50% 50%");
@@ -638,6 +650,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       else { st.raf = requestAnimationFrame(st.step); trackingTick(); }
     };
     st.step();
+    return true;
   };
   const trackingTick = () => {
     const st = trackStateRef.current;
@@ -671,7 +684,8 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       st.vx = 0; st.vy = 0;
     }
     if (st.frames % 90 === 0) refreshGrid(img, st);
-    const res = (!st.lost || (st.frames % 4 === 0)) ? bestTemplateSearch(img, st, st.fx + st.vx * 0.5, st.fy + st.vy * 0.5, st.lost) : null;
+    const dynRoi = st.lost ? undefined : Math.min(160, TRACK_ROI + st.misses * 8);
+    const res = (!st.lost || (st.frames % 2 === 0)) ? bestTemplateSearch(img, st, st.fx + st.vx * 0.5, st.fy + st.vy * 0.5, st.lost, dynRoi) : null;
     const resOK = res && res.score / (st.tplW * st.tplH) < 3600;
     let resDX = 0, resDY = 0, resD = Infinity;
     if (resOK) { resDX = res.x - st.fx; resDY = res.y - st.fy; resD = Math.hypot(resDX, resDY); }
@@ -683,6 +697,8 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
         if (gr.score / (g.tplW * g.tplH) < 3600) {
           const ddx = gr.x - g.fx, ddy = gr.y - g.fy;
           if (Math.hypot(ddx, ddy) < TRACK_JUMP) {
+            const np = capturePatch(img, st.rw, st.rh, gr.x, gr.y, 32);
+            g.tpl = np.tpl; g.tplW = np.tplW; g.tplH = np.tplH;
             g.fx += ddx * 0.5; g.fy += ddy * 0.5;
             gdx.push(ddx); gdy.push(ddy);
           }
@@ -697,16 +713,18 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     if (resOK && resD <= TRACK_JUMP) {
       const wasLost = st.lost;
       st.lost = false; st.misses = 0;
-      if (wasLost) { captureTemplate(img, st, res.x, res.y); refreshGrid(img, st); st.vx = 0; st.vy = 0; setTrackLost(false); }
-      if (resD > TRACK_DEAD) {
-        const k = (resD - TRACK_DEAD) / resD;
-        st.vx = st.vx * 0.7 + resDX * k * 0.3;
-        st.vy = st.vy * 0.7 + resDY * k * 0.3;
-        st.fx += resDX * k * 0.3;
-        st.fy += resDY * k * 0.3;
-        st.age++;
-        if (resD < 8 && st.age % 40 === 0) blendTemplate(img, st, res.x, res.y, 0.05);
-      }
+      captureTemplate(img, st, res.x, res.y);
+      if (wasLost) { refreshGrid(img, st); st.vx = 0; st.vy = 0; setTrackLost(false); }
+        if (resD > TRACK_DEAD) {
+          const k = (resD - TRACK_DEAD) / resD;
+          const f = Math.min(1, 0.3 + resD / 30);
+          st.vx = st.vx * (1 - f) + resDX * k * f;
+          st.vy = st.vy * (1 - f) + resDY * k * f;
+          st.fx += resDX * k * f;
+          st.fy += resDY * k * f;
+        } else {
+          st.vx *= 0.85; st.vy *= 0.85;
+        }
     } else if (gridOK) {
       st.misses = 0;
       const gd = Math.hypot(medDx, medDy);
@@ -778,6 +796,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     e.preventDefault();
   };
   const handleMouseMove = (e) => {
+    if (trackingRef.current) pokeDot();
     if (!dragRef.current.dragging) return;
     if (dragRef.current.trackDrag) {
       const st = trackStateRef.current;
@@ -1154,7 +1173,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       stopJog();
     };
   }, [showImage]);
-  useEffect(() => () => { trackGenRef.current++; trackingRef.current = false; }, []);
+  useEffect(() => () => { trackGenRef.current++; trackingRef.current = false; if (dotTimerRef.current) clearTimeout(dotTimerRef.current); }, []);
 
   const doDeleteFile = async () => {
     const { folder, base } = parseFolderBase(filePathEff);
@@ -1342,11 +1361,14 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
           )}
           {tracking && (
             <>
-            <span onClick={(e) => { e.stopPropagation(); const d = dragRef.current; if (d && d.downX !== undefined && Math.hypot(e.clientX - d.downX, e.clientY - d.downY) > 6) return; stopTracking(); }} onMouseEnter={() => setTrackHover(true)} onMouseLeave={() => setTrackHover(false)} style={{ position: "absolute", left: `calc(50% + ${((trackStateRef.current && trackStateRef.current.offX) || 0)}px)`, top: `calc(50% + ${((trackStateRef.current && trackStateRef.current.offY) || 0)}px)`, width: 22, height: 22, transform: "translate(-50%,-50%)", border: `1.5px solid rgba(${trackLost ? "248,113,113" : "129,140,248"},${trackHover ? ".95" : ".35"})`, borderRadius: "50%", boxShadow: `0 0 0 3px rgba(0,0,0,${trackHover ? ".5" : ".2"})`, zIndex: 3, pointerEvents: "auto", cursor: "pointer" }}>
+            <span onClick={(e) => { e.stopPropagation(); const d = dragRef.current; if (d && d.downX !== undefined && Math.hypot(e.clientX - d.downX, e.clientY - d.downY) > 6) return; stopTracking(); }} onMouseEnter={() => { setTrackHover(true); if (dotTimerRef.current) clearTimeout(dotTimerRef.current); }} onMouseLeave={() => { setTrackHover(false); pokeDot(); }} style={{ position: "absolute", left: `calc(50% + ${((trackStateRef.current && trackStateRef.current.offX) || 0)}px)`, top: `calc(50% + ${((trackStateRef.current && trackStateRef.current.offY) || 0)}px)`, width: 22, height: 22, transform: "translate(-50%,-50%)", border: `1.5px solid rgba(${trackLost ? "248,113,113" : "129,140,248"},${trackHover ? ".95" : ".35"})`, borderRadius: "50%", boxShadow: `0 0 0 3px rgba(0,0,0,${trackHover ? ".5" : ".2"})`, zIndex: 3, pointerEvents: dotVisible ? "auto" : "none", cursor: "pointer", opacity: (dotVisible || trackHover) ? 1 : 0, transition: "opacity .25s" }}>
               <span style={{ position: "absolute", left: "50%", top: "50%", width: 5, height: 5, transform: "translate(-50%,-50%)", borderRadius: "50%", background: `rgba(${trackLost ? "248,113,113" : "129,140,248"},${trackHover ? ".95" : ".45"})` }} />
             </span>
             <div style={{ position: "absolute", right: 12, bottom: 12, zIndex: 4, background: "rgba(0,0,0,.35)", border: "1px solid rgba(255,255,255,.12)", color: "#fff", fontSize: 11, padding: "5px 10px", borderRadius: 999, pointerEvents: "none", whiteSpace: "nowrap", backdropFilter: "blur(2px)" }}>{trackLost ? "Tracking lost — move subject back into view · " : ((trackStateRef.current && trackStateRef.current.tex < TRACK_TEX_MIN) ? "Low-detail spot — pick a busier area · " : "Tracking on — ")}smooth <input type="number" min={0} max={10} step={0.5} defaultValue={(1 - TRACK_PAN_SMOOTH) * 10} onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()} onFocus={(e) => e.target.select()} onChange={(e) => { const s = parseFloat(e.target.value); if (!Number.isFinite(s)) return; trackSmoothRef.current = Math.max(0.05, 1 - Math.min(10, Math.max(0, s)) / 10); }} style={{ width: 44, fontSize: 11, background: "rgba(255,255,255,.12)", border: "1px solid rgba(255,255,255,.25)", borderRadius: 6, color: "#fff", textAlign: "center", padding: "1px 4px", pointerEvents: "auto", outline: "none" }} />{trackLost ? " · drag to move · click to re-place" : " · drag to move · scroll to adjust zoom · click the dot to stop"}</div>
             </>
+          )}
+          {trackMiss && (
+            <div style={{ position: "absolute", left: "50%", bottom: 12, transform: "translateX(-50%)", zIndex: 4, background: "rgba(0,0,0,.6)", border: "1px solid rgba(251,191,36,.5)", color: "#fde68a", fontSize: 11, padding: "5px 10px", borderRadius: 999, pointerEvents: "none", whiteSpace: "nowrap" }}>Click inside the video — not the black bars</div>
           )}
         </div>
 
