@@ -28,6 +28,12 @@ const TRACK_TPL = 40;
 const TRACK_ROI = 52;
 const TRACK_DEAD = 0.6;
 const TRACK_PAN_SMOOTH = 0.45;
+// The box stores the 0-10 display value; the pan lerp uses the inverted
+// factor, so a higher number means a lower factor (more lag, slower follow).
+const TRACK_SMOOTH_KEY = "xdl_viewer_smooth";
+const TRACK_SMOOTH_UI_MAX = 10;
+const readTrackSmoothUi = () => { try { const s = parseFloat(localStorage.getItem(TRACK_SMOOTH_KEY)); if (Number.isFinite(s)) return Math.min(TRACK_SMOOTH_UI_MAX, Math.max(0, s)); } catch {} return (1 - TRACK_PAN_SMOOTH) * TRACK_SMOOTH_UI_MAX; };
+const trackSmoothFactorOf = (ui) => Math.max(0.05, 1 - Math.min(TRACK_SMOOTH_UI_MAX, Math.max(0, ui)) / TRACK_SMOOTH_UI_MAX);
 const TRACK_STICK = 1500;
 const TRACK_JUMP = 12;
 const TRACK_TEX_MIN = 150;
@@ -190,7 +196,18 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const trackingRef = useRef(false);
   const trackGenRef = useRef(0);
   const trackViewRef = useRef({ tracking: false, zoom: 1, pan: { x: 0, y: 0 }, transform: "" });
-  const trackSmoothRef = useRef(TRACK_PAN_SMOOTH);
+  const trackSmoothRef = useRef(trackSmoothFactorOf(readTrackSmoothUi()));
+  // Single writer for the smooth value: the typed onChange and the wheel
+  // listener both go through here. The wheel path cannot rely on React's
+  // onChange — setting el.value directly is swallowed by React's value
+  // tracker, so the input would move while the pan lerp kept the old factor.
+  const applyTrackSmoothUi = (ui) => {
+    const clamped = Math.min(TRACK_SMOOTH_UI_MAX, Math.max(0, ui));
+    trackSmoothRef.current = trackSmoothFactorOf(clamped);
+    try { localStorage.setItem(TRACK_SMOOTH_KEY, String(clamped)); } catch {}
+  };
+  const applyTrackSmoothUiRef = useRef(applyTrackSmoothUi);
+  applyTrackSmoothUiRef.current = applyTrackSmoothUi;
   const smoothInputRef = useRef(null);
   const trackStateRef = useRef(null);
   const dragRef = useRef({ dragging: false, startX: 0, startY: 0, origX: 0, origY: 0 });
@@ -486,6 +503,9 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       if (hasN) onNextRef.current();
     } else if (mode === "repeat") {
       if (videoRef.current) { seekTo(0); videoRef.current.play().catch(() => {}); }
+      // Loop restart: the accumulated stabilization offsets belong to the
+      // previous playthrough, so drop them instead of letting them pile up.
+      if (trackingRef.current) recenterView();
     } else if (mode === "random" && v && v.length > 1) {
       const newIdx = pickRandomDifferent(v.length, i);
       const cur = randCursorRef.current;
@@ -965,10 +985,10 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       e.preventDefault();
       e.stopPropagation();
       const cur = parseFloat(el.value);
-      const base = Number.isFinite(cur) ? cur : (1 - TRACK_PAN_SMOOTH) * 10;
-      const next = Math.min(10, Math.max(0, Math.round((base + (e.deltaY < 0 ? 0.5 : -0.5)) * 2) / 2));
+      const base = Number.isFinite(cur) ? cur : readTrackSmoothUi();
+      const next = Math.min(TRACK_SMOOTH_UI_MAX, Math.max(0, Math.round((base + (e.deltaY < 0 ? 0.5 : -0.5)) * 2) / 2));
       el.value = String(next);
-      el.dispatchEvent(new Event("input", { bubbles: true }));
+      applyTrackSmoothUiRef.current(next);
     };
     el.addEventListener("wheel", onWheelSmooth, { passive: false });
     return () => el.removeEventListener("wheel", onWheelSmooth);
@@ -1512,7 +1532,6 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   .fv-speed input[type="range"]{ width: 70px !important; height: 3px !important; }
   .fv-controls .btn{ padding: 3px 6px !important; font-size: 10px !important; }
   .fv-timeline input[type="range"]{ height: 3px !important; }
-  .fv-10s{ display: none !important; }
 }
 @media (max-width: 480px){
   .fv-header{ flex-wrap: nowrap !important; padding: 6px 8px !important; }
@@ -1589,7 +1608,10 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
             <span onClick={(e) => { e.stopPropagation(); const d = dragRef.current; if (d && d.downX !== undefined && Math.hypot(e.clientX - d.downX, e.clientY - d.downY) > 6) return; setTrackPref("none"); stopTracking(); }} onMouseEnter={() => { setTrackHover(true); if (dotTimerRef.current) clearTimeout(dotTimerRef.current); }} onMouseLeave={() => { setTrackHover(false); pokeDot(); }} style={{ position: "absolute", left: `calc(50% + ${((trackStateRef.current && trackStateRef.current.offX) || 0)}px)`, top: `calc(50% + ${((trackStateRef.current && trackStateRef.current.offY) || 0)}px)`, width: 22, height: 22, transform: "translate(-50%,-50%)", border: `1.5px solid rgba(${trackLost ? "248,113,113" : "129,140,248"},${trackHover ? ".95" : ".35"})`, borderRadius: "50%", boxShadow: `0 0 0 3px rgba(0,0,0,${trackHover ? ".5" : ".2"})`, zIndex: 3, pointerEvents: dotVisible ? "auto" : "none", cursor: "pointer", opacity: (dotVisible || trackHover) ? 1 : 0, transition: "opacity .25s", display: trackBg ? "none" : "block" }}>
               <span style={{ position: "absolute", left: "50%", top: "50%", width: 5, height: 5, transform: "translate(-50%,-50%)", borderRadius: "50%", background: `rgba(${trackLost ? "248,113,113" : "129,140,248"},${trackHover ? ".95" : ".45"})` }} />
             </span>
-            <div style={{ position: "absolute", right: 12, bottom: 12, zIndex: 4, background: "rgba(0,0,0,.35)", border: "1px solid rgba(255,255,255,.12)", color: "#fff", fontSize: 11, padding: "5px 10px", borderRadius: 999, pointerEvents: "none", whiteSpace: "nowrap", backdropFilter: "blur(2px)" }}>{trackBg ? (trackLost ? "Background motion lost — camera view will drift · " : "Background tracking on — ") : (trackLost ? "Tracking lost — move subject back into view · " : ((trackStateRef.current && trackStateRef.current.tex < TRACK_TEX_MIN) ? "Low-detail spot — pick a busier area · " : "Tracking on — "))}smooth <input type="number" ref={smoothInputRef} min={0} max={10} step={0.5} defaultValue={(1 - TRACK_PAN_SMOOTH) * 10} title="Scroll to adjust" onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()} onFocus={(e) => e.target.select()} onChange={(e) => { const s = parseFloat(e.target.value); if (!Number.isFinite(s)) return; trackSmoothRef.current = Math.max(0.05, 1 - Math.min(10, Math.max(0, s)) / 10); }} style={{ width: 44, fontSize: 11, background: "rgba(255,255,255,.12)", border: "1px solid rgba(255,255,255,.25)", borderRadius: 6, color: "#fff", textAlign: "center", padding: "1px 4px", pointerEvents: "auto", outline: "none" }} />{trackBg ? " · drag to move · scroll to adjust zoom" : (trackLost ? " · drag to move · click to re-place" : " · drag to move · scroll to adjust zoom · click the dot to stop")}</div>
+            <div onTouchStart={(e) => e.stopPropagation()} onTouchMove={(e) => e.stopPropagation()} onTouchEnd={(e) => e.stopPropagation()} onTouchCancel={(e) => e.stopPropagation()} style={{ position: "absolute", right: 12, bottom: 12, zIndex: 4, display: "flex", alignItems: "center", gap: 6, maxWidth: "calc(100% - 24px)", pointerEvents: "none" }}>
+              <div style={{ flex: "0 1 auto", minWidth: 0, background: "rgba(0,0,0,.35)", border: "1px solid rgba(255,255,255,.12)", color: "#fff", fontSize: 11, padding: "5px 10px", borderRadius: 999, pointerEvents: "none", whiteSpace: "nowrap", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", backdropFilter: "blur(2px)" }}>{trackLost ? (trackBg ? "Background motion lost — camera view will drift" : "Tracking lost — move subject back into view") : ((trackStateRef.current && trackStateRef.current.tex < TRACK_TEX_MIN && !trackBg) ? "Low-detail spot — pick a busier area" : "tracking smoothness")} <input type="number" ref={smoothInputRef} min={0} max={10} step={0.5} defaultValue={readTrackSmoothUi()} title="Scroll to adjust" onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()} onFocus={(e) => e.target.select()} onChange={(e) => { const s = parseFloat(e.target.value); if (!Number.isFinite(s)) return; applyTrackSmoothUiRef.current(s); }} style={{ width: 44, fontSize: 11, background: "rgba(255,255,255,.12)", border: "1px solid rgba(255,255,255,.25)", borderRadius: 6, color: "#fff", textAlign: "center", padding: "1px 4px", pointerEvents: "auto", outline: "none" }} /></div>
+              <button type="button" tabIndex={-1} className="btn btn-sm" onClick={(e) => { e.stopPropagation(); recenterView(); }} title="Recenter view (T)" style={{ flex: "0 0 auto", width: 30, height: 30, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)", pointerEvents: "auto" }}><i className="bi bi-bullseye" /></button>
+            </div>
             </>
           )}
           {trackMiss && (
@@ -1616,8 +1638,8 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
               <button type="button" tabIndex={-1} onClick={() => setSeekFrames(true)} className={`btn btn-sm ${seekFrames ? "btn-primary" : "btn-outline-secondary"}`} style={{ padding: "2px 6px", fontSize: 11, minWidth: 32 }} title="Seek by 1 frame (~33ms)">1f</button>
             </div>
             <span style={{ flex: 1 }} />
-            {tracking && (
-              <button type="button" tabIndex={-1} className="btn btn-sm btn-primary" onClick={() => { setTrackPref("none"); stopTracking(); }} title={`${trackBg ? "BG tracking" : "Subject tracking"} on (⇧T switches mode) — click to stop and reset`} style={{ padding: "4px 8px", fontSize: 11 }}><i className="bi bi-camera-video" /> {trackBg ? "BG tracking" : "Subject tracking"}</button>
+            {(isVideo || gifAsVideoEff) && (
+              <button type="button" tabIndex={-1} className={`btn btn-sm ${tracking ? "btn-primary" : "btn-outline-secondary"}`} onClick={() => cycleTracking()} title={tracking ? `${trackBg ? "BG tracking" : "Subject tracking"} on (⇧T switches mode) — click to stop and reset` : `Stabilization off — click to start ${trackPrefRef.current === "point" ? "subject tracking" : "BG tracking"}`} style={{ padding: "4px 8px", fontSize: 11 }}><i className="bi bi-camera-video" /> {tracking ? (trackBg ? "BG tracking" : "Subject tracking") : "Track"}</button>
             )}
             {(isImage || isVideo || gifAsVideoEff) && (
               <button type="button" tabIndex={-1} className="btn btn-sm btn-outline-secondary" onClick={rotateFile} title={`Rotate 90° (⇧R)` + (rotate ? ` · now ${rotate}°` : "")} style={{ padding: "4px 8px", fontSize: 11 }}><i className="bi bi-arrow-clockwise" /> Rotate</button>
@@ -1628,17 +1650,11 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
           {(isVideo || isAudio || gifAsVideoEff) && (
               <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
                 {(isVideo || isAudio || gifAsVideoEff) && (
-                  <>
-                    <button type="button" tabIndex={-1} className="btn btn-sm btn-outline-secondary" onClick={() => setMuted((m) => !m)} title={muted ? "Unmute (m)" : "Mute (m)"} style={{ color: muted ? "#f87171" : undefined, minWidth: 36, padding: "4px 6px", fontSize: 11 }}><i className={`bi ${muted ? "bi-volume-mute-fill" : "bi-volume-up-fill"}`} /></button>
-                    <button type="button" tabIndex={-1} className="fv-10s btn btn-sm btn-outline-secondary" onClick={() => { if (videoRef.current) seekTo(videoRef.current.currentTime - 10); videoRef.current?.focus(); }} title="Back 10s" style={{ padding: "4px 6px", fontSize: 11 }}><i className="bi bi-skip-backward" /> 10s</button>
-                  </>
+                  <button type="button" tabIndex={-1} className="btn btn-sm btn-outline-secondary" onClick={() => setMuted((m) => !m)} title={muted ? "Unmute (m)" : "Mute (m)"} style={{ color: muted ? "#f87171" : undefined, minWidth: 36, padding: "4px 6px", fontSize: 11 }}><i className={`bi ${muted ? "bi-volume-mute-fill" : "bi-volume-up-fill"}`} /></button>
                 )}
                 <button type="button" tabIndex={-1} className="btn btn-sm btn-primary" onClick={() => { if (!videoRef.current) return; if (videoRef.current.paused) videoRef.current.play(); else videoRef.current.pause(); videoRef.current?.focus(); }} style={{ padding: "4px 8px", fontSize: 11 }}>
                   <i className={`bi ${isPlaying ? "bi-pause-fill" : "bi-play-fill"}`} /> {isPlaying ? "Pause" : "Play"}
                 </button>
-                {(isVideo || isAudio || gifAsVideoEff) && (
-                  <button type="button" tabIndex={-1} className="fv-10s btn btn-sm btn-outline-secondary" onClick={() => { if (videoRef.current) seekTo(videoRef.current.currentTime + 10); videoRef.current?.focus(); }} title="Forward 10s" style={{ padding: "4px 6px", fontSize: 11 }}>10s <i className="bi bi-skip-forward" /></button>
-                )}
               </div>
             )}
           </div>
