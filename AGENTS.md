@@ -189,6 +189,11 @@ scan-videos/site-hosts.js     → { SITE_HOSTS, hostMatchesSite, siteOfHostname 
 - All source files use CommonJS (`require`/`module.exports`)
 - No TypeScript, no build step
 
+### Web builds — sourcemaps stay ON
+- We are in active development: **never make a production build with sourcemaps disabled.** `web/vite.config.js` must keep `build.sourcemap: true`, and `web/dist/assets/*.js.map` must be committed alongside the bundle.
+- Reason: browser console errors must map back to real source lines (`web/src/...`), not minified bundle offsets. If a build ever ships without `.map` files, that is a bug — fix the build, don't work around it.
+- Verify after any web build: the new `assets/index-<hash>.js` has a sibling `index-<hash>.js.map`, and the `.map` is actually served (a 200, not 404) — otherwise the console falls back to useless minified stacks.
+
 ### Tests
 - Backend/API tests live in `test/` and run with `node --test` (`npm test`); coverage via `npm run test:cov` (`--experimental-test-coverage`).
 - Web UI tests live in `web/test/` and run with Vitest + Testing Library (`npm run test:ui`, `npm --prefix web test`); coverage via `npm run test:ui -- --coverage`.
