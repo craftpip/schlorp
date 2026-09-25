@@ -1190,6 +1190,25 @@ const collapseSpreadUnlessMember = (fid) => {
       }
       return best;
     };
+    // Windowed grid: the cell a move needs may not be rendered yet. Scroll it
+    // into the window and re-run the move once the new rows are in the DOM.
+    const navViaWindow = (dir, key, retry) => {
+      const v = virtNavRef.current;
+      if (!v || !v.on || !v.win) return false;
+      let row = key != null ? v.rowOfKey(key) : -1;
+      if (row < 0) {
+        if (dir === "down" || dir === "right") {
+          if (v.win.end >= v.rowCount) return false;
+          row = Math.min(v.rowCount - 1, v.win.end);
+        } else if (dir === "up" || dir === "left") {
+          if (v.win.start <= 0) return false;
+          row = Math.max(0, v.win.start - 1);
+        } else return false;
+      }
+      if (row >= v.win.start && row < v.win.end) return false;
+      navEdgeRef.current = retry;
+      return v.scrollRow(row);
+    };
     const moveSelectionSpatial = (dir, smooth = true) => {
       const nodes = [...document.querySelectorAll(TILE_NAV_Q)];
       if (!nodes.length) return;
@@ -1218,7 +1237,9 @@ const collapseSpreadUnlessMember = (fid) => {
             if (target.kind === "pile") {
               const pel = nodes.find((n) => n.getAttribute("data-testid") === "media-tile-pile" && n.getAttribute("data-filename") === target.stackId);
               if (pel) { landOn(pel, dir); return; }
+              if (navViaWindow(dir, target.key, () => moveSelectionSpatial(dir, smooth))) return;
             } else {
+              if (navViaWindow(dir, target.key, () => moveSelectionSpatial(dir, smooth))) return;
               selectSingleKey(target.key);
               return;
             }
@@ -1237,6 +1258,8 @@ const collapseSpreadUnlessMember = (fid) => {
       if (best) {
         keyboardScrollRef.current = smooth ? "smooth" : "instant";
         landOn(best, dir);
+      } else {
+        navViaWindow(dir, null, () => moveSelectionSpatial(dir, smooth));
       }
     };
     // Grid view: Shift+W / Shift+S jumps a full page up / down, keeping the
@@ -1260,6 +1283,18 @@ const collapseSpreadUnlessMember = (fid) => {
       }
       const sticky = document.querySelector('[data-testid="media-sticky"]');
       const offset = (sticky ? sticky.offsetHeight : 0) + 24;
+      {
+        const v = virtNavRef.current;
+        if (v && v.on && v.win) {
+          const atEdge = dir > 0 ? curRow >= rows.length - 1 : curRow <= 0;
+          const more = dir > 0 ? v.win.end < v.rowCount : v.win.start > 0;
+          if (atEdge && more) {
+            navEdgeRef.current = () => moveSelectionPage(dir, smooth);
+            v.scrollRow(dir > 0 ? Math.min(v.rowCount - 1, v.win.end) : Math.max(0, v.win.start - 1));
+            return;
+          }
+        }
+      }
       const heights = rows.map((r) => Math.max(...r.els.map((el) => el.offsetHeight || GRID_TARGET_H)));
       const rowH = [...heights].sort((a, b) => a - b)[Math.floor(heights.length / 2)] || GRID_TARGET_H;
       const rowsPerPage = Math.max(1, Math.floor((window.innerHeight - offset) / (rowH + GRID_GAP)));
@@ -2295,6 +2330,134 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
       return { ...entry, w, h: GRID_TARGET_H };
     });
   }, [isGrid, gridW, gridVisible, ratios, rotVersion, folder]); // eslint-disable-line react-hooks/exhaustive-deps
+  // --- Grid windowing (plan 012 follow-up) ---
+  // Large grids render only the rows near the viewport. The wrap is computed in
+  // pure JS from the same widths the tiles use, so the row count and total
+  // height are known before any tile mounts — the container can never collapse
+  // to zero height and leave the page blank. Any unusable layout (no measured
+  // width, zero rows, empty slice) falls back to rendering every cell.
+  const VIRT_MIN = 600;
+  const VIRT_OVERSCAN = 3;
+  const [filesBox, setFilesBox] = useState(null);
+  const filesBoxRef = useRef(null);
+  const [filesW, setFilesW] = useState(0);
+  const [winRows, setWinRows] = useState(null);
+  useEffect(() => {
+    if (!filesBox) return undefined;
+    const measure = () => setFilesW(filesBox.clientWidth || 0);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(filesBox);
+    return () => ro.disconnect();
+  }, [filesBox]);
+  const gridLayout = useMemo(() => {
+    const n = gridVisibleWithWidths.length;
+    const maxTileW = Math.max(gridW - GRID_GAP * 2, 80);
+    const out = { starts: [], rowOf: [], rowCount: 0, totalH: 0, ok: false };
+    if (!n || filesW <= 0) return out;
+    try {
+      let x = 0;
+      let start = 0;
+      for (let i = 0; i < n; i++) {
+        const e = gridVisibleWithWidths[i];
+        let w = e.w;
+        if (e.kind === "pile" && e.members && e.members.length) {
+          const m0 = e.members[0];
+          const m0w = Math.round(GRID_TARGET_H * effRatioFor(m0, rowKey(m0)));
+          w = Math.min(m0w, maxTileW) + STACK_PEEK_PX * (e.members.length - 1);
+        }
+        if (!(w > 0) || !Number.isFinite(w)) return out;
+        if (x === 0) x = w;
+        else if (x + GRID_GAP + w <= filesW) x += GRID_GAP + w;
+        else { out.starts.push(start); start = i; x = w; }
+        out.rowOf[i] = out.starts.length;
+      }
+      out.starts.push(start);
+      out.rowCount = out.starts.length;
+      out.totalH = out.rowCount * GRID_TARGET_H + (out.rowCount - 1) * GRID_GAP;
+      out.ok = out.rowCount > 0 && out.totalH > 0;
+    } catch {
+      out.starts = [];
+      out.rowOf = [];
+      out.rowCount = 0;
+      out.totalH = 0;
+    }
+    return out;
+  }, [gridVisibleWithWidths, filesW, gridW, rotVersion, ratios, folder]); // eslint-disable-line react-hooks/exhaustive-deps
+  const gridVirtualOn = gridLayout.ok && gridVisibleWithWidths.length > VIRT_MIN;
+  const gridRowH = GRID_TARGET_H + GRID_GAP;
+  useEffect(() => {
+    if (!gridVirtualOn || !filesBox) return undefined;
+    let raf = 0;
+    const update = () => {
+      raf = 0;
+      const top = filesBox.getBoundingClientRect().top + window.scrollY;
+      const visible = Math.ceil(window.innerHeight / gridRowH) + VIRT_OVERSCAN * 2 + 1;
+      const first = Math.floor((window.scrollY - top) / gridRowH);
+      const start = Math.max(0, Math.min(gridLayout.rowCount - 1, first - VIRT_OVERSCAN));
+      const end = Math.min(gridLayout.rowCount, start + visible);
+      if (end <= start) return;
+      setWinRows((prev) => (prev && prev.start === start && prev.end === end ? prev : { start, end }));
+    };
+    const onScroll = () => { if (!raf) raf = requestAnimationFrame(update); };
+    update();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", onScroll);
+    return () => {
+      window.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", onScroll);
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, [gridVirtualOn, gridLayout, filesBox, gridRowH]);
+  const gridSlice = useMemo(() => {
+    if (!gridVirtualOn) return null;
+    const win = winRows && winRows.end > winRows.start && winRows.end <= gridLayout.rowCount
+      ? winRows
+      : { start: 0, end: Math.min(gridLayout.rowCount, 12) };
+    const from = gridLayout.starts[win.start];
+    const to = win.end >= gridLayout.rowCount ? gridVisibleWithWidths.length : gridLayout.starts[win.end];
+    const cells = gridVisibleWithWidths.slice(from, to);
+    if (!cells.length) return null;
+    return {
+      cells,
+      // Spacers stand in for the rows above/below the window. Each spacer is
+      // one flex line, so the gap that follows it accounts for the missing
+      // inter-row gap and the total height matches a full render exactly.
+      padTop: win.start * gridRowH - GRID_GAP,
+      padBottom: (gridLayout.rowCount - win.end) * gridRowH - GRID_GAP,
+    };
+  }, [gridVirtualOn, gridLayout, winRows, gridVisibleWithWidths, gridRowH]);
+  // Scroll so `row` is inside the rendered window (off-window cells have no
+  // DOM node to scroll to or measure).
+  const scrollRowIntoWindow = (row) => {
+    const box = filesBoxRef.current;
+    if (!box || !gridLayout.ok) return false;
+    const top = box.getBoundingClientRect().top + window.scrollY + row * gridRowH;
+    const sticky = document.querySelector('[data-testid="media-sticky"]');
+    const offset = (sticky ? sticky.offsetHeight : 0) + 24;
+    const want = Math.max(0, top - offset);
+    if (Math.abs(window.scrollY - want) > 4) window.scrollTo({ top: want, behavior: "smooth" });
+    return true;
+  };
+  const gridRowOfKey = (key) => {
+    let idx = gridVisibleWithWidths.findIndex((e) => e.key === key);
+    if (idx < 0) {
+      const sid = keyPileMap.get(key);
+      if (sid) idx = gridVisibleWithWidths.findIndex((e) => e.stackId === sid);
+    }
+    return idx >= 0 && gridLayout.ok ? gridLayout.rowOf[idx] : -1;
+  };
+  const virtNavRef = useRef({ on: false, rowCount: 0, win: null });
+  virtNavRef.current = { on: gridVirtualOn, rowCount: gridLayout.rowCount, win: winRows, rowOfKey: gridRowOfKey, scrollRow: scrollRowIntoWindow };
+  // Keyboard nav runs from an effect closure; these refs let it step the
+  // window forward when the next cell isn't rendered yet, then retry.
+  const navEdgeRef = useRef(null);
+  useEffect(() => {
+    const retry = navEdgeRef.current;
+    if (!retry) return;
+    navEdgeRef.current = null;
+    retry();
+  });
   const gridKeys = useMemo(() => gridVisible.map((e) => e.key), [gridVisible]);
   // Map: member rowKey → pile stackId (for Enter-to-spread on a selected member)
   const keyPileMap = useMemo(() => {
@@ -2669,6 +2832,11 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
       const offset = (sticky ? sticky.offsetHeight : 0) + 12;
       const r = sel.getBoundingClientRect();
       window.scrollTo({ top: Math.max(0, window.scrollY + r.top - offset), behavior: "smooth" });
+    } else if (gridVirtualOn) {
+      // Windowed grid: the target cell has no DOM node yet — scroll to where
+      // it will be, which also pulls its row into the rendered window.
+      const row = gridRowOfKey(key);
+      if (row >= 0) scrollRowIntoWindow(row);
     }
     setSelKeys(new Set([key]));
     setAnchorKey(key);
@@ -4091,7 +4259,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                 )}
                 {(gridVisibleWithWidths.length > 0 || (gridVisibleWithWidths.length === 0 && filtered.length === 0 && (folder || playlists.length === 0))) && (
                   <div style={{ display: "flex", gap: 0, alignItems: "flex-start" }}>
-                  <div data-testid="media-grid-files" ref={gridFilesRef} style={{ display: "flex", flexWrap: "wrap", gap: GRID_GAP, flex: 1, minWidth: 0 }}
+                  <div data-testid="media-grid-files" ref={(el) => { gridFilesRef.current = el; filesBoxRef.current = el; setFilesBox(el); }} style={{ display: "flex", flexWrap: "wrap", gap: GRID_GAP, flex: 1, minWidth: 0 }}
                     onContextMenu={(e) => {
                       // Ctrl+click (macOS right-click emulation) only toggles
                       // selection — never opens the menu.
@@ -4154,7 +4322,11 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                       }
                     }}
                   >
-                    {filtered.length === 0 ? (!loading && !err ? (filtersActive ? filterEmptyNotice : <div data-testid="media-empty" className="empty" style={{ padding: 20, gridColumn: "1 / -1", width: "100%", textAlign: "center" }}><i className="bi bi-inbox" /> {folder ? "This folder is empty" : "No files — download something!"}</div>) : null) : gridVisibleWithWidths.map((entry) => (entry.kind === "pile" ? renderPile(entry) : renderTile(entry.it, 0, entry.w, entry.h)))}
+                    {filtered.length === 0 ? (!loading && !err ? (filtersActive ? filterEmptyNotice : <div data-testid="media-empty" className="empty" style={{ padding: 20, gridColumn: "1 / -1", width: "100%", textAlign: "center" }}><i className="bi bi-inbox" /> {folder ? "This folder is empty" : "No files — download something!"}</div>) : null) : gridSlice ? (<>
+                      {gridSlice.padTop > 0 && <div aria-hidden="true" style={{ flex: "0 0 100%", width: "100%", height: gridSlice.padTop }} />}
+                      {gridSlice.cells.map((entry) => (entry.kind === "pile" ? renderPile(entry) : renderTile(entry.it, 0, entry.w, entry.h)))}
+                      {gridSlice.padBottom > 0 && <div aria-hidden="true" style={{ flex: "0 0 100%", width: "100%", height: gridSlice.padBottom }} />}
+                    </>) : gridVisibleWithWidths.map((entry) => (entry.kind === "pile" ? renderPile(entry) : renderTile(entry.it, 0, entry.w, entry.h)))}
                   </div>
                   {renderRangeRail()}
                   </div>
