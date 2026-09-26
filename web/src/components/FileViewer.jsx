@@ -41,14 +41,33 @@ const TRACK_SMOOTH_UI_MAX = 10;
 const readTrackSmoothUi = () => { try { const s = parseFloat(localStorage.getItem(TRACK_SMOOTH_KEY)); if (Number.isFinite(s)) return Math.min(TRACK_SMOOTH_UI_MAX, Math.max(0, s)); } catch {} return (1 - TRACK_PAN_SMOOTH) * TRACK_SMOOTH_UI_MAX; };
 const trackSmoothFactorOf = (ui) => Math.max(0.05, 1 - Math.min(TRACK_SMOOTH_UI_MAX, Math.max(0, ui)) / TRACK_SMOOTH_UI_MAX);
 // Auto-center: while stabilization runs, a deliberate off-center pan eases back
-// to the middle so the view cannot drift out of the window. Only the user pan
-// offset decays - the bg compensation and the tracked point are left alone, so
-// this never weakens the stabilization itself.
+// to the middle so the view cannot drift out of the window. That is the user pan
+// offset only - the tracked point is left alone, so this never weakens the
+// stabilization itself.
 const TRACK_AUTOCENTER_REACH = 0.2;
 const TRACK_AUTOCENTER_PULL = 0.35;
 const TRACK_AUTOCENTER_MAX = 2.2;
 const TRACK_AUTOCENTER_MAXDRIFT = 0.5;
 const TRACK_AUTOCENTER_EPS = 0.05;
+// In bg mode the visible pan is the compensation plus that offset, and easing
+// the offset alone cannot bring the picture back: the compensation random-walks
+// as the camera moves and only decays at TRACK_BG_LEAK, which is slow enough
+// that the frame can sit off center for the rest of the clip. So the
+// compensation gets the same treatment: the view rooms freely, and only once it
+// is out of the band does a countdown start, and once that has run out the
+// spring below walks it back to the middle - fast enough to read as the frame
+// coming home rather than as a slow creep. The countdown re-arms every time the
+// view ends up parked at zero, so every excursion gets the same full delay.
+// There is deliberately no gate on how still the shot is: a held frame is never
+// truly still, so a gate that waits for stillness is a gate that never opens.
+// The band is a fraction of the screen short side, converted into the canvas
+// pixels the compensation is actually measured in, so the roam distance looks
+// the same whatever the video resolution and zoom, and the spring is a plain
+// exponential so it lands the same way at any frame rate.
+const TRACK_AUTOCENTER_BAND = 0.1;
+const TRACK_AUTOCENTER_HOLD = 2000;
+const TRACK_AUTOCENTER_RAMP = 0.25;
+const TRACK_AUTOCENTER_HOME = 0.25;
 const TRACK_HOLD_MS = 350;
 // How hard a match is pulled towards the predicted position, per squared pixel.
 // This has to stay small next to the size of the differences it is meant to
@@ -572,6 +591,15 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const applyTrackPrefRef = useRef(null);
   const randCursorRef = useRef(-1);
   const fmtTime = (s) => { if (!s || Number.isNaN(s)) return "0:00"; const m = Math.floor(s/60); const sec = String(Math.floor(s%60)).padStart(2,"0"); return `${m}:${sec}`; };
+  const [seekHint, setSeekHint] = useState(null);
+  // Time bubble on the seek dot: pointer x -> fraction of the track -> mm:ss, so
+  // the dot always says where it is (and where you are about to land) before release.
+  const showSeekHint = useCallback((e) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    if (!r.width) return;
+    const ratio = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    setSeekHint({ ratio, t: ratio * (duration || 0) });
+  }, [duration]);
   const mediaUrl = effSrc;
   const navRef = useRef(mediaUrl);
   const [loadedUrl, setLoadedUrl] = useState(mediaUrl);
@@ -864,6 +892,71 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     const [rdx, rdy] = rotDeg((dimW - cw) / 2 + st.fx * st.cPerCanvas - dimW / 2, (dimH - ch) / 2 + st.fy * st.cPerCanvas - dimH / 2, rot);
     return { x: -rdx * z + (st.offX || 0), y: -rdy * z + (st.offY || 0) };
   };
+  // The pan the user can actually see. While tracking that is the tracking
+  // view's pan, not the pan state: the render reads the former, and the tracking
+  // tick moves it every frame without ever touching the state.
+  const visiblePan = () => (trackingRef.current && trackStateRef.current ? { ...trackViewRef.current.pan } : { ...pan });
+  // Put a wanted pan on screen while tracking. The visible pan is the tracked
+  // part plus the user's own offset (st.offX/offY), so a gesture moves that
+  // offset and the tracking tick reproduces the pan from there instead of
+  // easing back to where the gesture started. At zoom 1 the offset goes to zero
+  // and the tracked part alone holds the view, which is the same picture the
+  // tracked view shows when nothing is panned. Touches need this because the
+  // pan state is not what the render reads while tracking, so a gesture that
+  // only moved state moved nothing at all.
+  const applyTrackPan = (want, rect, z) => {
+    const st = trackStateRef.current;
+    if (!st || !rect) return null;
+    const tv = trackViewRef.current;
+    const rot = rotateRef.current;
+    if (Number.isFinite(z)) tv.zoom = Math.min(4, Math.max(1, z));
+    const keepX = st.offX || 0, keepY = st.offY || 0;
+    st.offX = 0; st.offY = 0;
+    const base = st.mode === "bg"
+      ? { x: st.bgX * (st.cPerCanvas || 1) * tv.zoom, y: st.bgY * (st.cPerCanvas || 1) * tv.zoom }
+      : computeCenterPan(st, tv.zoom, rect, rot);
+    st.offX = keepX; st.offY = keepY;
+    let shown = want;
+    if (tv.zoom <= 1) { st.offX = 0; st.offY = 0; shown = base; }
+    else { st.offX = want.x - base.x; st.offY = want.y - base.y; }
+    tv.pan = shown;
+    tv.transform = `translate(${shown.x}px, ${shown.y}px) rotate(${rot}deg) scale(${tv.zoom})`;
+    const v = videoRef.current;
+    if (v) v.style.transform = tv.transform;
+    return shown;
+  };
+  // A seek replaces the picture, so the tracker has to be told: everything it
+  // knows describes the shot that was just left. Re-capturing where the subject
+  // used to be would lock a patch of whatever is now there, and in bg mode the
+  // compensation that was cancelling the old camera motion would be read as the
+  // new camera's motion and carried into the new shot. So the tracked part is
+  // dropped, and the next tick puts it back by looking for the subject by
+  // identity -- fx = -1 is the "position unknown" marker (a real point is
+  // clamped into the frame, so it cannot be -1) and the miss count is already
+  // at the lost threshold, which is what puts the tracker on the full-frame
+  // sweep on that very next tick instead of after ten misses.
+  //
+  // `seeking` tells the tick the frame on screen is about to be replaced: the
+  // currentTime guard that skips work while the time is standing still has to
+  // step aside, or the view transform for the landed frame is only computed
+  // after it has already been shown unstabilized. It is consumed by the first
+  // tick that runs, so a jog -- a seeked every 33ms -- is never starved.
+  //
+  // The user's own pan and the zoom are not touched: a seek moves the playhead,
+  // it is not a reset.
+  const rearmTracking = () => {
+    const st = trackStateRef.current;
+    if (!st) return;
+    st.seeking = true;
+    st.acArmed = false; st.acHold = TRACK_AUTOCENTER_HOLD; st.acRamp = 0;
+    if (st.mode === "bg") {
+      st.bgX = 0; st.bgY = 0; st.bgVX = 0; st.bgVY = 0;
+      st.bgRegrab = true;
+    } else {
+      st.fx = -1; st.fy = -1; st.vx = 0; st.vy = 0;
+      st.misses = TRACK_BG_MISS; st.lost = true;
+    }
+  };
   const handleWheel = (e) => {
     if (e.shiftKey) {
       if ((isVideo || isAudio || gifAsVideoEff) && videoRef.current) {
@@ -962,10 +1055,10 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       canvas: document.createElement("canvas"),
       ctx: null, rw: 0, rh: 0, cPerCanvas: 1, lum: null,
       tpl: null, tplW: 0, tplH: 0, tplD: null,
-      fx: 0, fy: 0, vx: 0, vy: 0, age: 0, recapture: false, offX: 0, offY: 0, lost: false, misses: 0, frames: 0,
+      fx: 0, fy: 0, vx: 0, vy: 0, age: 0, seeking: false, offX: 0, offY: 0, lost: false, misses: 0, frames: 0,
       rvfc: typeof v.requestVideoFrameCallback === "function",
       raf: 0, tTime: -1, gen: ++trackGenRef.current,
-      onSeeked: () => { const s = trackStateRef.current; if (s) { s.recapture = true; s.vx = 0; s.vy = 0; } },
+      onSeeked: () => { if (trackStateRef.current) rearmTracking(); },
     };
     const k = Math.min(TRACK_CAP / cw, TRACK_CAP / ch, 1);
     const rw = Math.max(4, Math.round(cw * k)), rh = Math.max(4, Math.round(ch * k));
@@ -1032,12 +1125,16 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       canvas: document.createElement("canvas"),
       ctx: null, rw: 0, rh: 0, cPerCanvas: 1, lum: null,
       tpl: null, tplW: 0, tplH: 0,
-      fx: 0, fy: 0, vx: 0, vy: 0, age: 0, recapture: false, offX: 0, offY: 0, lost: false, misses: 0, frames: 0,
-      mode: "bg", grid: null, gridRW: -1, gridRH: -1, warm: 3,
+      fx: 0, fy: 0, vx: 0, vy: 0, age: 0, offX: 0, offY: 0, lost: false, misses: 0, frames: 0,
+      mode: "bg", grid: null, gridRW: -1, gridRH: -1, warm: 3, seeking: false, bgRegrab: false,
+      // Auto-center state: whether the view is currently out of the band, ms of
+      // countdown still owed before the compensation may be pulled in, and how
+      // far the spring has ramped in (0 while it roams).
+      acArmed: false, acHold: TRACK_AUTOCENTER_HOLD, acRamp: 0,
       bgX: 0, bgY: 0, bgVX: 0, bgVY: 0, bgMaxX: 0, bgMaxY: 0,
       rvfc: typeof v.requestVideoFrameCallback === "function",
       raf: 0, tTime: -1, gen: ++trackGenRef.current,
-      onSeeked: () => { const s = trackStateRef.current; if (s) { s.recapture = true; s.bgVX = 0; s.bgVY = 0; } },
+      onSeeked: () => { if (trackStateRef.current) rearmTracking(); },
     };
     const k = Math.min(TRACK_CAP / cw, TRACK_CAP / ch, 1);
     const rw = Math.max(4, Math.round(cw * k)), rh = Math.max(4, Math.round(ch * k));
@@ -1127,7 +1224,12 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     if (!st || !trackingRef.current || st.gen !== trackGenRef.current) return;
     const v = videoRef.current;
     if (!v || v.tagName !== "VIDEO") { stopTracking(); return; }
-    if (!st.rvfc && v.currentTime === st.tTime) return;
+    // A seek is in flight: the frame on screen is about to be replaced, so the
+    // "the time is standing still, nothing to do" guard has to step aside and
+    // this tick has to run on the landed frame rather than wait for the next
+    // decoded one. The flag is spent here, once.
+    if (!st.seeking && !st.rvfc && v.currentTime === st.tTime) return;
+    st.seeking = false;
     st.tTime = v.currentTime;
     const rect = containerRef.current && containerRef.current.getBoundingClientRect();
     if (!rect || rect.width < 4 || rect.height < 4) return;
@@ -1151,9 +1253,11 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     // compensation itself is allowed to run out to TRACK_BG_CLAMP of the frame
     // and then just stops there, so the picture can sit half a frame off with
     // nothing pulling it back; here the visible drift is measured every tick and
-    // eased back, firmly once it is past a small band. The pull is applied
-    // through offX/offY so the compensation and the tracked point keep working
-    // untouched. Paused while the user drags, and skipped when auto-center is off.
+    // eased back, firmly once it is past a small band. The user pan offset is
+    // eased through offX/offY so the compensation and the tracked point keep
+    // working untouched. In bg mode the compensation gets its own, much later
+    // pass below. Paused while the user drags, and skipped when auto-center is
+    // off.
     if (autoCenterRef.current && !dragRef.current.dragging) {
       const now = performance.now();
       const dt = st.acT ? Math.min(0.25, (now - st.acT) / 1000) : 0;
@@ -1191,14 +1295,58 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
         st.offY = pull(st.offY || 0, tY);
         if (Math.abs(st.offX - tX) < TRACK_AUTOCENTER_EPS) st.offX = tX;
         if (Math.abs(st.offY - tY) < TRACK_AUTOCENTER_EPS) st.offY = tY;
+        if (st.mode === "bg") {
+          // The compensation is what actually carries the view here, so this is
+          // what has to come home for the frame to end up in the middle. It roams
+          // for free until it is out of the band, then TRACK_AUTOCENTER_HOLD of
+          // countdown runs, and then the spring ramps in and walks it back. The
+          // pull runs all the way to zero rather than stopping at the band - the
+          // band is only what starts it - and parking at zero re-arms the
+          // countdown, so the next excursion out gets the same delay again. The
+          // compensation velocity is deliberately not damped: that velocity is
+          // the term cancelling camera motion, and damping it is damping the
+          // stabilization.
+          const perPx = Math.max(0.01, (st.cPerCanvas || 1) * (z || 1));
+          const band = Math.max(6, (Math.min(rect.width, rect.height) * TRACK_AUTOCENTER_BAND) / perPx);
+          if (Math.hypot(st.bgX, st.bgY) > band) {
+            if (!st.acArmed) { st.acArmed = true; st.acHold = TRACK_AUTOCENTER_HOLD; st.acRamp = 0; }
+            else {
+              st.acHold -= dt * 1000;
+              if (st.acHold <= 0) st.acRamp = Math.min(1, st.acRamp + dt / TRACK_AUTOCENTER_RAMP);
+            }
+          } else if (!st.acRamp) {
+            st.acArmed = false;
+            st.acHold = TRACK_AUTOCENTER_HOLD;
+          }
+          if (st.acRamp > 0) {
+            const k = Math.min(1, (st.acRamp * dt) / TRACK_AUTOCENTER_HOME);
+            st.bgX -= st.bgX * k;
+            st.bgY -= st.bgY * k;
+            if (Math.abs(st.bgX) < TRACK_AUTOCENTER_EPS) st.bgX = 0;
+            if (Math.abs(st.bgY) < TRACK_AUTOCENTER_EPS) st.bgY = 0;
+            st.bgX = clamp(st.bgX, -st.bgMaxX, st.bgMaxX);
+            st.bgY = clamp(st.bgY, -st.bgMaxY, st.bgMaxY);
+            // Home and parked: the next excursion out starts the countdown over
+            // instead of finding the spring already at full strength.
+            if (!st.bgX && !st.bgY) { st.acArmed = false; st.acHold = TRACK_AUTOCENTER_HOLD; st.acRamp = 0; }
+          }
+        }
       }
     }
     if (st.mode === "bg") {
-      if (st.recapture) {
-        st.recapture = false;
+      // A seek replaced the whole picture, so the grid describes frames that are
+      // no longer on screen. Re-grab it from the landed frame and give it the
+      // same warm-up the grid gets when the capture size changes, otherwise the
+      // first post-seek ticks measure the old grid against the new picture and
+      // the compensation is wrong (or the grid is declared lost) right when the
+      // user expects the view to be steady.
+      if (st.bgRegrab) {
+        st.bgRegrab = false;
         refreshGrid(img, st);
         st.gridRW = st.rw; st.gridRH = st.rh;
-        st.bgVX = 0; st.bgVY = 0; st.bgX = 0; st.bgY = 0; st.warm = 3;
+        st.bgX = 0; st.bgY = 0; st.bgVX = 0; st.bgVY = 0;
+        st.warm = 3; st.misses = 0;
+        if (st.lost) { st.lost = false; setTrackLost(false); }
       }
       if (st.gridRW !== st.rw || st.gridRH !== st.rh) {
         refreshGrid(img, st);
@@ -1256,14 +1404,6 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
         if (v.style.transform !== trackViewRef.current.transform) v.style.transform = trackViewRef.current.transform;
       }
       return;
-    }
-    if (st.recapture) {
-      st.recapture = false;
-      captureTemplate(img, st, st.fx, st.fy);
-      // A seek lands on new content, so the subject is re-fingerprinted there.
-      st.tplD = subjectFingerprint(img, st, st.fx, st.fy);
-      refreshGrid(img, st);
-      st.vx = 0; st.vy = 0;
     }
     if (st.frames % 90 === 0) refreshGrid(img, st);
     // How fast the subject is already moving decides how far it can travel
@@ -1405,7 +1545,8 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
           st.misses++;
           st.vx *= 0.9;
           st.vy *= 0.9;
-          if (!st.lost && st.misses >= 10) { st.lost = true; setTrackLost(true); }
+          if (!st.lost && st.misses >= 10) st.lost = true;
+          if (st.lost) setTrackLost(true);
         }
       } else {
         st.misses = 0;
@@ -1417,8 +1558,13 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       st.vx *= 0.9; st.vy *= 0.9;
       // The velocity is deliberately left running when the point is declared
       // lost: it is what carries the re-acquisition window along the path the
-      // subject was taking, and it decays on its own while lost.
-      if (!st.lost && st.misses >= 10) { st.lost = true; setTrackLost(true); }
+      // subject was taking, and it decays on its own while lost. The badge is
+      // raised from here even when the point was already lost when the frame
+      // arrived -- a seek puts it there on purpose (rearmTracking) and without
+      // this a seek onto footage without the subject would sit there silently
+      // reporting smoothness forever.
+      if (!st.lost && st.misses >= 10) st.lost = true;
+      if (st.lost) setTrackLost(true);
     }
     st.frames++;
     const cz = trackViewRef.current.zoom;
@@ -1532,7 +1678,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const handleTouchStart = (e) => {
     const t = e.touches[0];
     if (!t) return;
-    touchRef.current = { startX: t.clientX, startY: t.clientY, startTime: videoRef.current?.currentTime || 0, isSeeking: false, isHorizontal: null, startPan: { ...pan }, lastDx: 0, pinchActive: false, wasMultiTouch: false };
+    touchRef.current = { startX: t.clientX, startY: t.clientY, startTime: videoRef.current?.currentTime || 0, isSeeking: false, isHorizontal: null, startPan: visiblePan(), lastDx: 0, pinchActive: false, trkDrag: false, wasMultiTouch: false };
     if (e.touches.length > 1) {
       touchRef.current.wasMultiTouch = true;
       if (!showImage && wasPlayingRef.current && videoRef.current) {
@@ -1557,12 +1703,24 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
       const midX = (a.clientX + b.clientX) / 2, midY = (a.clientY + b.clientY) / 2;
       const pr = touchRef.current;
+      // While stabilization runs, the render takes its transform from
+      // trackViewRef rather than from the zoom/pan state, and the tracking tick
+      // rewrites the video's own transform every frame. So the pinch has to drive
+      // trackViewRef here: on its own it lands in state nobody reads and is
+      // overwritten before the next paint, which is why it did nothing at all.
+      const trk = trackingRef.current && !!trackStateRef.current;
+      const baseZoom = trk ? trackViewRef.current.zoom : zoom;
+      const basePan = visiblePan();
       if (!pr.pinchActive) {
         pr.pinchActive = true;
         pr.pinchPrevDist = dist;
-        pr.pinchPrevZoom = zoom;
-        pr.pinchPrevPan = { ...pan };
+        pr.pinchPrevZoom = baseZoom;
+        pr.pinchPrevPan = basePan;
         pr.pinchPrevMid = { x: midX, y: midY };
+        // Auto-center eases the pan offset home whenever no drag is in progress,
+        // which would swallow the gesture's own pan halfway through. Count the
+        // gesture as a drag for its duration, the way a mouse drag does.
+        if (trk) { dragRef.current.dragging = true; pr.trkDrag = true; }
       }
       const rect = containerRef.current?.getBoundingClientRect();
       if (rect) {
@@ -1570,6 +1728,10 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
         const cy = rect.top + rect.height / 2;
         const newZoom = Math.min(4, Math.max(1, pr.pinchPrevZoom * (dist / pr.pinchPrevDist)));
         let nextPan = { x: 0, y: 0 };
+        // What actually ends up on screen. Off tracking that is the pan itself;
+        // on it, zoom 1 does not mean pan 0 - the tracked part still holds the
+        // view - so the tracking branch below fills this in.
+        let shownPan = { x: 0, y: 0 };
         if (newZoom === 1) {
           setZoom(1);
           setPan({ x: 0, y: 0 });
@@ -1582,19 +1744,34 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
             x: (midX - cx) - (ax - pr.pinchPrevPan.x) * ratio,
             y: (midY - cy) - (ay - pr.pinchPrevPan.y) * ratio,
           };
+          shownPan = nextPan;
           setZoom(newZoom);
           setPan(nextPan);
           setOrigin("50% 50%");
         }
+        if (trk) {
+          const shown = applyTrackPan(nextPan, rect, newZoom);
+          if (shown) shownPan = shown;
+        }
         pr.pinchPrevZoom = newZoom;
-        pr.pinchPrevPan = nextPan;
+        pr.pinchPrevPan = shownPan;
         pr.pinchPrevMid = { x: midX, y: midY };
         pr.pinchPrevDist = dist;
       }
       return;
     }
     if (zoom > 1) {
-      setPan({ x: touchRef.current.startPan.x + dx, y: touchRef.current.startPan.y + dy });
+      const want = { x: touchRef.current.startPan.x + dx, y: touchRef.current.startPan.y + dy };
+      // While tracking the pan state is not what is on screen, so a one-finger
+      // drag has to move the tracking view too or the picture stays put.
+      if (trackingRef.current && trackStateRef.current) {
+        const rect = containerRef.current?.getBoundingClientRect();
+        if (applyTrackPan(want, rect, trackViewRef.current.zoom)) {
+          dragRef.current.dragging = true;
+          pr.trkDrag = true;
+        }
+      }
+      setPan(want);
       e.preventDefault();
       return;
     }
@@ -1640,9 +1817,14 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       pr.startX = r.clientX;
       pr.startY = r.clientY;
       pr.startTime = videoRef.current?.currentTime || 0;
-      pr.startPan = { ...pan };
+      pr.startPan = visiblePan();
       pr.lastDx = 0;
     }
+    if (pr.trkDrag) {
+      pr.trkDrag = false;
+      dragRef.current.dragging = false;
+    }
+    if (pr.pinchActive && (!e.touches || e.touches.length === 0)) pr.pinchActive = false;
     if (wasPlayingRef.current && videoRef.current && !showImage) {
       const v = videoRef.current;
       wasPlayingRef.current = false;
@@ -2122,7 +2304,12 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
             {(isVideo || isAudio || gifAsVideoEff) && (
             <div className="fv-timeline" style={{ display: "flex", alignItems: "center", gap: 6 }}>
               <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--muted)", minWidth: 32 }}>{fmtTime(current)}</span>
-              <input ref={seekRef} type="range" tabIndex={-1} min={0} max={duration || 0} step="any" defaultValue={0} onChange={(e)=> { const v=parseFloat(e.target.value); if(!videoRef.current) return; if (isDraggingRef.current) { animRef.current = null; pendingSeekRef.current = null; videoRef.current.currentTime = v; setCurrent(v); } else { seekTo(v); } }} onPointerDown={(e)=>{ pressedRef.current = true; isDraggingRef.current = false; pressStartRef.current = { x: e.clientX, y: e.clientY }; }} onPointerMove={(e)=>{ if (pressedRef.current) { const dx = e.clientX - pressStartRef.current.x; const dy = e.clientY - pressStartRef.current.y; if (Math.hypot(dx, dy) > 4) isDraggingRef.current = true; } }} onPointerUp={()=>{ pressedRef.current = false; isDraggingRef.current = false; }} onPointerCancel={()=>{ pressedRef.current = false; isDraggingRef.current = false; }} onMouseUp={(e)=>e.target.blur()} onTouchEnd={(e)=>e.target.blur()} onBlur={()=>{ pressedRef.current = false; isDraggingRef.current = false; }} style={{ flex: 1, accentColor: "#6366f1", height: 4 }} />
+              <div style={{ position: "relative", flex: 1, minWidth: 0, display: "flex", alignItems: "center", height: 16 }}>
+                {seekHint && (
+                  <span style={{ position: "absolute", bottom: "100%", left: `${seekHint.ratio * 100}%`, transform: "translateX(-50%)", marginBottom: 3, background: "rgba(0,0,0,.78)", border: "1px solid rgba(255,255,255,.22)", color: "#fff", fontFamily: "var(--mono)", fontSize: 10, lineHeight: "14px", padding: "1px 5px", borderRadius: 6, pointerEvents: "none", whiteSpace: "nowrap", zIndex: 5, backdropFilter: "blur(6px)" }}>{fmtTime(seekHint.t)}</span>
+                )}
+                <input ref={seekRef} type="range" tabIndex={-1} min={0} max={duration || 0} step="any" defaultValue={0} onChange={(e)=> { const v=parseFloat(e.target.value); if(!videoRef.current) return; if (isDraggingRef.current) { animRef.current = null; pendingSeekRef.current = null; videoRef.current.currentTime = v; setCurrent(v); } else { seekTo(v); } }} onPointerDown={(e)=>{ pressedRef.current = true; isDraggingRef.current = false; pressStartRef.current = { x: e.clientX, y: e.clientY }; showSeekHint(e); }} onPointerMove={(e)=>{ showSeekHint(e); if (pressedRef.current) { const dx = e.clientX - pressStartRef.current.x; const dy = e.clientY - pressStartRef.current.y; if (Math.hypot(dx, dy) > 4) isDraggingRef.current = true; } }} onPointerLeave={()=>{ setSeekHint(null); }} onPointerUp={(e)=>{ pressedRef.current = false; isDraggingRef.current = false; const r = e.currentTarget.getBoundingClientRect(); if (e.clientX < r.left || e.clientX > r.right) setSeekHint(null); }} onPointerCancel={()=>{ pressedRef.current = false; isDraggingRef.current = false; setSeekHint(null); }} onMouseUp={(e)=>e.target.blur()} onTouchEnd={(e)=>e.target.blur()} onBlur={()=>{ pressedRef.current = false; isDraggingRef.current = false; }} style={{ flex: 1, width: "100%", accentColor: "#6366f1", height: 4 }} />
+              </div>
               <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--muted)", minWidth: 32 }}>{fmtTime(duration)}</span>
               <button type="button" tabIndex={-1} className="btn btn-sm btn-outline-secondary" onClick={toggleFullscreen} title="Fullscreen" style={{ padding: "4px 8px", fontSize: 11 }}><i className="bi bi-arrows-fullscreen" /></button>
             </div>
