@@ -72,6 +72,18 @@ function fmtGapMs(ms) {
   if (!ms || ms <= 0) return "";
   return ms % 60000 === 0 ? `${Math.round(ms / 60000)}m` : `${Math.round(ms / 1000)}s`;
 }
+const DAY_MS = 86400000;
+function fmtAdded(iso) {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return "";
+  const ms = Date.now() - t;
+  if (ms < 60000) return "just now";
+  if (ms < 3600000) return `${Math.floor(ms / 60000)}m ago`;
+  if (ms < DAY_MS) return `${Math.floor(ms / 3600000)}h ago`;
+  if (ms < 30 * DAY_MS) return `${Math.floor(ms / DAY_MS)}d ago`;
+  if (ms < 365 * DAY_MS) return `${Math.floor(ms / (30 * DAY_MS))}mo ago`;
+  return new Date(t).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+}
 
 export default function Dashboard() {
   const { active, completed, logsById, gap, gapWait, paused, pause, resume, setGap, add, remove, retry, retryAll, clearCompleted, clearActive } = useQueue();
@@ -309,6 +321,7 @@ export default function Dashboard() {
                     <span><i className="bi bi-folder2" /> {it.folder || "—"}</span>
                     <span><i className="bi bi-person-circle" /> {it.account || "default"}</span>
                     <span><i className="bi bi-badge-hd" /> {it.maxQuality ? `${it.maxQuality}p` : "best"}</span>
+                    {it.createdAt && <span title={`Added ${new Date(it.createdAt).toLocaleString()}`}><i className="bi bi-clock" /> Added {fmtAdded(it.createdAt)}</span>}
                   </div>
                   <div className="progress" style={{ height: 6, marginTop: 8 }}><div className="progress-bar" style={{ width: `${it.pct || 0}%`, background: barBackground(it.stage), transition: "width .4s ease, background .3s ease" }} /></div>
                     </div>
@@ -322,9 +335,10 @@ export default function Dashboard() {
                 <div style={{ display: "grid", gap: 10, minWidth: 0 }}>
                   {completed.map((it) => (
                     <div key={it.id} id={`dash-file-${it.id}`} data-filepath={it.filePath} className={`queue-card ${it.status}`} style={{ overflow: "hidden", minWidth: 0, cursor: it.status === "done" && it.filePath ? "pointer" : "default" }} onClick={() => { if (it.status === "done" && it.filePath) { persistHighlightDash(it.id); setViewerFile(it); } }}>
-                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                         <span className={`badge ${it.status === "done" ? "text-bg-success" : "text-bg-danger"} badge-dot`}>{it.status}</span>
                         <span className="small" style={{ color: "var(--muted)" }}>{it.stage}</span>
+                        {(it.finishedAt || it.createdAt) && <span className="small" style={{ color: "var(--muted)", whiteSpace: "nowrap" }} title={`${it.status === "done" ? "Downloaded" : "Finished"} ${new Date(it.finishedAt || it.createdAt).toLocaleString()}`}><i className="bi bi-clock" /> {it.status === "done" ? "Downloaded" : "Finished"} {fmtAdded(it.finishedAt || it.createdAt)}</span>}
                         <span style={{ flex: 1 }} />
                         {it.status === "error" && <button className="btn btn-sm btn-outline-secondary" onClick={(e) => { e.stopPropagation(); retry(it.id); }}><i className="bi bi-arrow-counterclockwise" /> Retry</button>}
                         <button className="btn btn-sm btn-outline-secondary" onClick={(e) => { e.stopPropagation(); remove(it.id); }} title="Remove entry only — keeps file in /media"><i className="bi bi-x-lg" /> Remove</button>

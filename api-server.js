@@ -13,6 +13,7 @@ const { generatePosterThumbnail, selectPosterTargets, posterStemOf, isVideoFileN
 const { WebSocketServer } = require("ws");
 const http = require("http");
 const { EventEmitter } = require("events");
+const { getStatus: getUpdateStatus, performUpdate } = require("./updater");
 
 const ffmpegBin =
   process.env.FFMPEG_BIN ||
@@ -59,6 +60,7 @@ let jobCounter = 0;
 let activeJob = null;
 let scanActiveJob = null;
 let queueActiveJob = null;
+let updateRunning = false;
 const scanningUrls = new Set();
 let sharedBrowser = null;
 let browserInitPromise = null;
@@ -2449,6 +2451,33 @@ app.post("/api/config", async (req, res) => {
     if (key === "UI_PANEL_PASSWORD") UI_PANEL_PASSWORD = String(value).trim();
     res.json({ ok: true, key, value });
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+app.get("/api/update/status", async (_req, res) => {
+  try {
+    res.json(await getUpdateStatus());
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post("/api/update", async (_req, res) => {
+  if (updateRunning) return res.status(409).json({ ok: false, error: "An update is already running" });
+  updateRunning = true;
+  try {
+    const result = await performUpdate();
+    console.log(`[update] ${result.method} update -> ${result.commitShort || "?"} — restarting`);
+    res.json({ ok: true, ...result, restarting: true });
+    // Restart once the response is flushed: the process is PID 1's child, so
+    // exiting makes docker bring the container back (restart: unless-stopped).
+    res.once("finish", () => setTimeout(() => { shuttingDown = true; process.exit(0); }, 250));
+  } catch (e) {
+    updateRunning = false;
+    const code = e.code || null;
+    const httpStatus = code === "DIRTY" || code === "AHEAD" || code === "COLLIDE" || code === "NOGIT" || code === "NOREMOTE" ? 409 : 500;
+    console.log(`[update] failed (${code || "ERROR"}): ${e.message}`);
+    res.status(httpStatus).json({ ok: false, error: e.message, code, changes: e.changes || null, dirtyCount: e.dirtyCount ?? null });
+  }
 });
 
 app.get("/accounts", async (_req, res) => {

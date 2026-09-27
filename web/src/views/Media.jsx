@@ -612,7 +612,50 @@ export default function Media() {
     const base = inPlaylistView && playlistItemsForView ? playlistItemsForView : items;
     return applyViewOrder(base);
   })();
-  const viewable = filtered.filter((it) => !it.dir);
+  // Pile grouping, independent of the measured grid width: a stack with 2+
+  // visible members collapses into ONE cell that takes the slot of its first
+  // member, and the other members' slots disappear. Shared by the grid
+  // renderer and the viewer list so both agree on what "next" is. Null = no
+  // grouping (list view, playlist, non-Gallery sorts); callers fall back to
+  // plain file order.
+  const pileSeq = useMemo(() => {
+    if (inPlaylistView || !stacksActive) return null;
+    const files = filtered.filter((it) => !it.dir);
+    const stackCount = new Map();
+    for (const it of files) {
+      const st = (it.stacks || [])[0];
+      if (st) stackCount.set(st.id, (stackCount.get(st.id) || 0) + 1);
+    }
+    const seq = [];
+    const emitted = new Set();
+    for (const it of files) {
+      if (emitted.has(it)) continue;
+      const st = (it.stacks || [])[0];
+      if (st && stackCount.get(st.id) >= 2) {
+        const members = files.filter((x) => (x.stacks || [])[0]?.id === st.id && !emitted.has(x));
+        if (!members.length) continue;
+        for (const m of members) emitted.add(m);
+        seq.push({ kind: "pile", stackId: st.id, st, members });
+        continue;
+      }
+      seq.push({ kind: "file", it });
+    }
+    return seq;
+  }, [filtered, inPlaylistView, stacksActive]);
+  // The viewer's list, in the order the grid shows: a pile's members are one
+  // contiguous run sitting at the pile's cell. Keeping `filtered` order here
+  // leaves the members at their scattered positions, so next from the file
+  // before a pile shows ONE member and then jumps straight back out to an
+  // unrelated file — the stack looks skipped.
+  const viewable = (() => {
+    if (!pileSeq) return filtered.filter((it) => !it.dir);
+    const out = [];
+    for (const cell of pileSeq) {
+      if (cell.kind === "pile") for (const m of cell.members) out.push(m);
+      else out.push(cell.it);
+    }
+    return out;
+  })();
   const isEmptyForList = filtered.length === 0 && (!folder ? playlists.length === 0 : true);
   const filtersActive = type !== "all" || filter.trim() !== "";
   // Missing folder on disk (API 400 ENOENT) with nothing loaded.
@@ -2259,45 +2302,25 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
   // A pile cell groups 2+ visible members of the same stack into one grid slot.
   const gridVisible = useMemo(() => {
     if (!isGrid || !gridW) return [];
-    if (inPlaylistView) {
-      return filtered.filter((it) => !it.dir).map((it) => ({ kind: "file", it, key: rowKey(it), w: 0, h: GRID_TARGET_H }));
-    }
-    const files = filtered.filter((it) => !it.dir);
-    // Non-Gallery sorts (Name/Size/Time) show files flat, one per tile, in
-    // their sorted order — no pile grouping, no stacks UI.
-    if (!stacksActive) {
-      return files.map((it) => ({ kind: "file", it, key: rowKey(it), w: 0, h: GRID_TARGET_H }));
-    }
-    // Count visible members per stack id
-    const stackCount = new Map();
-    for (const it of files) {
-      const st = (it.stacks || [])[0];
-      if (st) stackCount.set(st.id, (stackCount.get(st.id) || 0) + 1);
-    }
+    const fileCell = (it) => ({ kind: "file", it, key: rowKey(it), w: 0, h: GRID_TARGET_H });
+    // No pile grouping (playlist view, list view, non-Gallery sorts): files
+    // render flat, one per tile, in their sorted order.
+    if (!pileSeq) return filtered.filter((it) => !it.dir).map(fileCell);
     const seq = [];
-    const emitted = new Set();
-    for (const it of files) {
-      if (emitted.has(it)) continue;
-      const st = (it.stacks || [])[0];
-      if (st && stackCount.get(st.id) >= 2) {
-        const members = files.filter((x) => (x.stacks || [])[0]?.id === st.id && !emitted.has(x));
-        if (!members.length) continue;
-        // Mark all members as emitted
-        for (const m of members) emitted.add(m);
-        if (spreadStackId === st.id || stacksMode === "open" || closingSpreadId === st.id) {
-          // Spread (or closing/ open-all): show members as normal tiles (closing anim handled separately)
-          for (const m of members) seq.push({ kind: "file", it: m, key: rowKey(m), w: 0, h: GRID_TARGET_H, closing: closingSpreadId === st.id });
-        } else {
-          // Pile: one cell containing up to 4 stacked cards
-          const stack = folderStacks.find((s) => s.id === st.id);
-          seq.push({ kind: "pile", stackId: st.id, stackName: (stack && stack.name) || st.name, stack: stack || { id: st.id, name: st.name, count: st.count }, members, count: members.length, key: `stack:${st.id}` });
-        }
-        continue;
+    for (const cell of pileSeq) {
+      if (cell.kind === "file") { seq.push(fileCell(cell.it)); continue; }
+      const sid = cell.stackId;
+      if (spreadStackId === sid || stacksMode === "open" || closingSpreadId === sid) {
+        // Spread (or closing/ open-all): show members as normal tiles (closing anim handled separately)
+        for (const m of cell.members) seq.push({ ...fileCell(m), closing: closingSpreadId === sid });
+      } else {
+        // Pile: one cell containing up to 4 stacked cards
+        const stack = folderStacks.find((s) => s.id === sid);
+        seq.push({ kind: "pile", stackId: sid, stackName: (stack && stack.name) || cell.st.name, stack: stack || { id: sid, name: cell.st.name, count: cell.st.count }, members: cell.members, count: cell.members.length, key: `stack:${sid}` });
       }
-      seq.push({ kind: "file", it, key: rowKey(it), w: 0, h: GRID_TARGET_H });
     }
     return seq;
-  }, [isGrid, gridW, filtered, inPlaylistView, spreadStackId, closingSpreadId, stacksMode, folderStacks, stacksActive]);
+  }, [isGrid, gridW, filtered, pileSeq, spreadStackId, closingSpreadId, stacksMode, folderStacks]);
   // Adjacency guarantee for stack border colors: side-by-side stacks must be
   // distinguishable, so any stack whose cached color is too close (along the
   // gradient) to the color of the stack rendered right beside it gets re-rolled.
@@ -3364,7 +3387,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
           } catch {}
         }}
         title={isCustomReorder ? `${stackName} — ${count} files — drag to reorder` : `${stackName} — ${count} files`}
-        style={{ position: "relative", display: "flex", flexDirection: "row", alignItems: "stretch", width: memberW + PEEK * (members.length - 1), height: GRID_TARGET_H, flex: "0 0 auto", cursor: isCustomReorder ? "grab" : "pointer", borderRadius: 10, outline: pileOutline, userSelect: "none", WebkitUserSelect: "none", touchAction: "manipulation" }}
+        style={{ position: "relative", zIndex: 1, display: "flex", flexDirection: "row", alignItems: "stretch", width: memberW + PEEK * (members.length - 1), height: GRID_TARGET_H, flex: "0 0 auto", cursor: isCustomReorder ? "grab" : "pointer", borderRadius: 10, outline: pileOutline, userSelect: "none", WebkitUserSelect: "none", touchAction: "manipulation" }}
       >
         {pileDropSide && (
           <div style={{ position: "absolute", top: 0, bottom: 0, [pileDropSide]: -3, width: 4, borderRadius: 2, background: "var(--accent)", zIndex: 10, pointerEvents: "none" }} />
