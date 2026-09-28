@@ -76,6 +76,44 @@ const TRACK_HOLD_MS = 350;
 // where the subject was predicted to be. The subject then never actually gets
 // picked up, it lags behind fast movement, and it is eventually declared lost.
 const TRACK_STICK = 6;
+// How far out a match has to be before it is treated as a candidate for somewhere
+// else in the frame rather than as the subject having moved, and how many frames
+// running it then has to come back to the same place before the point, the
+// template and the fingerprint are allowed to go there. Past this distance the
+// template is a poor guide anyway -- it is a flat SSD patch, so a subject that is
+// turning brings up a fresh best match somewhere else on itself every frame, and
+// a subject with any repeated structure on it brings up a second, equally good
+// one. Adopting those on sight is what made the view jump between two positions:
+// whichever of them won last frame became the template for this one, so the two
+// took turns. Holding the lock until a candidate agrees with itself over
+// consecutive frames leaves the following of a subject that genuinely moved
+// untouched -- that motion is continuous, so it agrees immediately -- and only
+// refuses the alternation, which never does.
+const TRACK_LOCK_FAR = 30;
+// Two frames running, not one: a single frame cannot tell a candidate that is
+// going to stay from one that is going to be replaced next frame, which is the
+// whole of what has to be told apart here.
+const TRACK_LOCK_RUN = 2;
+// How close together two consecutive candidates have to be to count as the same
+// candidate. It grows with the tracked speed, because a subject that is really
+// moving does not come back to the same pixel, and a fixed window would make a
+// fast subject look like an alternating one.
+const TRACK_LOCK_AGREE = 8;
+// Foreground tracking. The foreground is whatever is in front of the
+// background, so nothing here holds a picture of the subject and nothing can go
+// stale when what is on screen is not what was there a moment ago. What is held
+// instead is a picture of the background, and the foreground is what fails to
+// match it.
+const TRACK_FG_BLOCK = 8;      // block size of the background comparison
+const TRACK_FG_DIFF = 9;       // mean luma difference (0-255) that makes a block foreground
+const TRACK_FG_LEARN = 0.16;   // how fast the model is taught background
+const TRACK_FG_DRIFT = 0.01;   // object over a spot whose background is known -- the model barely moves
+const TRACK_FG_UNSEEN = 0.05;  // object over a spot where background was never seen -- best guess allowed to settle
+const TRACK_FG_MASS = 900;     // difference*area needed before there is a subject
+const TRACK_FG_FOLLOW = 0.18;  // how much of the way to the centroid the point moves
+const TRACK_FG_SLEW = 2;      // canvas px the point may travel in one tick, however far the centroid went
+const TRACK_FG_DEAD = 0.05;   // fraction of the short side: centroid jitter below this is ignored
+const TRACK_FG_MISS = 12;      // ticks without a foreground before it is reported gone
 // The clicked subject is fingerprinted once and every later match has to still
 // look like that subject before it is accepted, so the point cannot slide off
 // onto the background -- which is what used to leave it stuck on the spot the
@@ -145,6 +183,14 @@ const TRACK_BG_CLAMP = 0.35;
 const TRACK_BG_DEAD = 0.15;
 const TRACK_BG_LEAK = 0.0012;
 const TRACK_BG_MISS = 10;
+// How long a file with no timeline of its own stays on screen before the end
+// mode moves on. A video or an audio track ends itself by firing `ended`; an
+// image and a file the browser cannot preview have nothing to fire, which left
+// the end mode inert on them and the viewer sitting on the same picture until
+// the user navigated away by hand. The dwell is only a stand-in for that missing
+// end, so it is counted from the file being on screen rather than from its own
+// length: five seconds is about as long as a still is worth looking at.
+const STILL_DWELL_MS = 5000;
 function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
 // Median of an already-sorted array (the caller sorts; don't re-sort here).
 // The mean of the two middle entries, not the upper one: picking a[n>>1] on an
@@ -355,6 +401,401 @@ function refreshGrid(img, st) {
     return p;
   });
 }
+// Per-patch displacement for every grid patch that still looks like itself, and
+// the median of those displacements: the picture moving across most of the frame
+// is the camera moving. Patches that no longer match are left out of the median
+// on purpose, so whatever is changing in the scene cannot drag the camera
+// estimate along with it. Shared, because the background model in foreground
+// tracking is warped by this same number and the two have to agree.
+function gridMotion(img, st) {
+  const gdx = [], gdy = [];
+  for (const g of st.grid) {
+    const px = g.fx + (g.vx || 0), py = g.fy + (g.vy || 0);
+    const gr = bestTemplateSearch(img, { rw: st.rw, rh: st.rh, tpl: g.tpl, tplW: g.tplW, tplH: g.tplH, lum: st.lum }, px, py, false, 28, 60);
+    if (gr.score / (g.tplW * g.tplH) < 3600) {
+      const ddx = gr.x - g.fx, ddy = gr.y - g.fy;
+      if (Math.hypot(ddx, ddy) < TRACK_JUMP) {
+        const np = capturePatch(img, st.rw, st.rh, gr.x, gr.y, 32);
+        g.tpl = np.tpl; g.tplW = np.tplW; g.tplH = np.tplH;
+        g.vx = ddx; g.vy = ddy;
+        g.fx = gr.x; g.fy = gr.y;
+        gdx.push(ddx); gdy.push(ddy);
+      }
+    }
+  }
+  if (gdx.length < 3) return { n: gdx.length, medDx: 0, medDy: 0 };
+  gdx.sort((a, b) => a - b); gdy.sort((a, b) => a - b);
+  return { n: gdx.length, medDx: medOf(gdx), medDy: medOf(gdy) };
+}
+// The tracking helpers are module level but the React state they report to is
+// not, so the setter is parked here by the component on every render and called
+// from inside the tick.
+let reportTrackLost = null;
+// How far the picture moved between the last two frames, over a range wide
+// enough to survive the tracker not running on every frame.
+//
+// The grid template match is measured for the background mode, where the motion
+// per tick is small and a patch that moved more than TRACK_JUMP has stopped
+// being background. Here a tick can cover several frames of camera movement at
+// once whenever the page is slow, and the picture still has to be lined up or
+// every pixel reads as foreground and the centroid is the middle of the frame.
+// So it is estimated from a heavily reduced copy of the frame by brute-force
+// translation, coarse step then fine. The whole frame votes on it, which is
+// also why it is safe: something moving inside the frame is part of the
+// residual it leaves behind, not part of the answer.
+function globalMotion(st, lum) {
+  const rw = st.rw, rh = st.rh;
+  const lw = Math.max(16, Math.round(rw / 4)), lh = Math.max(16, Math.round(rh / 4));
+  const n = lw * lh;
+  let lo = st.loBuf;
+  if (!lo || lo.length !== n) { lo = new Float32Array(n); st.loBuf = lo; st.prevLo = null; }
+  for (let y = 0; y < lh; y++) {
+    const y0 = Math.min(rh - 1, y * rh / lh | 0), y1 = Math.min(rh, y0 + Math.max(1, (rh / lh) | 0));
+    for (let x = 0; x < lw; x++) {
+      const x0 = Math.min(rw - 1, x * rw / lw | 0), x1 = Math.min(rw, x0 + Math.max(1, (rw / lw) | 0));
+      let s = 0, c = 0;
+      for (let yy = y0; yy < y1; yy++) { const row = yy * rw; for (let xx = x0; xx < x1; xx++) { s += lum[row + xx]; c++; } }
+      lo[y * lw + x] = c ? s / c : 0;
+    }
+  }
+  if (!st.prevLo || st.prevLo.length !== n) { st.prevLo = lo.slice(); return { dx: 0, dy: 0 }; }
+  const prev = st.prevLo;
+  const score = (dx, dy, step) => {
+    let s = 0, c = 0;
+    for (let y = 2; y < lh - 2; y += step) {
+      const pr = (y - dy) * lw, cr = y * lw;
+      for (let x = 2; x < lw - 2; x += step) { const p = pr + x - dx; if (p < 0 || p >= n) continue; const d = lo[cr + x] - prev[p]; s += d < 0 ? -d : d; c++; }
+    }
+    return c ? s / c : Infinity;
+  };
+  let bd = 0, be = 0, bv = Infinity;
+  for (let dy = -12; dy <= 12; dy += 4) for (let dx = -12; dx <= 12; dx += 4) { const s = score(dx, dy, 2); if (s < bv) { bv = s; bd = dx; be = dy; } }
+  for (let dy = be - 3; dy <= be + 3; dy++) for (let dx = bd - 3; dx <= bd + 3; dx++) { const s = score(dx, dy, 1); if (s < bv) { bv = s; bd = dx; be = dy; } }
+  prev.set(lo);
+
+  // The quarter-size picture can only answer in quarter-size pixels, and a
+  // quarter of this frame is four whole pixels. When the camera moves slowly --
+  // which is the normal case, a couple of pixels between ticks -- that rounds
+  // the real movement to nothing, or to four pixels when it was two, and the
+  // model gets warped by the wrong amount either way. A model compared against
+  // the wrong place looks foreground everywhere, and the block verdicts flip as
+  // the error changes, which is what shakes the view. So the coarse answer is
+  // only used to get close, and the last few pixels are measured at full size.
+  let prevL = st.prevLum;
+  if (!prevL || prevL.length !== rw * rh) { prevL = new Float32Array(rw * rh); prevL.set(lum); st.prevLum = prevL; return { dx: 0, dy: 0 }; }
+  const near = (dx, dy) => {
+    let s = 0, c = 0;
+    for (let y = 3; y < rh - 3; y += 3) {
+      const pr = (y - dy) * rw, cr = y * rw;
+      for (let x = 3; x < rw - 3; x += 3) { const p = pr + x - dx; if (p < 0 || p >= prevL.length) continue; const d = lum[cr + x] - prevL[p]; s += d < 0 ? -d : d; c++; }
+    }
+    return c ? s / c : Infinity;
+  };
+  let fx = bd * (rw / lw), fy = be * (rh / lh);
+  let fd = fx, fe = fy, fv = Infinity;
+  const R = 5;
+  for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) { const s = near(fx + dx, fy + dy); if (s < fv) { fv = s; fd = fx + dx; fe = fy + dy; } }
+  prevL.set(lum);
+  return { dx: fd, dy: fe };
+}
+// Foreground as "the background stops matching here".
+//
+// This replaces comparing a frame against a stored picture of the background,
+// which cannot work on this material: between two samples the camera moves far
+// enough that even after lining the frames up, most of the frame still reads as
+// changed, so an absolute difference threshold finds foreground everywhere and
+// its "centre" is just the middle of the picture. Matching small patches of
+// background asks a question that does not have that failure: this bit of scene,
+// is it still the same bit of scene? Camera movement is answered by each patch
+// looking a short distance for itself, and a uniform change of light moves every
+// patch's score together, so the score a patch has to beat to count as foreground
+// is read off the other patches in the same frame. Nothing here is a fixed
+// brightness, which is what a 3D object turning in front of the lens needs: every
+// side of it is new, and none of them is the background, so all of them score as
+// foreground whichever way it is facing.
+const FG_PATCH = 16;      // side of a background patch
+const FG_STEP = 2;        // pixels between the samples taken inside a patch
+const FG_GRID = 20;       // distance between patch centres
+const FG_RAD = 6;         // how far a patch looks for itself
+const FG_SSTEP = 2;       // pixels between the positions a patch tries
+const FG_MUL = 2.2;       // times the frame's own background score to count as foreground
+const FG_ADD = 25;        // ...or this much over it, whichever is more
+const FG_MINPATCH = 2;    // fewer foreground patches than this and there is no subject
+const FG_MASS = 260;      // total mismatch needed before there is a subject
+function fgCapture(lum, rw, x, y) {
+  const t = new Int32Array((FG_PATCH / FG_STEP) * (FG_PATCH / FG_STEP));
+  let n = 0;
+  for (let j = 0; j < FG_PATCH; j += FG_STEP) { const r = (y + j) * rw; for (let i = 0; i < FG_PATCH; i += FG_STEP) t[n++] = lum[r + x + i]; }
+  return t;
+}
+function fgMatch(lum, rw, rh, t, x, y) {
+  let best = Infinity, bx = 0, by = 0;
+  for (let dy = -FG_RAD; dy <= FG_RAD; dy += FG_SSTEP) {
+    const py = y + dy;
+    if (py < 0 || py + FG_PATCH > rh) continue;
+    for (let dx = -FG_RAD; dx <= FG_RAD; dx += FG_SSTEP) {
+      const px = x + dx;
+      if (px < 0 || px + FG_PATCH > rw) continue;
+      let s = 0, k = 0;
+      for (let j = 0; j < FG_PATCH; j += FG_STEP) { const r = (py + j) * rw; for (let i = 0; i < FG_PATCH; i += FG_STEP, k++) { const d = lum[r + px + i] - t[k]; s += d < 0 ? -d : d; } }
+      if (s < best) { best = s; bx = dx; by = dy; }
+    }
+  }
+  return { dx: bx, dy: by, score: best === Infinity ? 1e9 : best };
+}
+function buildFgPatches(st, lum) {
+  const rw = st.rw, rh = st.rh, m = FG_PATCH + 2;
+  const xs = [], ys = [];
+  for (let x = m; x + FG_PATCH + m <= rw; x += FG_GRID) xs.push(x);
+  for (let y = m; y + FG_PATCH + m <= rh; y += FG_GRID) ys.push(y);
+  st.pgCols = xs.length; st.pgRows = ys.length;
+  st.patches = [];
+  for (let r = 0; r < ys.length; r++) for (let c = 0; c < xs.length; c++) {
+    st.patches.push({ c, r, x: xs[c], y: ys[r], t: fgCapture(lum, rw, xs[c], ys[r]), mx: 0, my: 0, score: 0, w: 0 });
+  }
+}
+function trackPatches(st, lum) {
+  const rw = st.rw, rh = st.rh;
+  if (!st.patches || !st.patches.length) { buildFgPatches(st, lum); return; }
+  const P = st.patches;
+  // Each patch looks for itself near where it was last seen, moved by the
+  // camera's last known motion so the search is a short one.
+  for (const p of P) {
+    const r = fgMatch(lum, rw, rh, p.t, p.x + p.mx, p.y + p.my);
+    p.nx = p.x + p.mx + r.dx; p.ny = p.y + p.my + r.dy; p.score = r.score;
+  }
+  const scores = P.map(p => p.score).sort((a, b) => a - b);
+  // What an undisturbed patch scores in this frame is the yardstick, read off
+  // the low end so a large subject cannot raise the bar for itself.
+  const base = scores[Math.floor(scores.length * 0.4)] || 1;
+  const cut = Math.max(base * FG_MUL, base + FG_ADD);
+  // The camera is what most of the picture is doing, so it is the median move of
+  // the patches that still match -- the ones that stopped matching are left out
+  // on purpose, or the subject would be taken for camera movement.
+  const gx = [], gy = [];
+  const P2 = P.length;
+  for (let i = 0; i < P2; i++) {
+    const p = P[i];
+    p.w = p.score <= cut ? 0 : p.score - cut;
+    if (p.w) { p.nx = p.x + p.mx; p.ny = p.y + p.my; continue; }
+    const dx = p.nx - p.x, dy = p.ny - p.y;
+    if (Math.hypot(dx, dy) < 40) { gx.push(dx); gy.push(dy); }
+    p.x = p.nx; p.y = p.ny; p.mx = 0; p.my = 0;
+    // Still background, so this is the fresh version of it. A patch that did
+    // not match keeps the template it had, which is the background the subject
+    // is standing in front of.
+    if (p.score <= base * 1.6) p.t = fgCapture(lum, rw, p.x, p.y);
+  }
+  if (gx.length >= 3) { gx.sort((a, b) => a - b); gy.sort((a, b) => a - b); st.mx = medOf(gx); st.my = medOf(gy); }
+  else { st.mx = 0; st.my = 0; }
+  // Averaged over each patch's neighbours before anything is decided. Patches
+  // that have stopped matching on their own are noise -- a highlight, a bit of
+  // compression, a place where the picture moves more than one patch can follow
+  // -- and averaging leaves the patches that have stopped matching *together*,
+  // which is what a subject looks like and what a scatter of noise is not. The
+  // centre is then taken over the dense part only, so a few loud patches out on
+  // the edge of the picture cannot swing it.
+  const cols = st.pgCols, rows = st.pgRows;
+  const sm = new Float64Array(P2);
+  let smMax = 0, smSum = 0;
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    let s = 0, n = 0;
+    for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+      const rr = r + dr, cc = c + dc;
+      if (rr < 0 || cc < 0 || rr >= rows || cc >= cols) continue;
+      s += P[rr * cols + cc].w; n++;
+    }
+    const v = s / n;
+    sm[r * cols + c] = v; smSum += v; if (v > smMax) smMax = v;
+  }
+  const bar = Math.max(smSum / P2, smMax * 0.55);
+  let mass = 0, cx = 0, cy = 0, nfg = 0;
+  for (let i = 0; i < P2; i++) {
+    if (sm[i] < bar || !P[i].w) continue;
+    mass += sm[i]; nfg++;
+    cx += P[i].nx * sm[i]; cy += P[i].ny * sm[i];
+  }
+  if (nfg < FG_MINPATCH || mass < FG_MASS) {
+    st.misses++;
+    st.vx *= 0.9; st.vy *= 0.9;
+    if (!st.lost && st.misses >= TRACK_FG_MISS) { st.lost = true; st.vx = 0; st.vy = 0; reportTrackLost(true); }
+    else if (st.lost) reportTrackLost(true);
+    return;
+  }
+  // Rounded, for the same reason as before: finer than a pixel is noise, and a
+  // sub-pixel point makes a sub-pixel pan every frame, which shivers.
+  const nfx = Math.round(cx / mass), nfy = Math.round(cy / mass);
+  if (st.fx < 0 || st.fy < 0) { st.fx = nfx; st.fy = nfy; st.vx = 0; st.vy = 0; }
+  else {
+    // The deadband is wide and the follow is slow, and the point is not allowed
+    // to travel more than a couple of pixels a tick towards what it is being
+    // shown. The thing being shown is a weighted centre of whatever has stopped
+    // matching, and that can step a long way in one tick when the picture
+    // changes -- following it closely turns every one of those steps into
+    // movement on screen. Damping it here means a genuine move is still followed,
+    // a few frames later, and a jump is not turned into a shake.
+    const dead = Math.max(3, Math.round(Math.min(rw, rh) * TRACK_FG_DEAD));
+    let ddx = nfx - st.fx, ddy = nfy - st.fy;
+    if (ddx > -dead && ddx < dead) ddx = 0; else ddx = ddx > 0 ? ddx - dead : ddx + dead;
+    if (ddy > -dead && ddy < dead) ddy = 0; else ddy = ddy > 0 ? ddy - dead : ddy + dead;
+    st.vx = st.vx * 0.5 + ddx * 0.5; st.vy = st.vy * 0.5 + ddy * 0.5;
+    ddx = ddx * TRACK_FG_FOLLOW; ddy = ddy * TRACK_FG_FOLLOW;
+    const step = Math.hypot(ddx, ddy);
+    if (step > TRACK_FG_SLEW) { ddx = ddx / step * TRACK_FG_SLEW; ddy = ddy / step * TRACK_FG_SLEW; }
+    st.fx += ddx; st.fy += ddy;
+  }
+  st.misses = 0;
+  if (st.lost) { st.lost = false; reportTrackLost(false); }
+}
+function buildLum(img, st) {
+  const len = st.rw * st.rh;
+  let lum = st.lum;
+  if (!lum || lum.length < len) { lum = new Int32Array(len); st.lum = lum; }
+  const d = img.data;
+  for (let n = 0, fi = 0; fi < d.length; fi += 4, n++) lum[n] = (d[fi] * 3 + d[fi + 1] * 6 + d[fi + 2]) >> 3;
+  return lum;
+}
+function seedFgModel(lum, st) {
+  const n = st.rw * st.rh;
+  if (!st.bgA || st.bgA.length !== n) { st.bgA = new Float32Array(n); st.bgB = new Float32Array(n); st.bgKnown = new Uint8Array(n); }
+  for (let i = 0; i < n; i++) { st.bgA[i] = lum[i]; st.bgB[i] = lum[i]; st.bgKnown[i] = 0; }
+  st.fgSeeded = true;
+}
+// Find the foreground and leave it on st.fx/st.fy, which is all the rest of the
+// tracking path ever wanted to know: where the point it should centre is.
+//
+// Nothing is compared against a picture of the subject. The model is a picture
+// of the background, so a subject that is not the same shape it was a second
+// ago, or the same colour, or facing the other way, is not a worse match for
+// being any of those things. It is the one thing about the old approach that
+// could not be tuned around, and it is gone because nothing depends on it now.
+//
+// The comparison has to survive a moving camera or every pixel reads as
+// foreground and the centroid is just the middle of the frame. So the model is
+// world-locked: each tick it is warped by the camera displacement the grid
+// measured, which puts the world's content back where the camera left it, and
+// only then compared. Where that warp runs off the edge the camera has just
+// revealed new ground, there is no history for it, so those blocks are seeded
+// from the frame and left out of the judgement this tick.
+//
+// The model is only ever taught background, and foreground blocks still creep
+// towards the frame very slowly. That creep is what stops something which stops
+// moving from being reported as foreground for ever: it is no longer moving
+// against the background, it is the background.
+function trackForeground(st, lum, camDx, camDy) {
+  const rw = st.rw, rh = st.rh;
+  if (!st.fgSeeded || !st.bgA || st.bgA.length !== rw * rh) seedFgModel(lum, st);
+  const A = st.bgA, B = st.bgB, K = st.bgKnown;
+  const dz = TRACK_FG_BLOCK;
+  // How far the content moved, held to a few blocks so one bad estimate cannot
+  // shift the model a long way. The model's copy of the world is indexed by
+  // where things were when it was written, so the content now on screen at x was
+  // last seen at x - dx: the sample has to come from behind, not in front.
+  const dx = clamp(camDx || 0, -dz, dz) | 0, dy = clamp(camDy || 0, -dz, dz) | 0;
+  const Bsz = TRACK_FG_BLOCK;
+  const nx = Math.max(1, Math.floor(rw / Bsz)), ny = Math.max(1, Math.floor(rh / Bsz));
+  const fgb = [];
+  for (let by = 0; by < ny; by++) {
+    const y0 = by * Bsz, y1 = Math.min(y0 + Bsz, rh);
+    for (let bx = 0; bx < nx; bx++) {
+      const x0 = bx * Bsz, x1 = Math.min(x0 + Bsz, rw);
+      // The model's copy of this block is only readable if the sample stayed inside it.
+      const readable = x0 - dx >= 0 && y0 - dy >= 0 && x1 - dx <= rw && y1 - dy <= rh;
+      let sum = 0;
+      for (let y = y0; y < y1; y++) {
+        const row = y * rw, mrow = (y - dy) * rw;
+        for (let x = x0; x < x1; x++) { const dd = lum[row + x] - A[mrow + x - dx]; sum += dd < 0 ? -dd : dd; }
+      }
+      const isFg = readable && sum / ((x1 - x0) * (y1 - y0)) > TRACK_FG_DIFF;
+      if (isFg) fgb.push(bx, by);
+      if (!readable) {
+        // The warp ran off the edge, so there is no history to compare against
+        // and none to keep: the frame that lands here becomes the model again,
+        // and this spot counts as never having been seen.
+        for (let y = y0; y < y1; y++) { const row = y * rw; for (let x = x0; x < x1; x++) { B[row + x] = lum[row + x]; K[row + x] = 0; } }
+      } else if (isFg) {
+        // Something is standing here. The model is left alone, which is the whole
+        // point: what is on screen is the object, and a model that is taught to
+        // expect the object stops being able to tell the object from the scene.
+        // That matters most for something that turns. The front and the back of
+        // a turning object look nothing alike, and if the front has been written
+        // into the model as background then the back is simply more of it; it is
+        // held as one object either way, because neither face matches the scene
+        // behind it. The scene the model holds here is the scene from before the
+        // object arrived, which is the right scene to still be holding.
+        for (let y = y0; y < y1; y++) {
+          const row = y * rw, mrow = (y - dy) * rw;
+          for (let x = x0; x < x1; x++) {
+            // A spot whose background was never actually seen -- the object was
+            // already there when tracking began -- has nothing better to hold, so
+            // it is allowed to settle towards what is on screen instead. Only
+            // slowly: a face the object turns to is new, and a model that reaches
+            // it before the object turns away has swallowed the object whole.
+            const a = K[row + x] ? TRACK_FG_DRIFT : TRACK_FG_UNSEEN;
+            B[row + x] += (lum[row + x] - A[mrow + x - dx]) * a;
+          }
+        }
+      } else {
+        // Real background, seen with the object's own pixels nowhere near it. This
+        // is the only thing that is allowed to teach the model, and once a spot
+        // has been seen as background it is never unmarked, so the object can
+        // cover it and uncover it as often as it likes.
+        for (let y = y0; y < y1; y++) {
+          const row = y * rw, mrow = (y - dy) * rw;
+          for (let x = x0; x < x1; x++) { B[row + x] += (lum[row + x] - A[mrow + x - dx]) * TRACK_FG_LEARN; K[row + x] = 1; }
+        }
+      }
+    }
+  }
+  // Weighted centroid over the pixels, not the block centres. A block centre is
+  // quantised to the block, and a subject a few blocks across would step with it.
+  let cx = 0, cy = 0, mass = 0;
+  for (let i = 0; i < fgb.length; i += 2) {
+    const x0 = fgb[i] * Bsz, x1 = Math.min(x0 + Bsz, rw), y0 = fgb[i + 1] * Bsz, y1 = Math.min(y0 + Bsz, rh);
+    for (let y = y0; y < y1; y++) {
+      const row = y * rw, mrow = (y - dy) * rw;
+      for (let x = x0; x < x1; x++) {
+        const dd = lum[row + x] - A[mrow + x - dx];
+        const wt = (dd < 0 ? -dd : dd) - TRACK_FG_DIFF;
+        if (wt > 0) { cx += x * wt; cy += y * wt; mass += wt; }
+      }
+    }
+  }
+  st.bgA = B; st.bgB = A;
+  if (mass >= TRACK_FG_MASS) {
+    // Rounded to whole canvas pixels. The centroid is a weighted mean of a grid
+    // of block verdicts, so the part of it finer than a pixel is noise, and a
+    // sub-pixel point makes a sub-pixel pan on every frame -- which is exactly
+    // the fine shivering this is here to stop.
+    const nfx = Math.round(cx / mass), nfy = Math.round(cy / mass);
+    if (st.fx < 0 || st.fy < 0) { st.fx = nfx; st.fy = nfy; st.vx = 0; st.vy = 0; }
+    else {
+      // Follow the centroid a fixed fraction of the way each tick, and ignore
+      // movement smaller than a deadband first. The centroid of a real subject
+      // wanders a pixel or two from frame to frame as the block verdicts flip
+      // under it; without the band that wander is chased in full and the view
+      // shivers. The band is taken off the error rather than zeroing it, so the
+      // point is pulled to the edge of the band and then holds still there
+      // instead of oscillating inside it -- and the subject is still centred to
+      // within the band rather than drifting off over time.
+      const dead = Math.max(2, Math.round(Math.min(rw, rh) * TRACK_FG_DEAD));
+      let ddx = nfx - st.fx, ddy = nfy - st.fy;
+      if (ddx > -dead && ddx < dead) ddx = 0; else ddx = ddx > 0 ? ddx - dead : ddx + dead;
+      if (ddy > -dead && ddy < dead) ddy = 0; else ddy = ddy > 0 ? ddy - dead : ddy + dead;
+      st.vx = st.vx * 0.5 + ddx * 0.5; st.vy = st.vy * 0.5 + ddy * 0.5;
+      st.fx += ddx * TRACK_FG_FOLLOW; st.fy += ddy * TRACK_FG_FOLLOW;
+    }
+    st.misses = 0;
+    if (st.lost) { st.lost = false; reportTrackLost(false); }
+  } else {
+    // Nothing in front of the background. The point stays where it was, so the
+    // view holds still rather than wandering, and the velocity decays on its own.
+    st.misses++;
+    st.vx *= 0.9; st.vy *= 0.9;
+    if (!st.lost && st.misses >= TRACK_FG_MISS) { st.lost = true; st.vx = 0; st.vy = 0; reportTrackLost(true); }
+    else if (st.lost) reportTrackLost(true);
+  }
+}
 function ssdAt(lum, st, base) {
   const tpl = st.tpl, tplW = st.tplW, tplH = st.tplH, rw = st.rw;
   let vi = 0, s = 0;
@@ -490,19 +931,11 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const [isFs, setIsFs] = useState(false);
   const [tracking, setTracking] = useState(false);
   const [trackLost, setTrackLost] = useState(false);
+  // The tracker runs outside React, on a rAF/video-frame callback, and the
+  // helpers it calls live at module level, so the setter is handed to them
+  // rather than imported. See reportTrackLost.
+  reportTrackLost = setTrackLost;
   const [trackBg, setTrackBg] = useState(false);
-  const [trackHover, setTrackHover] = useState(false);
-  const [dotVisible, setDotVisible] = useState(false);
-  const dotTimerRef = useRef(0);
-  const pokeDot = () => {
-    setDotVisible(true);
-    if (dotTimerRef.current) clearTimeout(dotTimerRef.current);
-    dotTimerRef.current = setTimeout(() => setDotVisible(false), 400);
-  };
-  const [trackMiss, setTrackMiss] = useState(false);
-  const missTimerRef = useRef(0);
-  const [trackArmed, setTrackArmed] = useState(false);
-  const trackArmedRef = useRef(false);
   const trackingRef = useRef(false);
   const trackGenRef = useRef(0);
   const trackViewRef = useRef({ tracking: false, zoom: 1, pan: { x: 0, y: 0 }, transform: "" });
@@ -561,7 +994,9 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const [duration, setDuration] = useState(0);
   const [seekFrames, setSeekFrames] = useState(() => { try { return localStorage.getItem("xdl_viewer_seekFrames") === "1"; } catch { return false; } });
   const [muted, setMuted] = useState(() => { try { return localStorage.getItem("xdl_viewer_muted") === "1"; } catch { return false; } });
-  const [trackPref, setTrackPref] = useState(() => { try { const p = localStorage.getItem("xdl_viewer_track"); return p === "bg" || p === "point" ? p : "none"; } catch { return "none"; } });
+  // "point" is the old placed-subject mode, which is gone: anyone who had that
+  // stored gets the foreground mode, which is what replaced it.
+  const [trackPref, setTrackPref] = useState(() => { try { const p = localStorage.getItem("xdl_viewer_track"); return p === "bg" || p === "fg" || p === "point" ? (p === "point" ? "fg" : p) : "none"; } catch { return "none"; } });
   const [endMode, setEndMode] = useState(() => { try { const v = localStorage.getItem("xdl_viewer_endMode"); if (v === "stop") return "next"; if (v === "repeat" || v === "random") return v; return "none"; } catch { return "none"; } });
   const [randHistory, setRandHistory] = useState([]);
   const [randCursor, setRandCursor] = useState(-1);
@@ -583,6 +1018,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const yConfirmTimerRef = useRef(null);
   const doDeleteFileRef = useRef(null);
   const startBgRef = useRef(null);
+  const startFgRef = useRef(null);
   const cycleTrackRef = useRef(null);
   const autoCenterToggleRef = useRef(null);
   const recenterRef = useRef(null);
@@ -676,9 +1112,6 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     setTracking(false);
     setTrackLost(false);
     setTrackBg(false);
-    setTrackHover(false);
-    if (dotTimerRef.current) clearTimeout(dotTimerRef.current);
-    setDotVisible(false);
     setZoom(1);
     setOrigin("50% 50%");
     setPan({ x: 0, y: 0 });
@@ -876,6 +1309,22 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     el.addEventListener("ended", handler);
     return () => el.removeEventListener("ended", handler);
   }, [loadedUrl]);
+  // The same end mode for a file that never ends by itself. Loop and End stay
+  // no-ops: a still has nothing to replay, and not moving on is what it already
+  // does. Only the two modes that mean "move on" are given a dwell, and they go
+  // through the same dispatch as the buttons, so the random history is walked
+  // forward and back the same way whichever one moved the viewer on.
+  useEffect(() => {
+    if (isVideo || isAudio || gifAsVideoEff) return;
+    const mode = endModeRef.current;
+    if (mode !== "next" && mode !== "random") return;
+    // A file the browser cannot preview never reports itself ready -- there is no
+    // load event to report one -- so its dwell starts once it is on the stage,
+    // while an image has to have actually arrived before its five seconds run.
+    if (!mediaReady && isFormatKnown) return;
+    const timer = setTimeout(() => { if (dispatchNextRef.current) dispatchNextRef.current(); }, STILL_DWELL_MS);
+    return () => clearTimeout(timer);
+  }, [loadedUrl, endMode, isVideo, isAudio, gifAsVideoEff, isFormatKnown, mediaReady]);
   const cycleEndMode = () => setEndMode((m) => m === "none" ? "next" : m === "next" ? "repeat" : m === "repeat" ? "random" : "none");
   const cycleEndModeRef = useRef(cycleEndMode);
   cycleEndModeRef.current = cycleEndMode;
@@ -955,6 +1404,14 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     } else {
       st.fx = -1; st.fy = -1; st.vx = 0; st.vy = 0;
       st.misses = TRACK_BG_MISS; st.lost = true;
+      // The background model describes the frames before the seek, which are not
+      // the frames after it, so it is dropped and seeded again from the frame
+      // that lands. Left in place it would call the whole new shot foreground.
+      st.fgReseed = true;
+      // The pending candidate was found on the frame that has just been replaced,
+      // so confirming it against the new one would adopt a position that was
+      // never on screen.
+      st.lkX = null; st.lkY = null; st.lkRun = 0;
     }
   };
   const handleWheel = (e) => {
@@ -1015,20 +1472,31 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   };
   const resetZoom = () => { setZoom(1); setOrigin("50% 50%"); setPan({x:0,y:0}); };
   const rotateFile = () => setRotate((r) => (r + 90) % 360);
-  const handleStageClick = (e) => {
-    if (!trackArmedRef.current) return;
+
+  useEffect(() => {
+    if (!trackingRef.current) return;
     const v = videoRef.current;
-    if (!v || v.tagName !== "VIDEO" || showImageRef.current) return;
-    e.preventDefault();
-    if (!startTracking(e.clientX, e.clientY)) {
-      setTrackMiss(true);
-      if (missTimerRef.current) clearTimeout(missTimerRef.current);
-      missTimerRef.current = setTimeout(() => setTrackMiss(false), 1400);
-    } else {
-      setTrackMiss(false);
-    }
-  };
-  const startTracking = (clientX, clientY) => {
+    if (!v) return;
+    const st = trackStateRef.current;
+    if (!st) return;
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const z = trackViewRef.current.zoom;
+    const rot = rotateRef.current;
+    const pan = st.mode === "bg"
+      ? { x: st.bgX * st.cPerCanvas * z + (st.offX || 0), y: st.bgY * st.cPerCanvas * z + (st.offY || 0) }
+      : computeCenterPan(st, z, rect, rot);
+    trackViewRef.current.pan = pan;
+    trackViewRef.current.transform = `translate(${pan.x}px, ${pan.y}px) rotate(${rot}deg) scale(${z})`;
+    v.style.transform = trackViewRef.current.transform;
+    setPan(pan);
+  }, [rotate]);
+
+  // Foreground tracking. The same shape as the BG one -- same canvas, same
+  // capture size, same pan write -- and the difference is what the tick does
+  // with the frame: it does not look for a subject, it looks for what is not
+  // background, and nothing has to be placed or picked first.
+  const startFgTracking = () => {
     const v = videoRef.current;
     if (!v || v.tagName !== "VIDEO" || showImageRef.current) return false;
     const rect = containerRef.current && containerRef.current.getBoundingClientRect();
@@ -1041,21 +1509,20 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     if (!vw || !vh) return false;
     const fit = Math.min(dimW / vw, dimH / vh);
     const cw = vw * fit, ch = vh * fit;
-    const eff = trackingRef.current ? trackViewRef.current : { zoom, pan };
-    const z = eff.zoom;
-    const ix = (clientX - rect.left - sw / 2 - eff.pan.x) / z;
-    const iy = (clientY - rect.top - sh / 2 - eff.pan.y) / z;
-    const [ux, uy] = rotDeg(ix, iy, -rot);
-    const elX = ux + dimW / 2, elY = uy + dimH / 2;
-    const tlX = (dimW - cw) / 2, tlY = (dimH - ch) / 2;
-    const cpx = elX - tlX, cpy = elY - tlY;
-    if (cpx < 3 || cpy < 3 || cpx > cw - 3 || cpy > ch - 3) return false;
     stopTracking();
     const st = {
       canvas: document.createElement("canvas"),
       ctx: null, rw: 0, rh: 0, cPerCanvas: 1, lum: null,
-      tpl: null, tplW: 0, tplH: 0, tplD: null,
-      fx: 0, fy: 0, vx: 0, vy: 0, age: 0, seeking: false, offX: 0, offY: 0, lost: false, misses: 0, frames: 0,
+      tpl: null, tplW: 0, tplH: 0,
+      // The point starts unknown: there is nothing to centre on until the first
+      // frame that has a foreground in it, and until then the view is held.
+      fx: -1, fy: -1, vx: 0, vy: 0, age: 0, offX: 0, offY: 0, lost: true, misses: 0, frames: 0,
+      mode: "fg", seeking: false, warm: 2,
+      // The background model, the reduced copy of the last frame the camera
+      // motion is measured from, and the size the model was built for.
+      bgA: null, bgB: null, fgSeeded: false, fgReseed: false, loBuf: null, prevLo: null, fgRW: -1, fgRH: -1,
+      acArmed: false, acHold: TRACK_AUTOCENTER_HOLD, acRamp: 0,
+      bgX: 0, bgY: 0, bgVX: 0, bgVY: 0, bgMaxX: 0, bgMaxY: 0,
       rvfc: typeof v.requestVideoFrameCallback === "function",
       raf: 0, tTime: -1, gen: ++trackGenRef.current,
       onSeeked: () => { if (trackStateRef.current) rearmTracking(); },
@@ -1068,33 +1535,20 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     st.ctx = st.canvas.getContext("2d", { willReadFrequently: true });
     st.ctx.drawImage(v, 0, 0, rw, rh);
     const img = st.ctx.getImageData(0, 0, rw, rh);
-    st.fx = clamp(cpx / st.cPerCanvas, 0, rw - 1);
-    st.fy = clamp(cpy / st.cPerCanvas, 0, rh - 1);
-    captureTemplate(img, st, st.fx, st.fy);
-    st.tplD = subjectFingerprint(img, st, st.fx, st.fy);
-    let tMean = 0;
-    const tLen = st.tpl ? st.tpl.length : 0;
-    for (let ti = 0; ti < tLen; ti++) tMean += st.tpl[ti];
-    tMean = tLen ? tMean / tLen : 0;
-    let tVar = 0;
-    for (let ti = 0; ti < tLen; ti++) { const dd = st.tpl[ti] - tMean; tVar += dd * dd; }
-    st.tex = tLen ? tVar / tLen : 0;
-    refreshGrid(img, st);
-    st.offX = clientX - rect.left - sw / 2;
-    st.offY = clientY - rect.top - sh / 2;
+    // The background model starts as the first frame, so there is a "what is
+    // normal here" to compare against straight away instead of a blank.
+    seedFgModel(buildLum(img, st), st);
+    st.fgRW = rw; st.fgRH = rh;
     trackStateRef.current = st;
     trackingRef.current = true;
     const cz = Math.max(1, zoom);
-    const pan0 = computeCenterPan(st, cz, rect, rot);
+    const pan0 = { x: st.offX, y: st.offY };
     trackViewRef.current = { tracking: true, zoom: cz, pan: pan0, transform: `translate(${pan0.x}px, ${pan0.y}px) rotate(${rot}deg) scale(${cz})` };
     v.style.transformOrigin = "50% 50%";
     v.style.transform = trackViewRef.current.transform;
     v.addEventListener("seeked", st.onSeeked);
-    trackArmedRef.current = false;
-    setTrackArmed(false);
     setTrackLost(false);
-    setTrackHover(false);
-    pokeDot();
+    setTrackBg(false);
     setZoom(cz);
     setPan(pan0);
     setOrigin("50% 50%");
@@ -1155,10 +1609,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     v.style.transformOrigin = "50% 50%";
     v.style.transform = trackViewRef.current.transform;
     v.addEventListener("seeked", st.onSeeked);
-    trackArmedRef.current = false;
-    setTrackArmed(false);
     setTrackLost(false);
-    setTrackHover(false);
     setTrackBg(true);
     setZoom(cz);
     setPan(pan0);
@@ -1197,12 +1648,6 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     setPan(pan);
     setOrigin("50% 50%");
   };
-  const startPointCenterTracking = () => {
-    const el = containerRef.current;
-    const r = el && el.getBoundingClientRect();
-    if (!r) return false;
-    return startTracking(r.left + r.width / 2, r.top + r.height / 2);
-  };
   const applyTrackPref = () => {
     const st = trackStateRef.current;
     if (st && trackingRef.current) return;
@@ -1210,14 +1655,50 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     if (!el || el.tagName !== "VIDEO" || showImageRef.current) return;
     const p = trackPrefRef.current;
     if (p === "bg") startBgTracking();
-    else if (p === "point") startPointCenterTracking();
+    else if (p === "fg") startFgTracking();
   };
   const cycleTracking = () => {
     const st = trackStateRef.current;
-    if (!st) { setTrackPref("bg"); if (startBgRef.current) startBgRef.current(); return; }
-    if (st.mode === "bg") { setTrackPref("point"); startPointCenterTracking(); return; }
+    if (!st) { setTrackPref("fg"); if (startFgRef.current) startFgRef.current(); return; }
+    if (st.mode === "fg") { setTrackPref("bg"); startBgTracking(); return; }
     setTrackPref("none");
     stopTracking();
+  };
+  // Put the point's centred view on screen. Shared by every mode that centres a
+  // point, because the point is the only thing they disagree about: the
+  // foreground centroid, or a placed subject, both end up on st.fx/st.fy and
+  // both want the same easing. noPoint is the "nothing to centre yet" case and
+  // holds the view where it is.
+  const writeCenterPan = (st, v, rect, rot, noPoint) => {
+    const cz = trackViewRef.current.zoom;
+    const target = computeCenterPan(st, cz, rect, rot);
+    const cur = trackViewRef.current.pan;
+    let pan = noPoint ? cur : { x: cur.x + (target.x - cur.x) * trackSmoothRef.current, y: cur.y + (target.y - cur.y) * trackSmoothRef.current };
+    if (!noPoint) {
+      // No one tick may move the picture more than a few pixels. A subject that
+      // genuinely moves is followed over several ticks instead of jumped after,
+      // and a single bad frame -- a block verdict flipping, a motion estimate
+      // landing a pixel out -- cannot jolt the view. This is a fixed number of
+      // screen pixels rather than a share of the frame: the frame is often two
+      // thousand pixels wide here, where a couple of percent of it is a jump big
+      // enough to see, and a jump is the thing being prevented.
+      const lim = 2.5;
+      const dx = pan.x - cur.x, dy = pan.y - cur.y;
+      const d = Math.hypot(dx, dy);
+      if (d > lim) pan = { x: cur.x + dx / d * lim, y: cur.y + dy / d * lim };
+    }
+    // Whole pixels only. A translate of a fraction of a pixel makes the browser
+    // resample the picture to draw it, and that resampling is what a fine
+    // shimmer looks like even when the numbers barely move. On a whole pixel it
+    // can pass the picture straight through, so the view either moves a visible
+    // amount or does not move at all.
+    pan = { x: Math.round(pan.x), y: Math.round(pan.y) };
+    const prev = trackViewRef.current.pan;
+    if (pan.x !== prev.x || pan.y !== prev.y) {
+      trackViewRef.current.pan = pan;
+      trackViewRef.current.transform = `translate(${pan.x}px, ${pan.y}px) rotate(${rot}deg) scale(${cz})`;
+      if (v.style.transform !== trackViewRef.current.transform) v.style.transform = trackViewRef.current.transform;
+    }
   };
   const trackingTick = () => {
     const st = trackStateRef.current;
@@ -1246,6 +1727,13 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     if (st.canvas.width !== rw || st.canvas.height !== rh) { st.canvas.width = rw; st.canvas.height = rh; }
     st.rw = rw; st.rh = rh;
     st.cPerCanvas = cw / rw;
+    // A seek parks the point off at (-1,-1) until the subject is found again.
+    // That is a search anchor, not a place in the frame, and the pan is computed
+    // from the point -- so reading it as a position shoves the picture off into a
+    // corner by a letterbox-bar's worth of pixels on every seek, and a loop
+    // restart is a seek. Nothing is being tracked at that point, so the view is
+    // held where it was until there is something to centre on again.
+    const noPoint = st.fx < 0 || st.fy < 0;
     const ctx = st.ctx;
     ctx.drawImage(v, 0, 0, rw, rh);
     const img = ctx.getImageData(0, 0, rw, rh);
@@ -1271,9 +1759,12 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
         // would re-center the dot instead of the video.
         let tX = 0, tY = 0;
         if (st.mode !== "bg") {
-          const base = computeCenterPan(st, z, rect, rot);
-          tX = (st.offX || 0) - base.x;
-          tY = (st.offY || 0) - base.y;
+          if (noPoint) { tX = st.offX || 0; tY = st.offY || 0; }
+          else {
+            const base = computeCenterPan(st, z, rect, rot);
+            tX = (st.offX || 0) - base.x;
+            tY = (st.offY || 0) - base.y;
+          }
         }
         const short = rect ? Math.min(rect.width, rect.height) : 357;
         const reach = Math.max(8, short * TRACK_AUTOCENTER_REACH);
@@ -1355,25 +1846,10 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       }
       if (st.frames % 90 === 0) refreshGrid(img, st);
       if (st.warm > 0) { st.warm--; refreshGrid(img, st); st.frames++; return; }
-      const gdx = [], gdy = [];
-      for (const g of st.grid) {
-        const px = g.fx + (g.vx || 0), py = g.fy + (g.vy || 0);
-        const gr = bestTemplateSearch(img, { rw: st.rw, rh: st.rh, tpl: g.tpl, tplW: g.tplW, tplH: g.tplH, lum: st.lum }, px, py, false, 28, 60);
-        if (gr.score / (g.tplW * g.tplH) < 3600) {
-          const ddx = gr.x - g.fx, ddy = gr.y - g.fy;
-          if (Math.hypot(ddx, ddy) < TRACK_JUMP) {
-            const np = capturePatch(img, st.rw, st.rh, gr.x, gr.y, 32);
-            g.tpl = np.tpl; g.tplW = np.tplW; g.tplH = np.tplH;
-            g.vx = ddx; g.vy = ddy;
-            g.fx = gr.x; g.fy = gr.y;
-            gdx.push(ddx); gdy.push(ddy);
-          }
-        }
-      }
+      const gm = gridMotion(img, st);
       st.frames++;
-      if (gdx.length >= 3) {
-        gdx.sort((a, b) => a - b); gdy.sort((a, b) => a - b);
-        const medDx = medOf(gdx), medDy = medOf(gdy);
+      if (gm.n >= 3) {
+        const medDx = gm.medDx, medDy = gm.medDy;
         const gd = Math.hypot(medDx, medDy);
         let cx = 0, cy = 0;
         if (gd > TRACK_BG_DEAD) {
@@ -1403,6 +1879,19 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
         trackViewRef.current.transform = `translate(${panBg.x}px, ${panBg.y}px) rotate(${rot}deg) scale(${czBg})`;
         if (v.style.transform !== trackViewRef.current.transform) v.style.transform = trackViewRef.current.transform;
       }
+      return;
+    }
+    if (st.mode === "fg") {
+      // A seek replaced the whole picture, so the patches of background being
+      // followed describe frames that are no longer on screen. They are dropped
+      // and taken again from the frame that lands; left in place, every one of
+      // them would fail to match and the whole frame would read as foreground.
+      if (st.fgReseed) { st.fgReseed = false; st.patches = null; }
+      if (st.rw !== st.fgRW || st.rh !== st.fgRH) { st.patches = null; st.fgRW = st.rw; st.fgRH = st.rh; st.fx = -1; st.fy = -1; }
+      const lum = buildLum(img, st);
+      st.frames++;
+      trackPatches(st, lum);
+      writeCenterPan(st, v, rect, rot, noPoint);
       return;
     }
     if (st.frames % 90 === 0) refreshGrid(img, st);
@@ -1506,11 +1995,35 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     const idc = cand ? capturePatch(img, st.rw, st.rh, res.x, res.y, TRACK_ID) : null;
     const onSubject = idc ? (!st.tplD || subjectSame(st, idc) >= (st.lost ? TRACK_REACQ_KEEP : TRACK_KEEP)) : false;
     if (cand && onSubject) {
-      const wasLost = st.lost;
-      st.lost = false; st.misses = 0;
-      st.tpl = cand.tpl; st.tplW = cand.tplW; st.tplH = cand.tplH;
-      if (st.tplD) subjectUpdate(st, idc);
-      if (wasLost) { refreshGrid(img, st); st.vx = 0; st.vy = 0; setTrackLost(false); }
+      // A match this far out is not the subject having moved, it is a candidate
+      // somewhere else in the frame, and it is only allowed to take the lock once
+      // it has come back to the same place on the next frame. Alternating
+      // candidates never manage that -- each one replaces the last as the pending
+      // one -- so the point stays where it was instead of taking turns between
+      // them, and the template and the fingerprint are not handed over either,
+      // which is what let a single bad frame confirm itself. Motion that is
+      // continuous agrees with itself at once and is adopted on the spot. While
+      // lost there is no lock to hold, so this does not apply: re-acquisition is
+      // the path for a subject that is genuinely somewhere else.
+      let held = false;
+      if (!st.lost && resD > TRACK_LOCK_FAR) {
+        const agree = Math.max(TRACK_LOCK_AGREE, speed * 1.5);
+        if (st.lkRun && Math.hypot(res.x - st.lkX, res.y - st.lkY) <= agree) st.lkRun++;
+        else { st.lkX = res.x; st.lkY = res.y; st.lkRun = 1; }
+        held = st.lkRun < TRACK_LOCK_RUN;
+      } else { st.lkX = null; st.lkY = null; st.lkRun = 0; }
+      if (held) {
+        // The subject is here, that is what the identity check just said, so this
+        // is not a missed frame and must not age into the lost path -- the point
+        // is simply not moving until the candidate stops changing its mind.
+        st.misses = 0;
+        st.vx *= 0.7; st.vy *= 0.7;
+      } else {
+        const wasLost = st.lost;
+        st.lost = false; st.misses = 0;
+        st.tpl = cand.tpl; st.tplW = cand.tplW; st.tplH = cand.tplH;
+        if (st.tplD) subjectUpdate(st, idc);
+        if (wasLost) { refreshGrid(img, st); st.vx = 0; st.vy = 0; setTrackLost(false); }
         if (resD > TRACK_DEAD) {
           const k = (resD - TRACK_DEAD) / resD;
           const f = Math.min(1, 0.3 + resD / 30);
@@ -1521,7 +2034,11 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
         } else {
           st.vx *= 0.85; st.vy *= 0.85;
         }
+      }
     } else if (gridOK) {
+      // No match was adopted, so a candidate being held has not come back for
+      // another frame running and stops counting towards one.
+      st.lkX = null; st.lkY = null; st.lkRun = 0;
       const gd = Math.hypot(medDx, medDy);
       if (gd > TRACK_DEAD) {
         const k = (gd - TRACK_DEAD) / gd;
@@ -1554,6 +2071,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
         st.vy *= 0.7;
       }
     } else if (cand || res) {
+      st.lkX = null; st.lkY = null; st.lkRun = 0;
       st.misses++;
       st.vx *= 0.9; st.vy *= 0.9;
       // The velocity is deliberately left running when the point is declared
@@ -1567,16 +2085,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       if (st.lost) setTrackLost(true);
     }
     st.frames++;
-    const cz = trackViewRef.current.zoom;
-    const target = computeCenterPan(st, cz, rect, rot);
-    const cur = trackViewRef.current.pan;
-    const pan = { x: cur.x + (target.x - cur.x) * trackSmoothRef.current, y: cur.y + (target.y - cur.y) * trackSmoothRef.current };
-    const prev = trackViewRef.current.pan;
-    if (Math.abs(pan.x - prev.x) > 0.01 || Math.abs(pan.y - prev.y) > 0.01) {
-      trackViewRef.current.pan = pan;
-      trackViewRef.current.transform = `translate(${pan.x}px, ${pan.y}px) rotate(${rot}deg) scale(${cz})`;
-      if (v.style.transform !== trackViewRef.current.transform) v.style.transform = trackViewRef.current.transform;
-    }
+    writeCenterPan(st, v, rect, rot, noPoint);
   };
   // React registers wheel listeners as passive, so preventDefault() inside
   // onWheel is ignored and the window scrolls during zoom. Drive zoom through
@@ -1640,7 +2149,6 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     e.preventDefault();
   };
   const handleMouseMove = (e) => {
-    if (trackingRef.current) pokeDot();
     if (!dragRef.current.dragging) return;
     if (dragRef.current.trackDrag) {
       const st = trackStateRef.current;
@@ -2045,14 +2553,9 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     };
   }, []);
   useEffect(() => {
-    const finePointer = !(typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches);
     const onShiftDown = (e) => {
       if (e.key !== "Shift" || e.repeat) return;
       if (e.target && ((e.target.tagName === "INPUT" && e.target.type !== "range") || e.target.tagName === "TEXTAREA" || e.target.isContentEditable)) return;
-      if (finePointer && videoishRef.current && !showImageRef.current && videoRef.current && videoRef.current.tagName === "VIDEO") {
-        trackArmedRef.current = true;
-        setTrackArmed(true);
-      }
       if (showImageRef.current || !videoRef.current || videoRef.current.paused) return;
       if (shiftWasPlayingRef.current) return;
       shiftWasPlayingRef.current = true;
@@ -2060,8 +2563,6 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     };
     const onShiftUp = (e) => {
       if (e.key !== "Shift") return;
-      trackArmedRef.current = false;
-      setTrackArmed(false);
       if (e.target && ((e.target.tagName === "INPUT" && e.target.type !== "range") || e.target.tagName === "TEXTAREA" || e.target.isContentEditable)) { shiftWasPlayingRef.current = false; return; }
       if (!shiftWasPlayingRef.current || !videoRef.current || showImageRef.current) { shiftWasPlayingRef.current = false; return; }
       shiftWasPlayingRef.current = false;
@@ -2071,7 +2572,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       if (jogRef.current) { clearInterval(jogRef.current); jogRef.current = null; }
       if (jogWasPlayingRef.current && videoRef.current) { jogWasPlayingRef.current = false; videoRef.current.play().catch(() => {}); }
     };
-    const onBlur = () => { shiftWasPlayingRef.current = false; stopJog(); trackArmedRef.current = false; setTrackArmed(false); };
+    const onBlur = () => { shiftWasPlayingRef.current = false; stopJog(); };
     window.addEventListener("keydown", onShiftDown);
     window.addEventListener("keyup", onShiftUp);
     window.addEventListener("blur", onBlur);
@@ -2082,7 +2583,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       stopJog();
     };
   }, [showImage]);
-  useEffect(() => () => { trackGenRef.current++; trackingRef.current = false; if (dotTimerRef.current) clearTimeout(dotTimerRef.current); }, []);
+  useEffect(() => () => { trackGenRef.current++; trackingRef.current = false; }, []);
 
   const doDeleteFile = async () => {
     const { folder, base } = parseFolderBase(filePathEff);
@@ -2114,6 +2615,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   };
   doDeleteFileRef.current = doDeleteFile;
   startBgRef.current = startBgTracking;
+  startFgRef.current = startFgTracking;
   cycleTrackRef.current = cycleTracking;
   autoCenterToggleRef.current = toggleAutoCenter;
   recenterRef.current = recenterView;
@@ -2133,9 +2635,9 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       >
         <div className="fv-header" style={{ position: "absolute", top: 0, left: 0, right: 0, zIndex: 5, display: "flex", alignItems: "flex-start", gap: 8, padding: "8px 10px", background: "transparent", border: "none", pointerEvents: "none" }}>
           <div className="fv-nav" style={{ display: "flex", alignItems: "center", gap: 6, pointerEvents: "auto", position: "relative" }}>
-            <button type="button" tabIndex={-1} className="btn btn-sm" onClick={(e) => { e.stopPropagation(); dispatchNextRef.current(); }} onTouchStart={(e) => e.stopPropagation()} disabled={endMode !== "random" && !hasNext} title="Next (↓)" style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}><i className="bi bi-chevron-down" /></button>
+            <button type="button" tabIndex={-1} className="btn btn-sm" onClick={(e) => { e.stopPropagation(); dispatchNextRef.current(); }} onTouchStart={(e) => e.stopPropagation()} disabled={endMode !== "random" && !hasNext} title="Next (↓)" style={{ position: "relative", width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}><span className="btn-kbd-hint">↓</span><i className="bi bi-chevron-down" /></button>
             <span className="badge" style={{ fontFamily: "var(--mono)", fontSize: 11, minWidth: 54, justifyContent: "center", background: "rgba(0,0,0,.55)", border: "1px solid rgba(255,255,255,.18)", color: "#fff", backdropFilter: "blur(6px)" }}>{endMode === "random" && randHistory.length > 1 ? `${randCursor + 1}/${randHistory.length} · ` : ""}{idx + 1} / {total}</span>
-            <button type="button" tabIndex={-1} className="btn btn-sm" onClick={(e) => { e.stopPropagation(); dispatchPrevRef.current(); }} onTouchStart={(e) => e.stopPropagation()} disabled={endMode !== "random" && !hasPrev} title="Previous (↑)" style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}><i className="bi bi-chevron-up" /></button>
+            <button type="button" tabIndex={-1} className="btn btn-sm" onClick={(e) => { e.stopPropagation(); dispatchPrevRef.current(); }} onTouchStart={(e) => e.stopPropagation()} disabled={endMode !== "random" && !hasPrev} title="Previous (↑)" style={{ position: "relative", width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}><span className="btn-kbd-hint">↑</span><i className="bi bi-chevron-up" /></button>
             {(() => {
               const { base } = parseFolderBase(filePathEff);
               const label = base || titleEff;
@@ -2148,9 +2650,9 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
           <span style={{ flex: 1 }} />
           <div style={{ display: "flex", alignItems: "flex-start", gap: 8, pointerEvents: "auto" }}>
             {yConfirm && <span style={{ fontSize: 11, fontWeight: 600, color: "#fff", background: "#ef4444", padding: "4px 8px", borderRadius: 999, border: "1px solid rgba(255,255,255,.2)", whiteSpace: "nowrap", alignSelf: "center" }}>Press p again to confirm delete</span>}
-            <button type="button" tabIndex={-1} onClick={handleDelete} disabled={deleting} className="btn btn-sm" aria-label="Delete file" title={yConfirm ? "Press p again to confirm — or click to delete" : "Delete file (press p twice)"} style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: yConfirm ? "1px solid #ef4444" : "1px solid rgba(255,255,255,.18)", background: yConfirm ? "#ef4444" : "rgba(0,0,0,.55)", color: yConfirm ? "#fff" : "#ff8080", backdropFilter: "blur(6px)", animation: yConfirm ? "pulse 0.6s ease infinite" : "none" }}><i className="bi bi-trash" /></button>
+            <button type="button" tabIndex={-1} onClick={handleDelete} disabled={deleting} className="btn btn-sm" aria-label="Delete file" title={yConfirm ? "Press p again to confirm — or click to delete" : "Delete file (press p twice)"} style={{ position: "relative", width: 36, height: 36, padding: 0, borderRadius: 999, border: yConfirm ? "1px solid #ef4444" : "1px solid rgba(255,255,255,.18)", background: yConfirm ? "#ef4444" : "rgba(0,0,0,.55)", color: yConfirm ? "#fff" : "#ff8080", backdropFilter: "blur(6px)", animation: yConfirm ? "pulse 0.6s ease infinite" : "none" }}><span className="btn-kbd-hint">P</span><i className="bi bi-trash" /></button>
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              <button type="button" tabIndex={-1} onClick={onClose} className="btn btn-sm" aria-label="Close" style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}><i className="bi bi-x-lg" /></button>
+              <button type="button" tabIndex={-1} onClick={onClose} className="btn btn-sm" aria-label="Close" style={{ position: "relative", width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}><span className="btn-kbd-hint">Q</span><i className="bi bi-x-lg" /></button>
               <div
                 ref={playlistHoverRef}
                 onMouseEnter={() => { if (playlistCloseTimer.current) { clearTimeout(playlistCloseTimer.current); playlistCloseTimer.current = null; } try { if (window.matchMedia && window.matchMedia("(pointer: coarse)").matches) return; } catch {} setShowPlaylist(true); }}
@@ -2173,8 +2675,9 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
                         }}
                         aria-label="Add to playlist"
                         title="Add to playlist"
-                        style={{ width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: vOpen ? "rgba(99,102,241,.9)" : vBookmarked ? "rgba(99,102,241,.85)" : "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}
+                        style={{ position: "relative", width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: vOpen ? "rgba(99,102,241,.9)" : vBookmarked ? "rgba(99,102,241,.85)" : "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}
                       >
+                        <span className="btn-kbd-hint">F</span>
                         <i className={`bi ${vBookmarked ? "bi-bookmark-fill" : "bi-bookmark"}`} />
                       </button>
                       {vOpen && (
@@ -2206,7 +2709,7 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   .fv-header{ flex-wrap: nowrap !important; padding: 6px 8px !important; }
   .fv-header > div:nth-child(2){ display: none !important; }
 }`}</style>
-        <div ref={containerRef} onClick={handleStageClick} onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp} onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd} style={{ position: "relative", flex: "1 1 auto", minHeight: 0, overflow: "hidden", background: "#080a14", display: "flex", alignItems: "center", justifyContent: "center", padding: 0, cursor: trackArmed ? "crosshair" : tracking ? "grab" : "default", touchAction: "none" }}>
+        <div ref={containerRef} onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp} onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd} style={{ position: "relative", flex: "1 1 auto", minHeight: 0, overflow: "hidden", background: "#080a14", display: "flex", alignItems: "center", justifyContent: "center", padding: 0, cursor: tracking ? "grab" : "default", touchAction: "none" }}>
           {zoom>1 && <span style={{ position: "absolute", top: 10, right: 10, zIndex: 3, background: "rgba(0,0,0,.6)", color: "#fff", padding: "4px 8px", borderRadius: 6, fontSize: 11, fontFamily: "var(--mono)" }}>{Math.round(zoom*100)}%</span>}
           {(loading || (!mediaReady && isFormatKnown)) && (
             <span data-testid="viewer-loading" style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", pointerEvents: "none", zIndex: 2 }}>
@@ -2225,9 +2728,9 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
               preload="metadata"
               tabIndex={0}
               autoFocus
-              onClick={(e)=> { e.stopPropagation(); handleStageClick(e); }}
+
               onContextMenu={(e) => e.preventDefault()}
-              style={{ width: mediaW, height: mediaH, background: "#000", display: "block", objectFit: "contain", opacity: mediaReady ? 1 : 0, transition: (!tracking && zoom===1) ? "opacity .45s ease, transform 0.15s" : "opacity .45s ease", transform: tracking ? trackViewRef.current.transform : `translate(${pan.x}px, ${pan.y}px) rotate(${rotate}deg) scale(${zoom})`, transformOrigin: origin, WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none", cursor: trackArmed ? "crosshair" : "default", outline: "none" }}
+              style={{ width: mediaW, height: mediaH, background: "#000", display: "block", objectFit: "contain", opacity: mediaReady ? 1 : 0, transition: (!tracking && zoom===1) ? "opacity .45s ease, transform 0.15s" : "opacity .45s ease", transform: tracking ? trackViewRef.current.transform : `translate(${pan.x}px, ${pan.y}px) rotate(${rotate}deg) scale(${zoom})`, transformOrigin: origin, WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none", cursor: "default", outline: "none" }}
               onTimeUpdate={(e)=> setCurrent(e.currentTarget.currentTime)}
               onLoadedMetadata={(e)=> setDuration(e.currentTarget.duration)}
               onLoadedData={() => setMediaReady(true)}
@@ -2251,8 +2754,8 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
               preload="metadata"
               tabIndex={0}
               autoFocus
-              onClick={(e)=> { e.stopPropagation(); handleStageClick(e); }}
-              style={{ width: mediaW, height: mediaH, background: "#000", display: "block", objectFit: "contain", opacity: mediaReady ? 1 : 0, transition: (!tracking && zoom===1) ? "opacity .45s ease, transform 0.15s" : "opacity .45s ease", transform: tracking ? trackViewRef.current.transform : `translate(${pan.x}px, ${pan.y}px) rotate(${rotate}deg) scale(${zoom})`, transformOrigin: origin, WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none", cursor: trackArmed ? "crosshair" : "default", outline: "none" }}
+
+              style={{ width: mediaW, height: mediaH, background: "#000", display: "block", objectFit: "contain", opacity: mediaReady ? 1 : 0, transition: (!tracking && zoom===1) ? "opacity .45s ease, transform 0.15s" : "opacity .45s ease", transform: tracking ? trackViewRef.current.transform : `translate(${pan.x}px, ${pan.y}px) rotate(${rotate}deg) scale(${zoom})`, transformOrigin: origin, WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none", cursor: "default", outline: "none" }}
               onTimeUpdate={(e)=> setCurrent(e.currentTarget.currentTime)}
               onLoadedMetadata={(e)=> setDuration(e.currentTarget.duration)}
               onLoadedData={() => setMediaReady(true)}
@@ -2274,29 +2777,23 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
           )}
           {tracking && (
             <>
-            <span onClick={(e) => { e.stopPropagation(); const d = dragRef.current; if (d && d.downX !== undefined && Math.hypot(e.clientX - d.downX, e.clientY - d.downY) > 6) return; setTrackPref("none"); stopTracking(); }} onMouseEnter={() => { setTrackHover(true); if (dotTimerRef.current) clearTimeout(dotTimerRef.current); }} onMouseLeave={() => { setTrackHover(false); pokeDot(); }} style={{ position: "absolute", left: `calc(50% + ${((trackStateRef.current && trackStateRef.current.offX) || 0)}px)`, top: `calc(50% + ${((trackStateRef.current && trackStateRef.current.offY) || 0)}px)`, width: 22, height: 22, transform: "translate(-50%,-50%)", border: `1.5px solid rgba(${trackLost ? "248,113,113" : "129,140,248"},${trackHover ? ".95" : ".35"})`, borderRadius: "50%", boxShadow: `0 0 0 3px rgba(0,0,0,${trackHover ? ".5" : ".2"})`, zIndex: 3, pointerEvents: dotVisible ? "auto" : "none", cursor: "pointer", opacity: (dotVisible || trackHover) ? 1 : 0, transition: "opacity .25s", display: trackBg ? "none" : "block" }}>
-              <span style={{ position: "absolute", left: "50%", top: "50%", width: 5, height: 5, transform: "translate(-50%,-50%)", borderRadius: "50%", background: `rgba(${trackLost ? "248,113,113" : "129,140,248"},${trackHover ? ".95" : ".45"})` }} />
-            </span>
             <div onTouchStart={(e) => e.stopPropagation()} onTouchMove={(e) => e.stopPropagation()} onTouchEnd={(e) => e.stopPropagation()} onTouchCancel={(e) => e.stopPropagation()} style={{ position: "absolute", right: 12, bottom: 12, zIndex: 4, display: "flex", alignItems: "center", gap: 6, maxWidth: "calc(100% - 24px)", pointerEvents: "none" }}>
-              <div style={{ flex: "0 1 auto", minWidth: 0, background: "rgba(0,0,0,.35)", border: "1px solid rgba(255,255,255,.12)", color: "#fff", fontSize: 11, padding: "5px 10px", borderRadius: 999, pointerEvents: "none", whiteSpace: "nowrap", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", backdropFilter: "blur(2px)" }}>{trackLost ? (trackBg ? "Background motion lost — camera view will drift" : "Tracking lost — move subject back into view") : ((trackStateRef.current && trackStateRef.current.tex < TRACK_TEX_MIN && !trackBg) ? "Low-detail spot — pick a busier area" : "tracking smoothness")} <input type="number" ref={smoothInputRef} min={0} max={10} step={0.5} defaultValue={readTrackSmoothUi()} title="Scroll to adjust" onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()} onFocus={(e) => e.target.select()} onChange={(e) => { const s = parseFloat(e.target.value); if (!Number.isFinite(s)) return; applyTrackSmoothUiRef.current(s); }} style={{ width: 44, fontSize: 11, background: "rgba(255,255,255,.12)", border: "1px solid rgba(255,255,255,.25)", borderRadius: 6, color: "#fff", textAlign: "center", padding: "1px 4px", pointerEvents: "auto", outline: "none" }} /></div>
+              <div style={{ flex: "0 1 auto", minWidth: 0, background: "rgba(0,0,0,.35)", border: "1px solid rgba(255,255,255,.12)", color: "#fff", fontSize: 11, padding: "5px 10px", borderRadius: 999, pointerEvents: "none", whiteSpace: "nowrap", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", backdropFilter: "blur(2px)" }}>{trackLost ? (trackBg ? "Background motion lost — camera view will drift" : "No foreground in view — nothing to centre") : "tracking smoothness"} <input type="number" ref={smoothInputRef} min={0} max={10} step={0.5} defaultValue={readTrackSmoothUi()} title="Scroll to adjust" onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()} onFocus={(e) => e.target.select()} onChange={(e) => { const s = parseFloat(e.target.value); if (!Number.isFinite(s)) return; applyTrackSmoothUiRef.current(s); }} style={{ width: 44, fontSize: 11, background: "rgba(255,255,255,.12)", border: "1px solid rgba(255,255,255,.25)", borderRadius: 6, color: "#fff", textAlign: "center", padding: "1px 4px", pointerEvents: "auto", outline: "none" }} /></div>
               <button
                 type="button"
                 tabIndex={-1}
                 className={`btn btn-sm ${autoCenter ? "btn-primary" : "btn-outline-secondary"}`}
                 title={autoCenter ? "Recenter view (T) — auto-center on, hold to turn off" : "Recenter view (T) — auto-center off, hold to turn on"}
-                style={{ flex: "0 0 auto", width: 30, height: 30, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: autoCenter ? "#6366f1" : "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)", pointerEvents: "auto", touchAction: "manipulation", WebkitTouchCallout: "none", userSelect: "none" }}
+                style={{ position: "relative", flex: "0 0 auto", width: 30, height: 30, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: autoCenter ? "#6366f1" : "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)", pointerEvents: "auto", touchAction: "manipulation", WebkitTouchCallout: "none", userSelect: "none" }}
                 onPointerDown={(e) => { e.stopPropagation(); clearHoldTimer(); holdRef.current.fired = false; holdRef.current.timer = setTimeout(() => { holdRef.current.timer = null; holdRef.current.fired = true; toggleAutoCenter(); }, TRACK_HOLD_MS); }}
                 onPointerUp={(e) => { e.stopPropagation(); clearHoldTimer(); }}
                 onPointerCancel={() => clearHoldTimer()}
                 onPointerLeave={() => clearHoldTimer()}
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={(e) => { e.stopPropagation(); if (holdRef.current.fired) { holdRef.current.fired = false; return; } recenterView(); }}
-              ><i className="bi bi-bullseye" /></button>
+              ><span className="btn-kbd-hint">T</span><i className="bi bi-bullseye" /></button>
             </div>
             </>
-          )}
-          {trackMiss && (
-            <div style={{ position: "absolute", left: "50%", bottom: 12, transform: "translateX(-50%)", zIndex: 4, background: "rgba(0,0,0,.6)", border: "1px solid rgba(251,191,36,.5)", color: "#fde68a", fontSize: 11, padding: "5px 10px", borderRadius: 999, pointerEvents: "none", whiteSpace: "nowrap" }}>Click inside the video — not the black bars</div>
           )}
         </div>
 
@@ -2319,26 +2816,29 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
             <div style={{ display: "flex", alignItems: "center", gap: 4, marginLeft: 4 }}>
               <input type="range" tabIndex={-1} min="0.1" max="1" step="0.1" value={rate} onChange={(e) => setRate(parseFloat(e.target.value))} onMouseUp={(e)=>e.target.blur()} onTouchEnd={(e)=>e.target.blur()} style={{ width: 90, accentColor: "#6366f1", height: 4 }} />
             </div>
-            <div style={{ display: "flex", gap: 3, alignItems: "center", border: "1px solid var(--border)", borderRadius: 6, padding: 2, background: "var(--surface-2)" }}>
+            <div style={{ position: "relative", display: "flex", gap: 3, alignItems: "center", border: "1px solid var(--border)", borderRadius: 6, padding: 2, background: "var(--surface-2)" }}>
+              <span className="btn-kbd-hint">E</span>
               <button type="button" tabIndex={-1} onClick={() => setSeekFrames(false)} className={`btn btn-sm ${!seekFrames ? "btn-primary" : "btn-outline-secondary"}`} style={{ padding: "2px 6px", fontSize: 11, minWidth: 32 }} title="Seek by 1 second (←/→)">1s</button>
               <button type="button" tabIndex={-1} onClick={() => setSeekFrames(true)} className={`btn btn-sm ${seekFrames ? "btn-primary" : "btn-outline-secondary"}`} style={{ padding: "2px 6px", fontSize: 11, minWidth: 32 }} title="Seek by 1 frame (~33ms)">1f</button>
             </div>
             <span style={{ flex: 1 }} />
             {(isVideo || gifAsVideoEff) && (
-              <button type="button" tabIndex={-1} className={`btn btn-sm ${tracking ? "btn-primary" : "btn-outline-secondary"}`} onClick={() => cycleTracking()} title={tracking ? `${trackBg ? "BG tracking" : "Subject tracking"} on (⇧T switches mode) — click to stop and reset` : `Stabilization off — click to start ${trackPrefRef.current === "point" ? "subject tracking" : "BG tracking"}`} style={{ padding: "4px 8px", fontSize: 11 }}><i className="bi bi-camera-video" /> {tracking ? (trackBg ? "BG tracking" : "Subject tracking") : "Track"}</button>
+              <button type="button" tabIndex={-1} className={`btn btn-sm ${tracking ? "btn-primary" : "btn-outline-secondary"}`} onClick={() => cycleTracking()} title={tracking ? `${trackBg ? "BG tracking" : "FG tracking"} on (⇧T switches mode) — click to stop and reset` : `Stabilization off — click to start ${trackPrefRef.current === "bg" ? "BG tracking" : "FG tracking"}`} style={{ position: "relative", padding: "4px 8px", fontSize: 11 }}><span className="btn-kbd-hint">⇧T</span><i className="bi bi-camera-video" /> {tracking ? (trackBg ? "BG tracking" : "FG tracking") : "Track"}</button>
             )}
             {(isImage || isVideo || gifAsVideoEff) && (
-              <button type="button" tabIndex={-1} className="btn btn-sm btn-outline-secondary" onClick={rotateFile} title={`Rotate 90° (⇧R)` + (rotate ? ` · now ${rotate}°` : "")} style={{ padding: "4px 8px", fontSize: 11 }}><i className="bi bi-arrow-clockwise" /> Rotate</button>
+              <button type="button" tabIndex={-1} className="btn btn-sm btn-outline-secondary" onClick={rotateFile} title={`Rotate 90° (⇧R)` + (rotate ? ` · now ${rotate}°` : "")} style={{ position: "relative", padding: "4px 8px", fontSize: 11 }}><span className="btn-kbd-hint">⇧R</span><i className="bi bi-arrow-clockwise" /> Rotate</button>
             )}
-            <button type="button" tabIndex={-1} className="btn btn-sm" onClick={cycleEndMode} title={`End mode: ${endMode} (r)`} style={{ padding: "4px 6px", fontSize: 11, minWidth: 52, borderRadius: 6, border: "1px solid " + (endMode !== "none" ? "transparent" : "var(--border)"), background: endMode === "next" ? "#6366f1" : endMode === "repeat" ? "#10b981" : endMode === "random" ? "#8b5cf6" : "var(--surface-2)", color: endMode !== "none" ? "#fff" : "var(--muted)" }}>
+            <button type="button" tabIndex={-1} className="btn btn-sm" onClick={cycleEndMode} title={`End mode: ${endMode} (r)`} style={{ position: "relative", padding: "4px 6px", fontSize: 11, minWidth: 52, borderRadius: 6, border: "1px solid " + (endMode !== "none" ? "transparent" : "var(--border)"), background: endMode === "next" ? "#6366f1" : endMode === "repeat" ? "#10b981" : endMode === "random" ? "#8b5cf6" : "var(--surface-2)", color: endMode !== "none" ? "#fff" : "var(--muted)" }}>
+              <span className="btn-kbd-hint">R</span>
               <i className={`bi ${endMode === "next" ? "bi-skip-forward-fill" : endMode === "repeat" ? "bi-repeat" : endMode === "random" ? "bi-shuffle" : "bi-arrow-repeat"}`} /> {endMode === "next" ? "Next" : endMode === "repeat" ? "Loop" : endMode === "random" ? "Shuffle" : "End"}
             </button>
           {(isVideo || isAudio || gifAsVideoEff) && (
               <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
                 {(isVideo || isAudio || gifAsVideoEff) && (
-                  <button type="button" tabIndex={-1} className="btn btn-sm btn-outline-secondary" onClick={() => setMuted((m) => !m)} title={muted ? "Unmute (m)" : "Mute (m)"} style={{ color: muted ? "#f87171" : undefined, minWidth: 36, padding: "4px 6px", fontSize: 11 }}><i className={`bi ${muted ? "bi-volume-mute-fill" : "bi-volume-up-fill"}`} /></button>
+                  <button type="button" tabIndex={-1} className="btn btn-sm btn-outline-secondary" onClick={() => setMuted((m) => !m)} title={muted ? "Unmute (m)" : "Mute (m)"} style={{ position: "relative", color: muted ? "#f87171" : undefined, minWidth: 36, padding: "4px 6px", fontSize: 11 }}><span className="btn-kbd-hint">M</span><i className={`bi ${muted ? "bi-volume-mute-fill" : "bi-volume-up-fill"}`} /></button>
                 )}
-                <button type="button" tabIndex={-1} className="btn btn-sm btn-primary" onClick={() => { if (!videoRef.current) return; if (videoRef.current.paused) videoRef.current.play(); else videoRef.current.pause(); videoRef.current?.focus(); }} style={{ padding: "4px 8px", fontSize: 11 }}>
+                <button type="button" tabIndex={-1} className="btn btn-sm btn-primary" onClick={() => { if (!videoRef.current) return; if (videoRef.current.paused) videoRef.current.play(); else videoRef.current.pause(); videoRef.current?.focus(); }} style={{ position: "relative", padding: "4px 8px", fontSize: 11 }}>
+                  <span className="btn-kbd-hint">Space</span>
                   <i className={`bi ${isPlaying ? "bi-pause-fill" : "bi-play-fill"}`} /> {isPlaying ? "Pause" : "Play"}
                 </button>
               </div>

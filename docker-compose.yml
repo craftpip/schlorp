@@ -23,6 +23,7 @@ services:
       - /app/node_modules
       - ./docker/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro
       - ${MEDIA_DIR:-./media}:/app/media
+      - /mnt/media2t/downloads/studies:/app/media/studies 
       - browser-data:/data/browser
       - cloakbrowser-cache:/data/cloakbrowser
     healthcheck:

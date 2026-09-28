@@ -68,6 +68,7 @@
 - `AUTO_CONTINUE` (`!process.stdin.isTTY`) — auto-continue prompts without waiting
 - `AUTO_CONTINUE_WAIT_MS` (0) — ms to wait before auto-continue
 - `MEDIA_RANGE_SIZE` (100) — media grid rail: files per range
+- `KEYBOARD_HINTS` (1) — show keyboard shortcut hint pills on buttons (0 = hide)
 
 ### Capture Timing
 - `AUTO_CAPTURE_TIMEOUT_MS` (30000) — max wait for media signals

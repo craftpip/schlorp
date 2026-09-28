@@ -50,6 +50,11 @@ function mediaRangeSize() {
   const n = Number.parseInt(process.env.MEDIA_RANGE_SIZE || "100", 10);
   return Number.isFinite(n) ? Math.min(5000, Math.max(10, n)) : 100;
 }
+// Keyboard shortcut hint pills on buttons (KEYBOARD_HINTS). Read live per
+// request so .env / Settings edits apply without a restart.
+function keyboardHints() {
+  return String(process.env.KEYBOARD_HINTS == null ? "1" : process.env.KEYBOARD_HINTS) !== "0";
+}
 const VNC_FLAG_PATH = process.env.VNC_FLAG || "/data/browser/.vnc-enabled";
 const VNC_PORT_NUM = Number(process.env.VNC_PORT) || 6777;
 const NOVNC_PORT_NUM = Number(process.env.NOVNC_PORT) || 6778;
@@ -624,7 +629,7 @@ app.get("/api/auth/status", (_req, res) => {
 // Runtime client config (plan 034): frontend reads the rail range size here
 // so MEDIA_RANGE_SIZE applies without a web rebuild.
 app.get("/api/client-config", (_req, res) => {
-  res.json({ ok: true, rangeSize: mediaRangeSize() });
+  res.json({ ok: true, rangeSize: mediaRangeSize(), kbdHints: keyboardHints() });
 });
 app.post("/api/auth", (req, res) => {
   const expected = String(process.env.UI_PANEL_PASSWORD || process.env.ADMIN_PASSWORD || UI_PANEL_PASSWORD || "").trim();
@@ -2364,6 +2369,7 @@ app.get("/api/config", (_req, res) => {
         { key: "AUTO_CONTINUE", value: process.env.AUTO_CONTINUE ?? (!process.stdin.isTTY ? "1 (inferred)" : "0 (inferred)"), def: "!isTTY", desc: "Auto-continue prompts" },
         { key: "AUTO_CONTINUE_WAIT_MS", value: process.env.AUTO_CONTINUE_WAIT_MS || "0", def: "0", desc: "ms to wait before auto-continue" },
         { key: "MEDIA_RANGE_SIZE", value: process.env.MEDIA_RANGE_SIZE || "100", def: "100", desc: "Media grid rail: files per range" },
+        { key: "KEYBOARD_HINTS", value: process.env.KEYBOARD_HINTS ?? "1", def: "1", desc: "Show keyboard shortcut hint pills on buttons (0 = hide)" },
       ],
     },
     {
@@ -2413,7 +2419,7 @@ app.post("/api/config", async (req, res) => {
   const key = String(req.body?.key || "").trim();
   const value = req.body?.value == null ? "" : String(req.body.value);
   const allowed = new Set([
-    "PORT","HEADLESS","API_HEADLESS","BROWSER_USER_DATA_DIR","BROWSER_PROFILE_DIR","BROWSER_PATH","CLOAKBROWSER_CACHE_DIR","INSTAGRAM_USER_AGENT","AUTO_CONTINUE","AUTO_CONTINUE_WAIT_MS","MEDIA_RANGE_SIZE",
+    "PORT","HEADLESS","API_HEADLESS","BROWSER_USER_DATA_DIR","BROWSER_PROFILE_DIR","BROWSER_PATH","CLOAKBROWSER_CACHE_DIR","INSTAGRAM_USER_AGENT","AUTO_CONTINUE","AUTO_CONTINUE_WAIT_MS","MEDIA_RANGE_SIZE","KEYBOARD_HINTS",
     "AUTO_CAPTURE_TIMEOUT_MS","AUTO_CAPTURE_QUIET_MS","AUTO_CAPTURE_POLL_MS",
     "API_JOB_TIMEOUT_MS","DOWNLOAD_FETCH_TIMEOUT_MS","FFMPEG_TIMEOUT_MS","FFPROBE_TIMEOUT_MS","MANUAL_BROWSER_TIMEOUT_MS",
     "INSTAGRAM_429_COOLDOWN_MS","SAVED_SYNC_STATE_FILE","SAVED_SYNC_QUEUE_FILE","SAVED_SYNC_RETRY_DELAY_MS","SAVED_SYNC_RETRY_COUNT","API_BASE","SNAPSHOT_DIR",

@@ -460,6 +460,22 @@
       .btn-lg{padding:12px 20px;font-size:14px;border-radius:12px}
       .btn-block{width:100%}
 
+      /* Keyboard shortcut hint pill — floating at the top-left corner of a button */
+      .btn-kbd-hint{
+        position:absolute;
+        top:-3px;
+        left:-3px;
+        pointer-events:none;
+        background:#232334;
+        border-radius:4px;
+        padding:1px 2px;
+        border:1px solid #6d6d6d;
+        font-size:8px;
+        line-height:1;
+        color:var(--muted);
+      }
+      html[data-kbd-hints="0"] .btn-kbd-hint{display:none}
+
       /* Grid */
       .row{display:grid;grid-template-columns:repeat(12,1fr);gap:16px}
       .row.g-2{gap:10px}
@@ -678,6 +694,7 @@
         /* Media toolbar: filter takes full row */
         .media-toolbar{gap:6px !important}
         .media-filter{flex:1 1 100% !important;max-width:none !important}
+        .media-filter-wrap{flex:1 1 100% !important;max-width:none !important}
         /* Sticky overflow menu (mobile-only): closed shows only breadcrumbs
            + toggle; open reveals toolbar + side controls, toggle becomes X */
         .media-menu-toggle{display:inline-flex !important;margin-left:auto !important}

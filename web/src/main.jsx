@@ -10,7 +10,10 @@ import Media from "./views/Media.jsx";
 import Profiles from "./views/Profiles.jsx";
 import Saved from "./views/Saved.jsx";
 import Settings from "./views/Settings.jsx";
+import { loadKbdHints } from "./lib/kbdHints.js";
 import "./styles.css";
+
+loadKbdHints();
 
 if (typeof window !== "undefined" && "scrollRestoration" in history) {
   history.scrollRestoration = "manual";

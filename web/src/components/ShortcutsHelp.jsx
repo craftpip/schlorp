@@ -16,7 +16,7 @@ const LIBRARY_SECTIONS = [
     { keys: ["j"], desc: "Toggle flatten (list all files recursively)" },
     { keys: ["Shift", "G"], desc: "Generate video thumbnails (missing / all)" },
     { keys: ["2"], desc: "Cycle type filter (All → Img → Vid → GIF)" },
-    { keys: ["Shift", "1–3"], desc: "Toggle sort Name / Size / Time" },
+    { keys: ["Shift", "1–4"], desc: "Toggle sort Gallery / Name / Size / Time" },
   ] },
   { heading: "Saved lists", rows: [
     { keys: ["hold F"], desc: "Keep save popup open for selected file" },

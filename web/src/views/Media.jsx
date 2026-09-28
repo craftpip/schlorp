@@ -574,15 +574,14 @@ export default function Media() {
       if (customOrderMap.size) {
         const keyOf = (it) => (isFlat ? it.rel || it.name : it.name);
         const byDateDesc = (a, b) => createdMsOf(b) - createdMsOf(a);
-        // Date-desc base; manually-ordered files pin their saved slots.
-        const out = files.filter((it) => !customOrderMap.has(keyOf(it))).sort(byDateDesc);
+        // Files absent from the saved order (new downloads) sit on top,
+        // latest first; manually-ordered files keep their saved sequence
+        // below them. Pinning by absolute slot buried new files under the
+        // whole manual block.
+        const fresh = files.filter((it) => !customOrderMap.has(keyOf(it))).sort(byDateDesc);
         const pinned = files.filter((it) => customOrderMap.has(keyOf(it)));
         pinned.sort((a, b) => customOrderMap.get(keyOf(a)) - customOrderMap.get(keyOf(b)));
-        for (const it of pinned) {
-          const at = customOrderMap.get(keyOf(it));
-          out.splice(Math.min(Math.max(at, 0), out.length), 0, it);
-        }
-        return [...dirs, ...out];
+        return [...dirs, ...fresh, ...pinned];
       }
       // No custom order yet — inside a collection (folder) show latest to oldest,
       // so new downloads naturally prepend.
@@ -1429,12 +1428,13 @@ const collapseSpreadUnlessMember = (fid) => {
         const next = order[(i + 1) % order.length];
         setType(next);
       }
-      else if (e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && (e.code === "Digit1" || e.code === "Digit2" || e.code === "Digit3")) {
-        // Shift+1/2/3 toggles Name/Size/Time sort (grid + list, viewer closed).
-        // Uses e.code: with Shift held the key reads "!" / "@" / "#" on US layouts.
+      else if (e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && (e.code === "Digit1" || e.code === "Digit2" || e.code === "Digit3" || e.code === "Digit4")) {
+        // Shift+1/2/3/4 toggles Gallery/Name/Size/Time sort (grid + list, viewer closed).
+        // Uses e.code: with Shift held the key reads "!" / "@" / "#" / "$" on US layouts.
         e.preventDefault();
-        if (e.code === "Digit1") toggleSort("name");
-        else if (e.code === "Digit2") toggleSort("size");
+        if (e.code === "Digit1") toggleSort("custom");
+        else if (e.code === "Digit2") toggleSort("name");
+        else if (e.code === "Digit3") toggleSort("size");
         else toggleSort("time");
       }
       else if (lowK === "p" && !e.ctrlKey && !e.altKey && !e.metaKey) {
@@ -2219,11 +2219,12 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
       {label}<span style={{ color: "var(--accent)", minWidth: 10, display: "inline-block" }}>{sort === key ? (sortDir === "desc" ? "▼" : "▲") : ""}</span>
     </button>
   );
-  const sortBarBtn = (key, label, tid) => {
+  const sortBarBtn = (key, label, tid, hint) => {
     const active = sort === key;
     const isCustom = key === "custom";
     return (
-      <button data-testid={tid} type="button" className={`btn btn-sm ${active ? "btn-primary" : "btn-outline-secondary"}`} onClick={() => toggleSort(key)} title={isCustom ? "Custom order — drag tiles to rearrange (grid)" : `Sort by ${label}`} style={{ height: 25, padding: "0 10px", fontSize: 11, display: "inline-flex", alignItems: "center", gap: 4, borderRadius: 6, fontWeight: 600 }}>
+      <button data-testid={tid} type="button" className={`btn btn-sm ${active ? "btn-primary" : "btn-outline-secondary"}`} onClick={() => toggleSort(key)} title={isCustom ? "Custom order — drag tiles to rearrange (grid)" : `Sort by ${label}`} style={{ position: "relative", height: 25, padding: "0 10px", fontSize: 11, display: "inline-flex", alignItems: "center", gap: 4, borderRadius: 6, fontWeight: 600 }}>
+        {hint && <span className="btn-kbd-hint">{hint}</span>}
         {isCustom ? (<><span className="media-sort-full">Gallery</span><span className="media-sort-abbr">Gal</span></>) : label}
         {!isCustom && active && <span style={{ color: "#fff", display: "inline-block", fontSize: 10 }}>{sortDir === "desc" ? "▼" : "▲"}</span>}
       </button>
@@ -4186,16 +4187,20 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
       <div data-testid="media-sticky" data-menu-open={menuOpen ? "true" : "false"} className={`media-sticky${menuOpen ? " menu-open" : ""}`} style={{ position: "sticky", top: 0, zIndex: 100, margin: "0 -10px", paddingTop: 6, paddingLeft: 10, paddingRight: 10, paddingBottom: 10, borderRadius: "0 0 10px 10px", background: "color-mix(in srgb, var(--bg) 60%, transparent)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)", borderBottom: err ? "none" : "1px solid var(--border)", marginBottom: 12, boxShadow: "0 6px 12px -8px rgba(0,0,0,.4)" }}>
       <div data-testid="media-toolbar" id="media-toolbar" className="media-toolbar" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <div className="media-tools-row" data-tools-row="search" style={{ display: "contents" }}>
-        <input data-testid="media-filter" ref={filterInputRef} className="form-control form-control-sm media-filter" style={{ maxWidth: 200, height: 31 }} placeholder="Filter files…" value={filter} onChange={(e) => setFilter(e.target.value)} onKeyDown={(e) => { if (e.key === "Escape") e.currentTarget.blur(); }} />
+        <span className="media-filter-wrap" style={{ position: "relative", display: "inline-flex", maxWidth: 200, height: 31 }}>
+        <span className="btn-kbd-hint">1</span>
+        <input data-testid="media-filter" ref={filterInputRef} className="form-control form-control-sm media-filter" style={{ width: "100%", maxWidth: "none", height: 31 }} placeholder="Filter files…" value={filter} onChange={(e) => setFilter(e.target.value)} onKeyDown={(e) => { if (e.key === "Escape") e.currentTarget.blur(); }} />
+        </span>
         <button data-testid="media-refresh" className="btn btn-sm btn-outline-secondary" style={{ height: 31, display: "inline-flex", alignItems: "center" }} onClick={refresh} disabled={loading} title="Refresh"><i className="bi bi-arrow-clockwise" /></button>
         </div>
         <div className="media-tools-row" data-tools-row="type" style={{ display: "contents" }}>
-          <div data-testid="media-type-filter" style={{ display: "inline-flex", alignItems: "center", gap: 2, border: "1px solid var(--border)", borderRadius: 8, padding: 2, background: "var(--surface-2)" }} title="Type filter — press 2 to cycle">
+          <div data-testid="media-type-filter" style={{ position: "relative", display: "inline-flex", alignItems: "center", gap: 2, border: "1px solid var(--border)", borderRadius: 8, padding: 2, background: "var(--surface-2)" }} title="Type filter — press 2 to cycle">
+            <span className="btn-kbd-hint">2</span>
             {TYPE_CHIPS.map(([v, label, icon]) => (
               <button key={v} data-testid={`media-type-${v}`} type="button" className={`btn btn-sm ${type === v ? "btn-primary" : "btn-outline-secondary"}`} style={{ height: 25, padding: "0 10px", fontSize: 11, display: "inline-flex", alignItems: "center", gap: 5, borderRadius: 6 }} onClick={() => setType(v)}><i className={`bi ${icon} media-type-icon`} style={{ fontSize: 12 }} /><span className="media-type-label">{label}</span></button>
             ))}
           </div>
-        <button data-testid="media-flatten" type="button" className={`btn btn-sm ${isFlat ? "btn-primary" : "btn-outline-secondary"}`} onClick={() => { if (isFlat) setParam("flat", ""); else setConfirmState({ open: true, id: "flatten:", name: "" }); }} title="Flatten: list all files recursively under this folder (j)" style={{ height: 31, display: "inline-flex", alignItems: "center", gap: 5 }}><i className="bi bi-layers" /> <span className="media-btn-label">Flatten</span></button>
+        <button data-testid="media-flatten" type="button" className={`btn btn-sm ${isFlat ? "btn-primary" : "btn-outline-secondary"}`} onClick={() => { if (isFlat) setParam("flat", ""); else setConfirmState({ open: true, id: "flatten:", name: "" }); }} title="Flatten: list all files recursively under this folder (j)" style={{ position: "relative", height: 31, display: "inline-flex", alignItems: "center", gap: 5 }}><span className="btn-kbd-hint">J</span><i className="bi bi-layers" /> <span className="media-btn-label">Flatten</span></button>
         </div>
       </div>
 
@@ -4221,9 +4226,10 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
           </span>
         )}
         </div>
-        {(folder || inPlaylistView) && <button data-testid="media-up" className="btn btn-sm btn-outline-secondary" onClick={goUp} style={{ marginLeft: 8, flex: "0 0 auto" }}><i className="bi bi-arrow-90deg-up" /> Up</button>}
+        {(folder || inPlaylistView) && <button data-testid="media-up" className="btn btn-sm btn-outline-secondary" onClick={goUp} style={{ position: "relative", marginLeft: 8, flex: "0 0 auto" }}><span className="btn-kbd-hint">Q</span><i className="bi bi-arrow-90deg-up" /> Up</button>}
         <div id="media-side-controls" className="media-side-controls" style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "nowrap", marginLeft: "auto" }}>
-        <div data-testid="media-view-toggle" style={{ display: "inline-flex", alignItems: "center", gap: 2, border: "1px solid var(--border)", borderRadius: 8, padding: 2, background: "var(--surface-2)" }}>
+        <div data-testid="media-view-toggle" style={{ position: "relative", display: "inline-flex", alignItems: "center", gap: 2, border: "1px solid var(--border)", borderRadius: 8, padding: 2, background: "var(--surface-2)" }}>
+          <span className="btn-kbd-hint">G</span>
           <button data-testid="media-view-list" type="button" className={`btn btn-sm ${isGrid ? "btn-outline-secondary" : "btn-primary"}`} style={{ height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6 }} onClick={() => setParam("view", "list")} title="List view (g)"><i className="bi bi-list-ul" /></button>
           <button data-testid="media-view-grid" type="button" className={`btn btn-sm ${isGrid ? "btn-primary" : "btn-outline-secondary"}`} style={{ height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6 }} onClick={() => setParam("view", "")} title="Grid view (g)"><i className="bi bi-grid-3x3-gap-fill" /></button>
         </div>
@@ -4231,16 +4237,18 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
           <i className="bi bi-check2-square" style={{ fontSize: 12 }} />
         </button>
         <span data-testid="media-sort-bar" title="Sort (same as list header)" style={{ display: "inline-flex", alignItems: "center", gap: 2, border: "1px solid var(--border)", borderRadius: 8, padding: 2, background: "var(--surface-2)" }}>
-          <button data-testid="media-stacks-toggle" type="button" disabled={!stacksActive} className={`btn btn-sm ${stacksMode === "open" ? "btn-primary" : "btn-outline-secondary"}`} onClick={cycleStacksMode} title={stacksMode === "locked" ? "stacked & locked — piles never open on select or navigation" : stacksMode === "open" ? "unstacked — all stacks spread open; click to lock" : "stacked — piles open on select/navigate; click to unstack"} style={{ height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6 }}>
+          <button data-testid="media-stacks-toggle" type="button" disabled={!stacksActive} className={`btn btn-sm ${stacksMode === "open" ? "btn-primary" : "btn-outline-secondary"}`} onClick={cycleStacksMode} title={stacksMode === "locked" ? "stacked & locked — piles never open on select or navigation" : stacksMode === "open" ? "unstacked — all stacks spread open; click to lock" : "stacked — piles open on select/navigate; click to unstack"} style={{ position: "relative", height: 25, width: 25, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 6 }}>
+            <span className="btn-kbd-hint">X</span>
             <i className={`bi ${stacksMode === "locked" ? "bi-lock-fill" : stacksMode === "open" ? "bi-grid-3x3-gap-fill" : "bi-stack"}`} style={{ fontSize: 12 }} />
           </button>
-          {sortBarBtn("custom", "Gallery", "media-sortbar-custom")}
-          {sortBarBtn("name", "Name", "media-sortbar-name")}
-          {sortBarBtn("size", "Size", "media-sortbar-size")}
-          {sortBarBtn("time", "Time", "media-sortbar-time")}
+          {sortBarBtn("custom", "Gallery", "media-sortbar-custom", "⇧1")}
+          {sortBarBtn("name", "Name", "media-sortbar-name", "⇧2")}
+          {sortBarBtn("size", "Size", "media-sortbar-size", "⇧3")}
+          {sortBarBtn("time", "Time", "media-sortbar-time", "⇧4")}
         </span>
         </div>
-        <button data-testid="media-menu-toggle" type="button" className="btn btn-sm btn-outline-secondary media-menu-toggle" onClick={() => setMenuOpen((v) => !v)} aria-expanded={menuOpen} aria-controls="media-toolbar media-side-controls" aria-label={menuOpen ? "Hide filters" : "Show filters"} title={menuOpen ? "Hide filters (Esc)" : "Show filters"} style={{ height: 31, width: 31, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 8, flex: "0 0 auto" }}>
+        <button data-testid="media-menu-toggle" type="button" className="btn btn-sm btn-outline-secondary media-menu-toggle" onClick={() => setMenuOpen((v) => !v)} aria-expanded={menuOpen} aria-controls="media-toolbar media-side-controls" aria-label={menuOpen ? "Hide filters" : "Show filters"} title={menuOpen ? "Hide filters (Esc)" : "Show filters"} style={{ position: "relative", height: 31, width: 31, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 8, flex: "0 0 auto" }}>
+          <span className="btn-kbd-hint">Esc</span>
           <i className={`bi ${menuOpen ? "bi-x-lg" : "bi-three-dots"}`} style={{ fontSize: 14 }} />
         </button>
       </div>
