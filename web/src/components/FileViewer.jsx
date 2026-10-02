@@ -40,10 +40,13 @@ const TRACK_SMOOTH_KEY = "xdl_viewer_smooth";
 const TRACK_SMOOTH_UI_MAX = 10;
 const readTrackSmoothUi = () => { try { const s = parseFloat(localStorage.getItem(TRACK_SMOOTH_KEY)); if (Number.isFinite(s)) return Math.min(TRACK_SMOOTH_UI_MAX, Math.max(0, s)); } catch {} return (1 - TRACK_PAN_SMOOTH) * TRACK_SMOOTH_UI_MAX; };
 const trackSmoothFactorOf = (ui) => Math.max(0.05, 1 - Math.min(TRACK_SMOOTH_UI_MAX, Math.max(0, ui)) / TRACK_SMOOTH_UI_MAX);
-// Auto-center: while stabilization runs, a deliberate off-center pan eases back
-// to the middle so the view cannot drift out of the window. That is the user pan
-// offset only - the tracked point is left alone, so this never weakens the
-// stabilization itself.
+// Auto-center: while stabilization runs, the pan offset is eased back to the
+// framing the user chose, which is recorded in st.userX/userY by the gesture that
+// chose it. The tracked point's own term is part of the transform and the bg
+// compensation rides on bgX/bgY, so neither of them is in the offset and neither
+// is corrected here. The pull therefore never takes a pan back: it only corrects
+// the offset moving away from the framing, so letting go of the mouse changes
+// nothing about where the user put the picture.
 const TRACK_AUTOCENTER_REACH = 0.2;
 const TRACK_AUTOCENTER_PULL = 0.35;
 const TRACK_AUTOCENTER_MAX = 2.2;
@@ -1368,6 +1371,14 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     let shown = want;
     if (tv.zoom <= 1) { st.offX = 0; st.offY = 0; shown = base; }
     else { st.offX = want.x - base.x; st.offY = want.y - base.y; }
+    // The framing this gesture chose, in the terms the auto-center target is
+    // built from. The gesture has just solved the offset for, so the offset is
+    // the answer in both modes: in bg mode the compensation rides on bgX/bgY,
+    // and in subject mode the tracked point's term is the base it was taken off
+    // (offX = want - base), so neither leaves anything of its own in it. Zoomed
+    // all the way out there is nothing to frame, so the offset - and with it the
+    // framing - is 0 and the pull keeps the view at the tracked one.
+    st.userX = st.offX; st.userY = st.offY;
     tv.pan = shown;
     tv.transform = `translate(${shown.x}px, ${shown.y}px) rotate(${rot}deg) scale(${tv.zoom})`;
     const v = videoRef.current;
@@ -1441,6 +1452,14 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       const z = Math.min(4, Math.max(1, trackViewRef.current.zoom * Math.exp(-e.deltaY * perLine * 0.0022)));
       if (z === trackViewRef.current.zoom) return;
       const rot = rotateRef.current;
+      // Zooming is not a framing decision, so the remembered one is left alone --
+      // it is in screen pixels, which is what a zoom keeps: the picture stays
+      // where the user put it and simply gets bigger around that point. Backing
+      // out to 1x is the exception, and it has to happen before the pan below is
+      // built, because the whole frame is on screen at 1x: there is no framing
+      // left to hold, so the offset is spent and the pull takes it back to the
+      // tracked view on its own.
+      if (z <= 1) { st.userX = 0; st.userY = 0; st.offX = 0; st.offY = 0; }
       const pan = st.mode === "bg"
         ? { x: st.bgX * st.cPerCanvas * z + (st.offX || 0), y: st.bgY * st.cPerCanvas * z + (st.offY || 0) }
         : computeCenterPan(st, z, rect, rot);
@@ -1517,6 +1536,12 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       // The point starts unknown: there is nothing to centre on until the first
       // frame that has a foreground in it, and until then the view is held.
       fx: -1, fy: -1, vx: 0, vy: 0, age: 0, offX: 0, offY: 0, lost: true, misses: 0, frames: 0,
+      // The framing the user chose, in the same screen pixels a gesture measures:
+      // the auto-center pull moves offX/offY, so the framing has to be remembered
+      // apart from it or a deliberate pan is read as drift and walked back to the
+      // middle of the video the moment the drag ends. Zero until the user pans,
+      // which is why a viewer who never does is unaffected.
+      userX: 0, userY: 0,
       mode: "fg", seeking: false, warm: 2,
       // The background model, the reduced copy of the last frame the camera
       // motion is measured from, and the size the model was built for.
@@ -1580,6 +1605,11 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       ctx: null, rw: 0, rh: 0, cPerCanvas: 1, lum: null,
       tpl: null, tplW: 0, tplH: 0,
       fx: 0, fy: 0, vx: 0, vy: 0, age: 0, offX: 0, offY: 0, lost: false, misses: 0, frames: 0,
+      // The framing the user chose, in the same screen pixels a drag measures.
+      // In BG mode offX/offY is nothing but the user's own offset -- the camera
+      // compensation rides on bgX/bgY and is homed by its own band below -- so
+      // this is the whole of what the pull must not take back.
+      userX: 0, userY: 0,
       mode: "bg", grid: null, gridRW: -1, gridRH: -1, warm: 3, seeking: false, bgRegrab: false,
       // Auto-center state: whether the view is currently out of the band, ms of
       // countdown still owed before the compensation may be pulled in, and how
@@ -1637,6 +1667,11 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
         const base = rect ? computeCenterPan(st, z, rect, rot) : { x: 0, y: 0 };
         st.offX = -base.x; st.offY = -base.y;
       }
+      // Recentre is the escape hatch out of a framing the user no longer wants,
+      // so the framing it settled on is the one now remembered -- otherwise the
+      // pull would hold the view at the pan just discarded and the button would
+      // do nothing.
+      st.userX = st.offX || 0; st.userY = st.offY || 0;
     }
     const pan = { x: 0, y: 0 };
     if (tracking) {
@@ -1740,12 +1775,14 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
     // Keep the view from ever sitting far outside the frame. In bg mode the
     // compensation itself is allowed to run out to TRACK_BG_CLAMP of the frame
     // and then just stops there, so the picture can sit half a frame off with
-    // nothing pulling it back; here the visible drift is measured every tick and
-    // eased back, firmly once it is past a small band. The user pan offset is
-    // eased through offX/offY so the compensation and the tracked point keep
-    // working untouched. In bg mode the compensation gets its own, much later
-    // pass below. Paused while the user drags, and skipped when auto-center is
-    // off.
+    // nothing pulling it back; here the drift in the pan offset is measured every
+    // tick and eased back, firmly once it is past a small band. What counts as
+    // drift is the offset moving away from the framing the user chose, never the
+    // offset itself: the tracked point's term is part of the transform, so a
+    // target built from the bare video center read a deliberate pan as drift and
+    // walked it back to the middle of the video the moment a drag ended. In bg
+    // mode the compensation gets its own, much later pass below. Paused while the
+    // user drags, and skipped when auto-center is off.
     if (autoCenterRef.current && !dragRef.current.dragging) {
       const now = performance.now();
       const dt = st.acT ? Math.min(0.25, (now - st.acT) / 1000) : 0;
@@ -1753,19 +1790,13 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       if (dt > 0) {
         const z = trackViewRef.current.zoom;
         // tX/tY is the offX/offY that puts the view back on its reference, and
-        // (offX - tX) is the drift you can see. In bg mode the reference is the
-        // stabilized view; in subject mode it is the video's own center, since
-        // offX is exactly the dot's on-screen offset there and easing it to 0
-        // would re-center the dot instead of the video.
-        let tX = 0, tY = 0;
-        if (st.mode !== "bg") {
-          if (noPoint) { tX = st.offX || 0; tY = st.offY || 0; }
-          else {
-            const base = computeCenterPan(st, z, rect, rot);
-            tX = (st.offX || 0) - base.x;
-            tY = (st.offY || 0) - base.y;
-          }
-        }
+        // (offX - tX) is the drift you can see. The reference is the framing the
+        // last gesture recorded in userX/userY -- the user's own offset, with the
+        // tracker's share of the picture left where it belongs -- so this spring
+        // holds the view where the user put it and only corrects the offset
+        // drifting away from there. A viewer who never pans has a framing of 0
+        // and the offset stays at 0.
+        const tX = st.userX || 0, tY = st.userY || 0;
         const short = rect ? Math.min(rect.width, rect.height) : 357;
         const reach = Math.max(8, short * TRACK_AUTOCENTER_REACH);
         const fullAt = Math.max(reach + 1, short * TRACK_AUTOCENTER_MAXDRIFT);
@@ -2158,6 +2189,18 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
       dragRef.current.lastX = e.clientX; dragRef.current.lastY = e.clientY;
       st.offX = (st.offX || 0) + ddx;
       st.offY = (st.offY || 0) + ddy;
+      // The drag is a framing decision, so the offset it moves is recorded as the
+      // framing as well. Without this the pull resumes on release with a target
+      // that knows nothing about the pan and walks straight back to the middle of
+      // the video. At 1x the whole frame is on screen and there is nothing to
+      // frame, so no framing is recorded there and the pull keeps the offset at
+      // the zero it already holds.
+      if (trackViewRef.current.zoom > 1) {
+        st.userX = (st.userX || 0) + ddx;
+        st.userY = (st.userY || 0) + ddy;
+      } else {
+        st.userX = 0; st.userY = 0;
+      }
       const tv = trackViewRef.current;
       tv.pan = { x: tv.pan.x + ddx, y: tv.pan.y + ddy };
       const rot = rotateRef.current;
@@ -2225,9 +2268,9 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
         pr.pinchPrevZoom = baseZoom;
         pr.pinchPrevPan = basePan;
         pr.pinchPrevMid = { x: midX, y: midY };
-        // Auto-center eases the pan offset home whenever no drag is in progress,
-        // which would swallow the gesture's own pan halfway through. Count the
-        // gesture as a drag for its duration, the way a mouse drag does.
+        // Auto-center runs on the pan offset whenever no drag is in progress, and
+        // the gesture is still moving that offset. Count it as a drag for its
+        // duration, the way a mouse drag does.
         if (trk) { dragRef.current.dragging = true; pr.trkDrag = true; }
       }
       const rect = containerRef.current?.getBoundingClientRect();

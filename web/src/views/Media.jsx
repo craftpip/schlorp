@@ -1084,7 +1084,12 @@ export default function Media() {
   // view at the bottom edge (never yanked up to the top).
   const scrollSelectionIntoView = (smooth = false) => {
     const el = navSelectedEl();
-    if (!el) return;
+    if (!el) {
+      // Windowed grid: the selected row isn't rendered, so there is nothing
+      // to measure yet. Pull it into the window and re-run when it lands.
+      revealKeyInWindow(selKey, () => scrollSelectionIntoView(smooth));
+      return;
+    }
     // Cancel any in-flight smooth scroll first: single presses glide, so when
     // reversing direction the previous animation is still running and the
     // measurement below reads a mid-flight position (row looks in-view, no
@@ -1256,6 +1261,10 @@ const collapseSpreadUnlessMember = (fid) => {
       if (!nodes.length) return;
       const current = navSelectedEl();
       if (!current) {
+        // Windowed grid: the selected cell isn't rendered, so "first tile" is
+        // the wrong answer — it throws the selection to the top of the folder.
+        // Bring the selected row into the window and move on from there.
+        if (revealKeyInWindow(selKey, () => moveSelectionSpatial(dir, smooth))) return;
         keyboardScrollRef.current = true;
         landOn(nodes[0], dir);
         return;
@@ -2485,6 +2494,18 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     navEdgeRef.current = null;
     retry();
   });
+  // The selected cell can sit outside the rendered rows (the viewer walks
+  // anywhere, e.g. shuffle), so it has no DOM node at all — nothing to
+  // highlight, measure or scroll to. Bring its row into the window and re-run
+  // `retry` once the new rows have committed. Returns true when it took over.
+  const revealKeyInWindow = (key, retry) => {
+    const v = virtNavRef.current;
+    if (!v || !v.on || !v.win || !key) return false;
+    const row = v.rowOfKey(key);
+    if (row < 0 || (row >= v.win.start && row < v.win.end)) return false;
+    navEdgeRef.current = retry;
+    return v.scrollRow(row);
+  };
   const gridKeys = useMemo(() => gridVisible.map((e) => e.key), [gridVisible]);
   // Map: member rowKey → pile stackId (for Enter-to-spread on a selected member)
   const keyPileMap = useMemo(() => {
