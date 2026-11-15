@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 
-export default function MediaContextMenu({ menu, onClose, stacks, selCount, onStack, onOpen, onOpenStack, onMove, canMove, moveLabel, onCreateFolder, onDelete, onAddToStack, onRename, onUnstack, onRemoveFromStack, noStacks, onGotoFile }) {
+export default function MediaContextMenu({ menu, onClose, stacks, selCount, onStack, onOpen, onOpenStack, onMove, canMove, moveLabel, onCreateFolder, onDelete, onAddToStack, onRename, onUnstack, onRemoveFromStack, noStacks, onGotoFile, lock, preview, onRenameFolder, onDeleteFolder, download }) {
+  // `download`: { label, onDownload } for the clicked file(s); never for folders.
+  // `preview`: { label, onGenerate } — poster generation for the clicked videos (null hides it).
+  // `lock` (plan 039): { available, files: { locked, unlocked }, folderLabel,
+  // onLockFiles, onUnlockFiles, onLockFolder, onUnlockFolder } — null hides it.
   // Scroll lock while the popup is open (same as ConfirmModal) so the grid
   // behind the backdrop doesn't scroll (plan 024).
   useEffect(() => {
@@ -44,6 +48,52 @@ export default function MediaContextMenu({ menu, onClose, stacks, selCount, onSt
     setTouchActiveId((prev) => (prev === id ? prev : id));
   };
   const clearTouchActive = () => setTouchActiveId(null);
+  const isFolder = entry && entry.kind === "folder";
+  const isEmptyArea = entry && entry.kind === "file" && !entry.it;
+  const lockFiles = lock && lock.files ? lock.files : { locked: 0, unlocked: 0 };
+  const lockFilesTotal = lockFiles.locked + lockFiles.unlocked;
+  const lockSection = lock ? (
+    <>
+      <Divider />
+      {!lock.available && (
+        <div data-testid="media-ctx-lock-unavailable" style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", color: "var(--muted)", fontSize: 12 }}>
+          <i className="bi bi-shield-lock" style={{ fontSize: 12 }} /> Set a panel password in Settings to lock media
+        </div>
+      )}
+      {lock.available && lock.needsSetup && (
+        <MenuItem data-testid="media-ctx-setup-encryption" label="Set up encryption…" icon="bi-shield-lock" onClick={() => { onClose(); window.location.href = "/settings"; }} />
+      )}
+      {lock.available && !lock.needsSetup && !isFolder && !isEmptyArea && lockFiles.unlocked > 0 && (
+        <MenuItem data-testid="media-ctx-lock" label={lockFilesTotal > 1 ? `Lock ${lockFiles.unlocked} file${lockFiles.unlocked === 1 ? "" : "s"}` : "Lock file"} icon="bi-lock-fill" onClick={() => { onClose(); lock.onLockFiles(); }} />
+      )}
+      {lock.available && !lock.needsSetup && !isFolder && !isEmptyArea && lockFiles.locked > 0 && (
+        <MenuItem data-testid="media-ctx-unlock" label={lockFilesTotal > 1 ? `Unlock ${lockFiles.locked} file${lockFiles.locked === 1 ? "" : "s"}` : "Unlock file"} icon="bi-unlock" onClick={() => { onClose(); lock.onUnlockFiles(); }} />
+      )}
+      {lock.available && !lock.needsSetup && (isFolder || isEmptyArea) && (
+        <>
+          <MenuItem data-testid="media-ctx-lock-folder" label={`Lock folder${lock.folderLabel ? ` “${lock.folderLabel}”` : ""}`} icon="bi-folder-symlink" onClick={() => { onClose(); lock.onLockFolder(); }}><i className="bi bi-lock-fill" style={{ fontSize: 10, color: "var(--muted)", marginLeft: "auto" }} /></MenuItem>
+          <MenuItem data-testid="media-ctx-unlock-folder" label={`Unlock folder${lock.folderLabel ? ` “${lock.folderLabel}”` : ""}`} icon="bi-folder2-open" onClick={() => { onClose(); lock.onUnlockFolder(); }}><i className="bi bi-unlock" style={{ fontSize: 10, color: "var(--muted)", marginLeft: "auto" }} /></MenuItem>
+        </>
+      )}
+    </>
+  ) : null;
+  if (isFolder) {
+    return (
+      <div data-testid="media-context-menu" onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 120, display: "flex", alignItems: "center", justifyContent: "center", padding: 20, background: "rgba(6,8,18,0.55)", backdropFilter: "blur(6px)", WebkitBackdropFilter: "blur(6px)", userSelect: "none", WebkitUserSelect: "none" }}>
+        <div className="media-ctx-card" onClick={(e) => e.stopPropagation()} style={{ width: "min(360px, 100%)", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, boxShadow: "0 12px 32px rgba(0,0,0,.25)", padding: 4, fontSize: 13 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px 4px", fontWeight: 700 }}>
+            <i className="bi bi-folder-fill" style={{ color: "#f59e0b" }} />
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{entry.it ? entry.it.name : ""}</span>
+          </div>
+          <MenuItem label="Open" icon="bi-box-arrow-up-right" onClick={() => { onClose(); onOpen(); }} />
+          <MenuItem data-testid="media-ctx-create-folder" label="Create folder" icon="bi-folder-plus" onClick={() => { onClose(); onCreateFolder(); }} />
+          {onRenameFolder && <MenuItem data-testid="media-ctx-rename-folder" label="Rename folder" icon="bi-pencil" onClick={() => { onClose(); onRenameFolder(); }} />}
+          {onDeleteFolder && <MenuItem data-testid="media-ctx-delete-folder" label="Delete folder" icon="bi-trash" danger onClick={() => { onClose(); onDeleteFolder(); }} />}
+          {lockSection}
+        </div>
+      </div>
+    );
+  }
   return (
     <div
       data-testid="media-context-menu"
@@ -76,11 +126,20 @@ export default function MediaContextMenu({ menu, onClose, stacks, selCount, onSt
             </>
           )}
           {!noStacks && fileCount > 1 && <MenuItem data-testid="media-ctx-stack-create" label={`Stack ${fileCount} item${fileCount === 1 ? "" : "s"}`} icon="bi-layers" onClick={() => { onClose(); onStack(); }} />}
-          {!noStacks && <Divider />}
+          {/* Separator only when the stacks section above actually rendered something. */}
+          {!noStacks && (stacks.length > 0 || fileCount > 1) && <Divider />}
           <MenuItem label="Open" icon="bi-box-arrow-up-right" onClick={() => { onClose(); onOpen(); }} />
+          {download && <MenuItem data-testid="media-ctx-download" label={download.label} icon="bi-download" onClick={() => { onClose(); download.onDownload(); }} />}
           {!isPlaylistFile && <MenuItem data-testid="media-ctx-create-folder" label="Create folder" icon="bi-folder-plus" onClick={() => { onClose(); onCreateFolder(); }} />}
           <MenuItem data-testid="media-ctx-move" label={moveLabel || (isPile ? "Move stack" : "Move files")} icon="bi-arrows-move" disabled={!canMove} onClick={() => { onClose(); onMove(); }} />
           <MenuItem label="Delete" icon="bi-trash" danger onClick={() => { onClose(); onDelete(); }} />
+          {preview && (
+            <>
+              <Divider />
+              <MenuItem data-testid="media-ctx-preview" label={preview.label} icon="bi-image" onClick={() => { onClose(); preview.onGenerate(); }} />
+            </>
+          )}
+          {lockSection}
           {!noStacks && isPile && (
             <>
               <Divider />

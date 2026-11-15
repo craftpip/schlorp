@@ -58,7 +58,83 @@ function keyboardHints() {
 const VNC_FLAG_PATH = process.env.VNC_FLAG || "/data/browser/.vnc-enabled";
 const VNC_PORT_NUM = Number(process.env.VNC_PORT) || 6777;
 const NOVNC_PORT_NUM = Number(process.env.NOVNC_PORT) || 6778;
-let UI_PANEL_PASSWORD = String(process.env.UI_PANEL_PASSWORD || process.env.ADMIN_PASSWORD || "").trim();
+// Settings that the container environment (docker-compose `environment:`)
+// sets: they win over .env on every start, so the Settings page shows them
+// as locked instead of letting a change silently revert after a restart.
+const ENV_FROM_CONTAINER = (() => {
+  let fileVals = {};
+  try { fileVals = require("dotenv").parse(require("fs").readFileSync(path.join(__dirname, ".env"))); } catch {}
+  const out = new Set();
+  for (const [k, v] of Object.entries(process.env)) if (fileVals[k] === undefined || fileVals[k] !== v) out.add(k);
+  return out;
+})();
+// --- Panel login (plan 040): password hash + optional 5x5 pattern ---
+// The password is never kept in plain text: a one-time migration moves any
+// UI_PANEL_PASSWORD / ADMIN_PASSWORD from .env into a scrypt hash (done
+// synchronously here, before the server accepts requests) and blanks .env.
+const { createPatternAuth } = require("./scan-videos/pattern-auth");
+const patternAuth = createPatternAuth({ rootDir });
+(() => {
+  const plain = String(process.env.UI_PANEL_PASSWORD || process.env.ADMIN_PASSWORD || "").trim();
+  if (!plain) return;
+  try {
+    if (patternAuth.migratePlainPasswordSync(plain)) console.log("[auth] panel password moved from .env into a hash (.xdl-auth.json)");
+    const envPath = path.join(rootDir, ".env");
+    const fsM = require("fs");
+    if (fsM.existsSync(envPath)) {
+      const txt = fsM.readFileSync(envPath, "utf8");
+      const next = txt.replace(/^(\s*(?:export\s+)?(UI_PANEL_PASSWORD|ADMIN_PASSWORD)\s*=).*$/gm, "$1");
+      if (next !== txt) fsM.writeFileSync(envPath, next, "utf8");
+    }
+  } catch (e) {
+    console.error(`[auth] password migration failed: ${e.message}`);
+  }
+  delete process.env.UI_PANEL_PASSWORD;
+  delete process.env.ADMIN_PASSWORD;
+})();
+function isPanelProtected() {
+  return patternAuth.hasPassword();
+}
+// --- Media encryption (plan 039) ---
+const mediaCrypto = require("./scan-videos/media-crypto");
+const { createMediaVault } = require("./scan-videos/media-vault");
+const mediaVault = createMediaVault({ mediaDir, rootDir, isProtected: isPanelProtected });
+let lastPanelActivity = Date.now();
+function vaultStatusFull() {
+  const sec = patternAuth.publicSettings();
+  return { ...mediaVault.status(), hasPattern: !!sec.pattern, preferLogin: sec.preferLogin, autoLockMinutes: sec.autoLockMinutes };
+}
+// After a successful login, open the media vault with the same secret.
+async function unlockVaultAfterLogin(kind, secret) {
+  try {
+    const st = mediaVault.status();
+    if (!st.exists || st.unlocked) return;
+    if (kind === "pattern" && !st.patternSlot) return;
+    await mediaVault.unlock(kind, secret);
+    console.log(`[vault] unlocked by ${kind} login`);
+    void flushPendingPosters();
+  } catch (e) {
+    console.error(`[vault] login could not unlock the vault: ${e.message}`);
+  }
+}
+// Loopback-only token so server-side ffmpeg/ffprobe can read encrypted files
+// through the decrypting /media route without the panel password.
+const INTERNAL_MEDIA_TOKEN = require("crypto").randomBytes(24).toString("hex");
+const INTERNAL_POST_PATHS = new Set(["/scan-saved", "/queue/add", "/sync-queue/pending/remove"]);
+function internalMediaUrl(fullPath) {
+  const rel = path.relative(mediaDir, fullPath).split(path.sep).map(encodeURIComponent).join("/");
+  return `http://127.0.0.1:${port}/media/${rel}`;
+}
+// ffmpeg/ffprobe input args for a media file: the path itself, or the
+// internal decrypting URL when the file is encrypted.
+async function ffInputFor(fullPath) {
+  const info = await mediaVault.fileInfo(fullPath).catch(() => null);
+  // ffprobe: [...args]; ffmpeg: [...pre, "-i", src].
+  if (!info || !info.locked) return { locked: false, pre: [], src: fullPath, args: [fullPath] };
+  const pre = ["-headers", `X-Xdl-Internal: ${INTERNAL_MEDIA_TOKEN}\r\n`];
+  const src = internalMediaUrl(fullPath);
+  return { locked: true, pre, src, args: [...pre, src] };
+}
 
 let shuttingDown = false;
 let jobCounter = 0;
@@ -180,6 +256,8 @@ async function loadWebQueue() {
   }
   if (missing || parsed) {
     queueStateValid = true;
+    // Fresh install: no queue file yet → start empty instead of crashing on null.
+    if (!parsed) parsed = {};
   } else {
     console.error("[queue] load failed after retries — keeping in-memory state, saves suspended");
     queueLoaded = true;
@@ -567,6 +645,13 @@ async function queueWorkerLoop() {
       } catch {}
     } finally {
       stopHlsTick();
+      // Encrypt whatever was written — also when the job failed or timed out
+      // part-way (ENCRYPT_NEW_MEDIA).
+      try {
+        const doneLogs = (nextItem.logs || []).join("\n");
+        const written = [...doneLogs.matchAll(/Downloaded media to:\s*(.+)/g)].map((m) => m[1].trim());
+        await autoEncryptDownloaded(written, logToWs);
+      } catch {}
       queueActiveJob = null;
       // move from active to completed
       webQueue.active = webQueue.active.filter((it) => it.id !== nextItem.id);
@@ -623,25 +708,52 @@ app.get("/health", (_req, res) => {
 });
 
 app.get("/api/auth/status", (_req, res) => {
-  const pw = String(process.env.UI_PANEL_PASSWORD || process.env.ADMIN_PASSWORD || UI_PANEL_PASSWORD || "").trim();
-  res.json({ ok: true, protected: !!pw });
+  res.json({ ok: true, protected: isPanelProtected() });
 });
 // Runtime client config (plan 034): frontend reads the rail range size here
 // so MEDIA_RANGE_SIZE applies without a web rebuild.
 app.get("/api/client-config", (_req, res) => {
   res.json({ ok: true, rangeSize: mediaRangeSize(), kbdHints: keyboardHints() });
 });
-app.post("/api/auth", (req, res) => {
-  const expected = String(process.env.UI_PANEL_PASSWORD || process.env.ADMIN_PASSWORD || UI_PANEL_PASSWORD || "").trim();
-  if (!expected) return res.json({ ok: true });
-  const provided = String(req.body?.password || "").trim();
-  if (provided === expected) {
-    res.cookie("xdl_session", expected, { httpOnly: true, sameSite: "lax", path: "/" });
-    return res.json({ ok: true });
+// Password login → random session token (cookie + returned for the
+// x-xdl-session header). Also unlocks encrypted media with the same password.
+app.post("/api/auth", async (req, res) => {
+  try {
+    if (!isPanelProtected()) return res.json({ ok: true });
+    const pw = await patternAuth.check("password", String(req.body?.password ?? ""), req.ip);
+    const token = patternAuth.newSession();
+    res.cookie("xdl_session", token, { httpOnly: true, sameSite: "lax", path: "/" });
+    await unlockVaultAfterLogin("password", pw);
+    lastPanelActivity = Date.now();
+    return res.json({ ok: true, token });
+  } catch (e) {
+    return res.status(e.status || 500).json({ ok: false, error: e.message, code: e.code || null });
   }
-  return res.status(401).json({ ok: false, error: "Invalid password" });
 });
-app.post("/api/auth/logout", (_req, res) => {
+// Which login methods the login box can offer (both are always available
+// when a pattern is set; preferLogin picks the tab shown first).
+app.get("/api/auth/methods", (_req, res) => {
+  const sec = patternAuth.publicSettings();
+  res.json({ ok: true, loginPattern: sec.pattern, preferLogin: sec.preferLogin, minDots: sec.minDots });
+});
+// Pattern login → random session token (memory only; rate-limited).
+app.post("/api/auth/pattern", async (req, res) => {
+  try {
+    if (!isPanelProtected()) return res.json({ ok: true });
+    const canonical = await patternAuth.check("pattern", req.body?.pattern, req.ip);
+    const token = patternAuth.newSession();
+    res.cookie("xdl_session", token, { httpOnly: true, sameSite: "lax", path: "/" });
+    await unlockVaultAfterLogin("pattern", canonical);
+    lastPanelActivity = Date.now();
+    return res.json({ ok: true, token });
+  } catch (e) {
+    return res.status(e.status || 500).json({ ok: false, error: e.message, code: e.code || null });
+  }
+});
+app.post("/api/auth/logout", (req, res) => {
+  const cookies = parseCookies(req.headers.cookie);
+  patternAuth.endSession(req.headers["x-xdl-session"]);
+  patternAuth.endSession(cookies.xdl_session);
   res.clearCookie("xdl_session", { path: "/" });
   res.json({ ok: true });
 });
@@ -696,20 +808,40 @@ function parseCookies(header) {
   if (!header) return out;
   for (const part of header.split(";")) {
     const [k, ...v] = part.split("=");
-    if (k) out[k.trim()] = decodeURIComponent(v.join("="));
+    if (!k) continue;
+    // A malformed cookie (e.g. "%E0" set by another app on this host) must not
+    // turn every request into a 500.
+    try { out[k.trim()] = decodeURIComponent(v.join("=")); } catch { /* ignore */ }
   }
   return out;
 }
 app.use((req, res, next) => {
-  const expected = String(process.env.UI_PANEL_PASSWORD || process.env.ADMIN_PASSWORD || UI_PANEL_PASSWORD || "").trim();
-  if (!expected) return next();
+  // Server-internal calls (ffmpeg reading encrypted media, selfPost) carry a
+  // per-process random token and must come from loopback.
+  if (req.headers["x-xdl-internal"] === INTERNAL_MEDIA_TOKEN && /^(::1|127\.0\.0\.1|::ffff:127\.0\.0\.1)$/.test(String(req.socket.remoteAddress || ""))) {
+    // Only what the server itself needs: ffmpeg reading /media, and selfPost.
+    const internalOk = ((req.method === "GET" || req.method === "HEAD") && req.path.startsWith("/media/"))
+      || (req.method === "POST" && INTERNAL_POST_PATHS.has(req.path));
+    if (internalOk) return next();
+  }
+  if (!isPanelProtected()) return next();
   // Public endpoints
   if (req.path === "/api/auth/status" || req.path === "/api/auth" || req.path === "/health" || req.path.startsWith("/health") || req.path === "/vnc/status" || req.path === "/website" || req.path.startsWith("/website/")) return next();
-  // Check header auth, query param, or session cookie
-  const provided = String(req.headers["x-panel-password"] || req.headers["x-admin-password"] || req.headers["x-admin-token"] || req.query?.password || "");
-  if (provided === expected) return next();
+  // Session token from a password or pattern login. Reads (GET/HEAD: media,
+  // pages) accept the httpOnly cookie; actions need the x-xdl-session header,
+  // which a form or page on another origin/port cannot send (CSRF).
   const cookies = parseCookies(req.headers.cookie);
-  if (cookies.xdl_session === expected) return next();
+  const headerOk = patternAuth.validSession(req.headers["x-xdl-session"]);
+  const cookieOk = patternAuth.validSession(cookies.xdl_session);
+  const isRead = req.method === "GET" || req.method === "HEAD";
+  const authed = headerOk || (isRead && cookieOk);
+  // Older builds stored the plain password in this cookie — drop stale ones.
+  if (cookies.xdl_session && !cookieOk) res.clearCookie("xdl_session", { path: "/" });
+  if (authed) {
+    // Idle auto-lock clock: background polls don't count as activity.
+    if (req.path !== "/api/vault/status" && req.path !== "/api/media/lock/job") lastPanelActivity = Date.now();
+    return next();
+  }
   // Unauthenticated browser GET → serve login page (index.html). API/POST → JSON 401.
   if (req.method === "GET") {
     const distIndex = path.join(webDistDir, "index.html");
@@ -721,6 +853,76 @@ app.use((req, res, next) => {
 // ---- Protected: media files, SPA page routes (React enforces auth client-side on hard reload) ----
 app.get("/scan-saved", (_req, res) => {
   res.redirect("/dashboard");
+});
+// "Download" from the media panel: `?download=1` makes the browser save the
+// file under its own name instead of opening it inline. Applies to plain and
+// encrypted files (the decrypting route below keeps this header).
+app.use("/media", (req, res, next) => {
+  if ((req.method === "GET" || req.method === "HEAD") && String(req.query?.download || "") === "1") {
+    let base = "";
+    try { base = path.basename(decodeURIComponent(req.path)); } catch {}
+    if (base && base !== ".xdl-vault.json") res.attachment(base);
+  }
+  next();
+});
+// Encrypted media (plan 039): decrypt on the fly with HTTP Range support.
+// Plain files fall through to express.static below.
+app.use("/media", async (req, res, next) => {
+  if (req.method !== "GET" && req.method !== "HEAD") return next();
+  let rel;
+  try { rel = decodeURIComponent(req.path); } catch { return next(); }
+  const fullPath = path.join(mediaDir, rel);
+  const relCheck = path.relative(mediaDir, fullPath);
+  if (!relCheck || relCheck.startsWith("..") || path.isAbsolute(relCheck)) return next();
+  if (path.basename(fullPath) === path.basename(mediaVault.vaultFile)) return res.status(404).end();
+  let info;
+  try { info = await mediaVault.fileInfo(fullPath); } catch { return next(); }
+  if (!info || !info.locked) return next();
+  const key = await mediaVault.decryptKey();
+  if (!key) return res.status(423).json({ ok: false, error: "media vault is locked — unlock it with your password or pattern" });
+  const h = info.header;
+  const total = h.plainSize;
+  try {
+    let type = null;
+    if (/\.gif$/i.test(fullPath) && total >= 8) {
+      // Same sniff as the static route: mp4 bytes saved as .gif.
+      const parts = [];
+      for await (const p of mediaCrypto.decryptRange(fullPath, key, { start: 0, end: 11, header: h })) parts.push(p);
+      const head = Buffer.concat(parts);
+      if (head.length >= 8 && head.subarray(4, 8).toString("latin1") === "ftyp") type = "video/mp4";
+    }
+    res.type(type || path.extname(fullPath) || "application/octet-stream");
+    res.setHeader("Accept-Ranges", "bytes");
+    res.setHeader("Cache-Control", "private, no-store");
+    res.setHeader("X-Xdl-Locked", "1");
+    let start = 0;
+    let end = total - 1;
+    if (req.headers.range && total > 0) {
+      const ranges = req.range(total, { combine: true });
+      if (ranges === -1) {
+        res.setHeader("Content-Range", `bytes */${total}`);
+        return res.status(416).end();
+      }
+      if (Array.isArray(ranges) && ranges.length === 1 && ranges.type === "bytes") {
+        start = ranges[0].start;
+        end = ranges[0].end;
+        res.status(206);
+        res.setHeader("Content-Range", `bytes ${start}-${end}/${total}`);
+      }
+    }
+    res.setHeader("Content-Length", String(total ? end - start + 1 : 0));
+    if (req.method === "HEAD" || total === 0) return res.end();
+    const stream = mediaCrypto.createDecryptStream(fullPath, key, { start, end, header: h });
+    stream.on("error", (e) => {
+      console.error(`[media] decrypt failed for ${relCheck}: ${e.message}`);
+      res.destroy(e);
+    });
+    req.on("close", () => stream.destroy());
+    stream.pipe(res);
+  } catch (e) {
+    if (!res.headersSent) return res.status(500).json({ ok: false, error: e.message });
+    res.destroy(e);
+  }
 });
 app.use("/media", express.static(mediaDir, {
   // Some downloaded `.gif` files are actually MP4 bytes (saved from a .gif
@@ -750,7 +952,10 @@ function fileEntryTimes(stat) {
     stat.birthtime && Number.isFinite(stat.birthtimeMs) && stat.birthtimeMs > 0
       ? stat.birthtime
       : null;
-  const created = birth || stat.ctime || stat.mtime;
+  // Files decrypted again (plan 039) got a new inode — report the original
+  // creation time recorded at unlock so gallery date order does not jump.
+  const overrideMs = mediaVault.createdOverride(stat);
+  const created = overrideMs ? new Date(overrideMs) : birth || stat.ctime || stat.mtime;
   return {
     mtime: stat.mtime.toISOString(),
     created: created.toISOString(),
@@ -835,10 +1040,23 @@ async function listMediaDir(resolved, flat) {
     });
     for (const it of items) delete it.mtimeMs;
   }
-  // Filter out .xdlstack files from the listing (both branches)
+  // Filter out .xdlstack files from the listing (both branches), plus the
+  // media vault and in-flight encrypt/decrypt/upload temp files (plan 039).
   for (let i = items.length - 1; i >= 0; i--) {
-    if (/\.xdlstack$/i.test(items[i].name)) items.splice(i, 1);
+    const n = items[i].name;
+    if (/\.xdlstack$/i.test(n) || n === ".xdl-vault.json" || /^\..+\.(xenc|xdec|xupl)-[0-9a-f]{8}$/.test(n)) items.splice(i, 1);
   }
+  // Lock state (plan 039): encrypted files report their plain size and the
+  // creation time stored in the header.
+  await mapLimit(items, 64, async (it) => {
+    if (it.dir) return;
+    const full = path.join(resolved, ...String(it.rel || it.name).split("/").filter(Boolean));
+    const info = await mediaVault.fileInfo(full).catch(() => null);
+    if (!info || !info.locked) return;
+    it.locked = true;
+    it.size = info.header.plainSize;
+    if (info.header.createdMs > 0) it.created = new Date(info.header.createdMs).toISOString();
+  });
   const posterByStem = new Map();
   for (const it of items) {
     const m = /^(.*)-poster\.(jpe?g|png|webp|avif|gif)$/i.exec(it.rel || it.name);
@@ -907,13 +1125,14 @@ async function saveMediadims() {
 const DIMS_PROBE_TIMEOUT_MS = 15000;
 const DIMS_PROBE_CONCURRENCY = 10;
 const DIMS_PROBEABLE_EXT = /\.(mp4|m4v|mov|mkv|webm|avi|mpg|mpeg|3gp|flv|ts|m3u8|jpg|jpeg|png|webp|bmp|avif|gif)$/i;
-function probeFileDims(fullPath) {
+async function probeFileDims(fullPath) {
+  const input = await ffInputFor(fullPath);
   return new Promise((resolve) => {
     if (!ffprobeBin) return resolve(null);
     try {
       require("child_process").execFile(
         ffprobeBin,
-        ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", fullPath],
+        ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", ...input.args],
         { timeout: DIMS_PROBE_TIMEOUT_MS },
         (err, stdout) => {
           if (err) return resolve(null);
@@ -952,6 +1171,9 @@ async function runDimsWarmQueue() {
       const results = await Promise.all(batch.map(async (e) => {
         try {
           if (!DIMS_PROBEABLE_EXT.test(e.key)) return null;
+          // Encrypted + vault locked: ffprobe would only get a 423, so skip.
+          const lk = await mediaVault.fileInfo(e.fullPath).catch(() => null);
+          if (lk && lk.locked && !(await mediaVault.decryptKey())) return null;
           const st = await fs.stat(e.fullPath).catch(() => null);
           if (!st || !st.isFile()) return null;
           if (st.mtimeMs !== e.mtimeMs || st.size !== e.size) return null;
@@ -1474,6 +1696,396 @@ app.post("/api/media/move", async (req, res) => {
     return res.status(500).json({ ok: false, error: error.message });
   }
 });
+// --- Media lock / unlock + upload (plan 039) ---
+function vaultHttpError(res, e) {
+  const status = e && Number.isInteger(e.status) ? e.status : 500;
+  return res.status(status).json({ ok: false, error: e && e.message ? e.message : String(e), code: (e && e.code) || null });
+}
+// Drop plaintext caches derived from a file that was just encrypted.
+async function purgePlainCachesFor(fullPath, beforeStat) {
+  try {
+    const rel = path.relative(mediaDir, fullPath);
+    const thumbHash = crypto.createHash("sha1").update(`${beforeStat.mtimeMs}:${beforeStat.size}:${rel}`).digest("hex").slice(0, 20);
+    const entries = await fs.readdir(thumbCacheDir).catch(() => []);
+    for (const n of entries) if (n.startsWith(`${thumbHash}.`)) await fs.unlink(path.join(thumbCacheDir, n)).catch(() => {});
+    const gifHash = crypto.createHash("sha1").update(`${beforeStat.mtimeMs}:${rel}`).digest("hex").slice(0, 20);
+    await fs.unlink(path.join(gifCacheDir, `${gifHash}.mp4`)).catch(() => {});
+  } catch {}
+}
+// Encrypt ("lock") or decrypt ("unlock") one file in place. Returns
+// "done" | "skipped" | "missing"; throws on failure.
+async function lockMediaFile(fullPath, action) {
+  if (!isInsideMedia(fullPath, mediaDir)) throw new Error("invalid path");
+  const name = path.basename(fullPath);
+  if (!mediaCrypto.isLockableName(name)) return "skipped";
+  // Never replace a symlink with an encrypted copy of its target.
+  const lst = await fs.lstat(fullPath).catch(() => null);
+  if (lst && lst.isSymbolicLink()) return "skipped";
+  const info = await mediaVault.fileInfo(fullPath);
+  if (!info) return "missing";
+  if ((action === "lock") === info.locked) return "skipped";
+  // Locking needs only the public key (works while the vault is locked);
+  // unlocking needs the private key (opened by the password or pattern).
+  const key = action === "lock" ? await mediaVault.encryptKey() : await mediaVault.decryptKey();
+  if (!key) throw Object.assign(new Error("media vault is locked — unlock it with your password or pattern"), { status: 423 });
+  if (action === "lock") await mediaVault.ensureCopyFor(fullPath);
+  let result;
+  if (action === "lock") {
+    const st = await fs.stat(fullPath);
+    result = await mediaCrypto.encryptFileInPlace(fullPath, key, { createdMs: mediaVault.createdOverride(st) || undefined });
+    await purgePlainCachesFor(fullPath, result.before);
+  } else {
+    result = await mediaCrypto.decryptFileInPlace(fullPath, key);
+    await mediaVault.setCreatedOverride(result.stat, result.createdMs);
+  }
+  mediaVault.forget(fullPath);
+  // Keep the dims cache valid: same picture, new on-disk size.
+  try {
+    const relKey = mediaRelOf(fullPath, mediaDir);
+    const dims = await loadMediadims();
+    if (dims[relKey]) {
+      dims[relKey] = { ...dims[relKey], size: result.stat.size, mtimeMs: result.stat.mtimeMs };
+      await saveMediadims();
+    }
+  } catch {}
+  return "done";
+}
+// Poster generation that works for encrypted videos too: ffmpeg reads the
+// decrypting URL and the poster gets encrypted like its video.
+async function generatePosterForMedia(fullPath, opts = {}) {
+  const input = await ffInputFor(fullPath);
+  const poster = await generatePosterThumbnail(fullPath, { ...opts, input: input.locked ? { pre: input.pre, src: input.src } : null });
+  if (poster && input.locked) {
+    try { await lockMediaFile(poster, "lock"); } catch (e) { console.error(`[lock] poster encrypt failed: ${e.message}`); }
+  }
+  return poster;
+}
+async function companionPosterPaths(fullPath) {
+  const siblings = await fs.readdir(path.dirname(fullPath)).catch(() => []);
+  return findCompanionPosters(siblings, path.basename(fullPath)).map((p) => path.join(path.dirname(fullPath), p));
+}
+async function walkLockable(dir, out, depth = 0) {
+  if (depth > 32 || out.length > 200000) return;
+  const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+  for (const en of entries) {
+    if (en.isSymbolicLink() || en.name.startsWith(".")) continue;
+    const full = path.join(dir, en.name);
+    if (en.isDirectory()) await walkLockable(full, out, depth + 1);
+    else if (en.isFile() && mediaCrypto.isLockableName(en.name)) out.push(full);
+  }
+}
+// Resolve the request's file keys (+ their posters) and folders (recursive).
+async function collectLockTargets(folder, keys, dirs) {
+  const out = new Set();
+  for (const raw of keys) {
+    const key = sanitizeMoveKey(raw, folder);
+    if (!key) continue;
+    const full = resolveMoveSource(key, mediaDir);
+    if (!isInsideMedia(full, mediaDir)) continue;
+    out.add(full);
+    for (const p of await companionPosterPaths(full)) out.add(p);
+  }
+  const base = resolveMediaOutputDir(folder);
+  for (const raw of dirs) {
+    const d = String(raw ?? "").replace(/\\/g, "/").trim();
+    if (d.split("/").includes("..") || d.startsWith("/")) continue;
+    const full = d ? path.resolve(base, ...d.split("/").filter(Boolean)) : base;
+    const rel = path.relative(mediaDir, full);
+    if (rel.startsWith("..") || path.isAbsolute(rel)) continue;
+    const list = [];
+    await walkLockable(full, list);
+    for (const p of list) out.add(p);
+  }
+  return [...out];
+}
+let lockJob = null;
+let lockJobCounter = 0;
+let lockBroadcastAt = 0;
+function lockJobSnapshot() {
+  if (!lockJob) return null;
+  const { id, action, total, done, skipped, failed, current, status, startedAt, finishedAt, errors, label } = lockJob;
+  return { id, action, total, done, skipped, failed, current, status, startedAt, finishedAt, errors: errors.slice(0, 20), label };
+}
+function broadcastLockJob(force) {
+  const now = Date.now();
+  if (!force && now - lockBroadcastAt < 250) return;
+  lockBroadcastAt = now;
+  wsBroadcast({ type: "media:lock", job: lockJobSnapshot() });
+}
+async function runLockJob(job, targets) {
+  for (const full of targets) {
+    if (job.cancel) break;
+    job.current = mediaRelOf(full, mediaDir);
+    try {
+      const r = await lockMediaFile(full, job.action);
+      if (r === "done") job.done += 1;
+      else job.skipped += 1;
+    } catch (e) {
+      job.failed += 1;
+      job.errors.push({ file: job.current, error: e.message });
+      console.error(`[lock] ${job.action} ${job.current} failed: ${e.message}`);
+      if (e.status === 423) break;
+    }
+    broadcastLockJob(false);
+  }
+  job.status = job.cancel ? "cancelled" : "done";
+  job.current = null;
+  job.finishedAt = new Date().toISOString();
+  broadcastLockJob(true);
+}
+// Downloads finished with ENCRYPT_NEW_MEDIA=1: lock each file and its poster.
+async function autoEncryptDownloaded(paths, log) {
+  if (!mediaVault.encryptNewEnabled() || !paths || !paths.length) return;
+  for (const p of new Set(paths)) {
+    const full = path.isAbsolute(p) ? p : path.resolve(rootDir, p);
+    if (!isInsideMedia(full, mediaDir)) continue;
+    for (const target of [full, ...(await companionPosterPaths(full))]) {
+      try {
+        const r = await lockMediaFile(target, "lock");
+        if (r === "done" && log) log(`[encrypt] locked ${mediaRelOf(target, mediaDir)}`);
+      } catch (e) {
+        console.error(`[encrypt] ${target}: ${e.message}`);
+        if (log) log(`[encrypt] failed for ${path.basename(target)}: ${e.message}`);
+      }
+    }
+  }
+}
+// Session probe for pattern logins (no stored password to replay).
+app.get("/api/auth/session", (_req, res) => res.json({ ok: true }));
+// Settings → Password & pattern (plan 040 v2).
+app.get("/api/security", (_req, res) => {
+  res.json({ ok: true, ...patternAuth.publicSettings() });
+});
+// Set / change / remove the panel password. Changing it re-seals the vault's
+// password slot so encrypted files stay readable with the new password.
+app.post("/api/security/password", async (req, res) => {
+  try {
+    const next = String(req.body?.newPassword ?? "");
+    let current = null;
+    if (isPanelProtected()) current = await patternAuth.check("password", String(req.body?.currentPassword ?? ""), req.ip);
+    if (!next) {
+      if (mediaVault.exists()) return res.status(400).json({ ok: false, error: "Encrypted media exists — the panel password cannot be removed" });
+      await patternAuth.setPassword("");
+      patternAuth.endAllSessions();
+      return res.json({ ok: true, ...patternAuth.publicSettings() });
+    }
+    if (mediaVault.exists()) {
+      mediaCrypto.checkPassword(next);
+      // Old password slot is kept until the login hash is saved too, so a
+      // crash in between can't leave files unopenable.
+      await mediaVault.setSlot("password", next, { currentPassword: current, keepPrevious: true });
+    }
+    const settings = await patternAuth.setPassword(next);
+    if (mediaVault.exists()) await mediaVault.dropPrevious().catch((e) => console.error(`[vault] could not drop the previous password slot: ${e.message}`));
+    // A password change logs out every other session; this browser gets a
+    // fresh token (also on the very first password).
+    patternAuth.endAllSessions();
+    const token = patternAuth.newSession();
+    res.cookie("xdl_session", token, { httpOnly: true, sameSite: "lax", path: "/" });
+    res.json({ ok: true, ...settings, token });
+  } catch (e) { return vaultHttpError(res, e); }
+});
+// Set / remove the 5x5 pattern (login + vault slot). Needs the password.
+app.post("/api/security/pattern", async (req, res) => {
+  try {
+    const pw = await patternAuth.check("password", String(req.body?.password ?? ""), req.ip);
+    const canonical = await patternAuth.setPattern(req.body?.pattern ?? null);
+    if (mediaVault.exists()) await mediaVault.setSlot("pattern", canonical, { currentPassword: pw });
+    // A pattern change logs out every other session too.
+    patternAuth.endAllSessions();
+    const token = patternAuth.newSession();
+    res.cookie("xdl_session", token, { httpOnly: true, sameSite: "lax", path: "/" });
+    res.json({ ok: true, ...patternAuth.publicSettings(), vault: vaultStatusFull(), token });
+  } catch (e) { return vaultHttpError(res, e); }
+});
+app.post("/api/security/prefs", async (req, res) => {
+  try {
+    res.json({ ok: true, ...(await patternAuth.setPrefs(req.body || {})) });
+  } catch (e) { return vaultHttpError(res, e); }
+});
+// Idle auto-lock: forget the key; the password or pattern opens it again.
+setInterval(() => {
+  const mins = patternAuth.autoLockMinutes();
+  if (!mins) return;
+  if (!mediaVault.status().unlocked) return;
+  if (Date.now() - lastPanelActivity < mins * 60000) return;
+  mediaVault.lockNow();
+  lockedThumbCache.clear();
+  lockedThumbBytes = 0;
+  console.log(`[vault] auto-locked after ${mins} min idle`);
+}, 30000).unref();
+app.get("/api/vault/status", async (_req, res) => {
+  await mediaVault.init();
+  res.json({ ok: true, ...vaultStatusFull() });
+});
+// One-time setup: a random key pair is created and sealed with the panel
+// password (and later the pattern). The password must be ≥12 characters.
+app.post("/api/vault/setup", async (req, res) => {
+  try {
+    const pw = await patternAuth.check("password", String(req.body?.password ?? ""), req.ip);
+    await mediaVault.setup(pw);
+    res.json({ ok: true, ...vaultStatusFull() });
+  } catch (e) { return vaultHttpError(res, e); }
+});
+// Upgrade an encryption key from the earlier separate-passphrase version:
+// same key pair (so already-locked files stay readable), sealed with the
+// panel password.
+app.post("/api/vault/upgrade", async (req, res) => {
+  try {
+    const pw = await patternAuth.check("password", String(req.body?.password ?? ""), req.ip);
+    await mediaVault.upgrade(String(req.body?.passphrase ?? ""), pw);
+    console.log("[vault] upgraded from the separate-passphrase format");
+    res.json({ ok: true, ...vaultStatusFull() });
+  } catch (e) { return vaultHttpError(res, e); }
+});
+// Unlock with the password or the pattern (rate-limited).
+app.post("/api/vault/unlock", async (req, res) => {
+  try {
+    if (req.body?.pattern) {
+      const canonical = await patternAuth.check("pattern", req.body.pattern, req.ip);
+      if (!mediaVault.status().patternSlot) return res.status(400).json({ ok: false, error: "Your pattern doesn't unlock files yet — use the password, then re-draw the pattern in Settings" });
+      await mediaVault.unlock("pattern", canonical);
+    } else {
+      const pw = await patternAuth.check("password", String(req.body?.password ?? ""), req.ip);
+      await mediaVault.unlock("password", pw);
+    }
+    lastPanelActivity = Date.now();
+    void flushPendingPosters();
+    res.json({ ok: true, ...vaultStatusFull() });
+  } catch (e) { return vaultHttpError(res, e); }
+});
+app.post("/api/vault/lock", async (_req, res) => {
+  mediaVault.lockNow();
+  lockedThumbCache.clear();
+  lockedThumbBytes = 0;
+  res.json({ ok: true, ...vaultStatusFull() });
+});
+app.get("/api/media/lock/job", (_req, res) => {
+  res.json({ ok: true, job: lockJobSnapshot() });
+});
+app.post("/api/media/lock/cancel", (_req, res) => {
+  if (lockJob && lockJob.status === "running") lockJob.cancel = true;
+  res.json({ ok: true, job: lockJobSnapshot() });
+});
+app.post("/api/media/lock", async (req, res) => {
+  try {
+    const action = String(req.body?.action || "lock");
+    if (action !== "lock" && action !== "unlock") return res.status(400).json({ ok: false, error: "action must be lock or unlock" });
+    if (lockJob && lockJob.status === "running") return res.status(409).json({ ok: false, error: "another lock job is running", job: lockJobSnapshot() });
+    const folder = String(req.body?.folder || "").trim();
+    const keys = Array.isArray(req.body?.keys) ? req.body.keys.map(String) : [];
+    const dirs = Array.isArray(req.body?.dirs) ? req.body.dirs.map(String) : [];
+    if (!keys.length && !dirs.length) return res.status(400).json({ ok: false, error: "keys or dirs required" });
+    // Claim the single job slot BEFORE any await, so two quick requests
+    // can't both start a job.
+    const label = dirs.length ? (dirs.length === 1 ? `folder ${dirs[0] || folder || "media"}` : `${dirs.length} folders`) : `${keys.length} file${keys.length === 1 ? "" : "s"}`;
+    const job = { id: ++lockJobCounter, action, total: 0, done: 0, skipped: 0, failed: 0, current: "Preparing…", status: "running", startedAt: new Date().toISOString(), finishedAt: null, errors: [], label, cancel: false };
+    const previousJob = lockJob;
+    lockJob = job;
+    let targets;
+    try {
+      // Fail fast on key problems (no password / locked vault) before queuing.
+      if (action === "lock") await mediaVault.encryptKey();
+      else if (!(await mediaVault.decryptKey())) { lockJob = previousJob; return res.status(423).json({ ok: false, error: "media vault is locked — unlock it with your password or pattern" }); }
+      targets = await collectLockTargets(folder, keys, dirs);
+    } catch (e) {
+      lockJob = previousJob;
+      throw e;
+    }
+    job.total = targets.length;
+    job.current = null;
+    broadcastLockJob(true);
+    void runLockJob(job, targets).catch((e) => {
+      job.status = "error";
+      job.errors.push({ file: null, error: e.message });
+      broadcastLockJob(true);
+    });
+    return res.json({ ok: true, job: lockJobSnapshot() });
+  } catch (e) { return vaultHttpError(res, e); }
+});
+function sanitizeUploadSegments(raw) {
+  const segs = String(raw || "").replace(/\\/g, "/").split("/").map((s) => s.trim()).filter(Boolean);
+  if (!segs.length || segs.length > 16) return null;
+  for (const s of segs) {
+    if (s === "." || s === ".." || s.startsWith(".") || s.length > 200 || /[\0-\x1f]/.test(s)) return null;
+  }
+  return segs;
+}
+async function uniqueMediaName(dir, base) {
+  const ext = path.extname(base);
+  const stem = ext ? base.slice(0, -ext.length) : base;
+  for (let i = 0; i < 10000; i++) {
+    const name = i ? `${stem} (${i})${ext}` : base;
+    if (!(await fs.stat(path.join(dir, name)).catch(() => null))) return name;
+  }
+  throw new Error("could not find a free file name");
+}
+// Raw-body upload: POST /api/media/upload?folder=<f>&path=<relative/file.ext>
+// The body is the file's bytes (any size, streamed). Sub-folders in `path`
+// (folder drops) are created inside `folder`.
+let activeUploads = 0;
+app.post("/api/media/upload", async (req, res) => {
+  let tmp = null;
+  activeUploads += 1;
+  try {
+    const folder = String(req.query?.folder || "").trim();
+    const segs = sanitizeUploadSegments(req.query?.path || req.query?.name);
+    if (!segs) return res.status(400).json({ ok: false, error: "invalid file name" });
+    if (!mediaCrypto.isLockableName(segs[segs.length - 1])) return res.status(400).json({ ok: false, error: "that file name is reserved" });
+    const baseDir = resolveMediaOutputDir(folder);
+    const targetDir = path.join(baseDir, ...segs.slice(0, -1));
+    const relDir = path.relative(mediaDir, targetDir);
+    if (relDir.startsWith("..") || path.isAbsolute(relDir)) return res.status(400).json({ ok: false, error: "invalid path" });
+    await fs.mkdir(targetDir, { recursive: true });
+    const encrypt = mediaVault.encryptNewEnabled();
+    const key = encrypt ? await mediaVault.encryptKey() : null;
+    let name = await uniqueMediaName(targetDir, segs[segs.length - 1]);
+    tmp = mediaCrypto.tempSiblingPath(path.join(targetDir, name), "xupl");
+    if (key) {
+      await mediaCrypto.encryptIterableToFile(req, tmp, key, { createdMs: Date.now() });
+    } else {
+      await require("stream/promises").pipeline(req, fsSync.createWriteStream(tmp, { flags: "wx" }));
+    }
+    // Commit without ever overwriting: link() fails with EEXIST if another
+    // upload/download took the name meanwhile -> try the next free name.
+    if (key) await mediaVault.ensureCopyFor(path.join(targetDir, name));
+    let finalPath = null;
+    for (let attempt = 0; attempt < 50 && !finalPath; attempt++) {
+      const candidate = path.join(targetDir, name);
+      try {
+        await fs.link(tmp, candidate);
+        finalPath = candidate;
+      } catch (e) {
+        if (e.code !== "EEXIST") throw e;
+        name = await uniqueMediaName(targetDir, name);
+      }
+    }
+    if (!finalPath) throw new Error("could not find a free file name");
+    await fs.unlink(tmp).catch(() => {});
+    tmp = null;
+    const rel = mediaRelOf(finalPath, mediaDir);
+    res.json({ ok: true, name, rel, locked: !!key });
+    if (isVideoFileName(name)) {
+      // Encrypted while the vault is locked: ffmpeg can't read it yet, so the
+      // poster is made right after the next unlock.
+      if (key && !(await mediaVault.decryptKey())) pendingPosters.add(finalPath);
+      else void generatePosterForMedia(finalPath).catch(() => {});
+    }
+  } catch (e) {
+    if (tmp) await fs.unlink(tmp).catch(() => {});
+    if (!res.headersSent && !req.destroyed) return vaultHttpError(res, e);
+  } finally {
+    activeUploads -= 1;
+  }
+});
+// Posters waiting for the vault to be unlocked (encrypted while locked).
+const pendingPosters = new Set();
+async function flushPendingPosters() {
+  if (!pendingPosters.size || !(await mediaVault.decryptKey())) return;
+  const list = [...pendingPosters];
+  pendingPosters.clear();
+  for (const f of list) await generatePosterForMedia(f).catch(() => {});
+}
 // --- Playlists (.playlists.json) ---
 const playlistsFile = path.join(rootDir, ".playlists.json");
 let playlistsChain = Promise.resolve();
@@ -1571,6 +2183,12 @@ app.get("/api/playlists/:id", async (req, res) => {
       const ratio = await dimsRatioFor(it.key, fullPath, stat);
       const entry = { key: it.key, name, dir: false, size: stat.size, mtime: ft.mtime, created: ft.created, addedAt: it.addedAt, missing: false, thumb };
       if (ratio) entry.ratio = ratio;
+      const lockInfo = await mediaVault.fileInfo(fullPath, { size: stat.size, mtimeMs: stat.mtimeMs }).catch(() => null);
+      if (lockInfo && lockInfo.locked) {
+        entry.locked = true;
+        entry.size = lockInfo.header.plainSize;
+        if (lockInfo.header.createdMs > 0) entry.created = new Date(lockInfo.header.createdMs).toISOString();
+      }
       enriched.push(entry);
     }
     return res.json({ ok: true, playlist: { id: pl.id, name: pl.name, createdAt: pl.createdAt, updatedAt: pl.updatedAt, items: enriched } });
@@ -2055,6 +2673,10 @@ app.get("/api/gifvideo", async (req, res) => {
     const stat = await fs.stat(srcPath).catch(() => null);
     if (!stat) return res.status(404).json({ ok: false, error: "not found" });
     if (!stat.isFile()) return res.status(400).json({ ok: false, error: "not a file" });
+    // Encrypted gifs are never transcoded to a plaintext cache file; the
+    // client plays the (decrypted) gif itself.
+    const gifLock = await mediaVault.fileInfo(srcPath, { size: stat.size, mtimeMs: stat.mtimeMs }).catch(() => null);
+    if (gifLock && gifLock.locked) return res.status(404).json({ ok: false, error: "encrypted gif: no video cache" });
 
     const key = `${stat.mtimeMs}:${rel}`;
     const hash = crypto.createHash("sha1").update(key).digest("hex").slice(0, 20);
@@ -2108,6 +2730,55 @@ const THUMB_VIDEO_EXTS = new Set(
   ["mp4", "m4v", "mov", "mkv", "webm", "avi", "mpg", "mpeg", "3gp", "flv", "ts", "m2ts", "wmv", "ogv"]
 );
 
+// In-memory embedded-thumb cache for encrypted videos: hash -> { buf, type } | null (no cover).
+const lockedThumbCache = new Map();
+const LOCKED_THUMB_MAX = 400;
+const LOCKED_THUMB_BYTES = 64 * 1024 * 1024;
+let lockedThumbBytes = 0;
+function rememberLockedThumb(hash, value) {
+  const old = lockedThumbCache.get(hash);
+  if (old) lockedThumbBytes -= old.buf.length;
+  lockedThumbCache.delete(hash);
+  lockedThumbCache.set(hash, value || null);
+  if (value) lockedThumbBytes += value.buf.length;
+  while (lockedThumbCache.size > LOCKED_THUMB_MAX || lockedThumbBytes > LOCKED_THUMB_BYTES) {
+    const k = lockedThumbCache.keys().next().value;
+    const v = lockedThumbCache.get(k);
+    if (v) lockedThumbBytes -= v.buf.length;
+    lockedThumbCache.delete(k);
+  }
+}
+async function extractLockedEmbeddedThumb(srcPath) {
+  if (!ffmpegBin || !ffprobeBin) return null;
+  const input = await ffInputFor(srcPath);
+  const { execFile: _execFile } = require("child_process");
+  const execFileAsync = require("util").promisify(_execFile);
+  const { stdout } = await execFileAsync(ffprobeBin, ["-v", "error", "-show_streams", "-of", "json", ...input.args], { timeout: 15000, maxBuffer: 4 * 1024 * 1024 });
+  let streams = [];
+  try { streams = JSON.parse(stdout || "{}").streams || []; } catch { streams = []; }
+  const attached = streams.find((s) => {
+    const disp = s && s.disposition;
+    if (disp && Number(disp.attached_pic) === 1) return true;
+    return !!(s && s.codec_type === "video" && /^(mjpeg|png|jpg|jpeg|webp)$/i.test(String(s.codec_name || "")) && Number(s.index) > 0);
+  });
+  if (!attached) return null;
+  const codec = String(attached.codec_name || "");
+  const type = /png/i.test(codec) ? "image/png" : /webp/i.test(codec) ? "image/webp" : "image/jpeg";
+  const fmt = type === "image/jpeg" ? "mjpeg" : "image2pipe";
+  const buf = await new Promise((resolve, reject) => {
+    const cp = spawn(ffmpegBin, ["-v", "error", ...input.pre, "-i", input.src, "-map", `0:${Number(attached.index)}`, "-c", "copy", "-f", fmt, "pipe:1"], { stdio: ["ignore", "pipe", "ignore"] });
+    const parts = [];
+    let len = 0;
+    cp.stdout.on("data", (d) => { len += d.length; if (len > 20 * 1024 * 1024) cp.kill("SIGKILL"); else parts.push(d); });
+    const timer = setTimeout(() => cp.kill("SIGKILL"), 30000);
+    cp.on("error", reject);
+    cp.on("close", (code) => {
+      clearTimeout(timer);
+      code === 0 && len ? resolve(Buffer.concat(parts)) : reject(new Error(`ffmpeg exited with code ${code}`));
+    });
+  });
+  return { buf, type };
+}
 app.get("/api/mediathumb", async (req, res) => {
   try {
     const folder = String(req.query?.folder || "");
@@ -2139,6 +2810,33 @@ app.get("/api/mediathumb", async (req, res) => {
 
     const cacheSeed = `${stat.mtimeMs}:${stat.size}:${rel}`;
     const hash = crypto.createHash("sha1").update(cacheSeed).digest("hex").slice(0, 20);
+
+    // Encrypted video (plan 039): extract through the decrypting loopback URL
+    // and keep the cover in memory only — never a plaintext file in /tmp.
+    const thumbLock = await mediaVault.fileInfo(srcPath, { size: stat.size, mtimeMs: stat.mtimeMs }).catch(() => null);
+    if (thumbLock && thumbLock.locked) {
+      // Decrypted covers are only shown while the vault is unlocked.
+      if (!(await mediaVault.decryptKey())) return res.status(423).json({ ok: false, error: "media vault is locked" });
+      const hit = lockedThumbCache.get(hash);
+      if (hit === null) return res.status(404).json({ ok: false, error: "no embedded thumbnail" });
+      if (hit) {
+        res.set("Cache-Control", "private, no-store");
+        return res.type(hit.type).send(hit.buf);
+      }
+      let job = thumbInFlight.get(hash);
+      if (!job) {
+        job = extractLockedEmbeddedThumb(srcPath).finally(() => thumbInFlight.delete(hash));
+        thumbInFlight.set(hash, job);
+      }
+      // A failure (timeout, vault locked meanwhile...) is not cached; only a
+      // real "this video has no embedded cover" (null) is.
+      const out = await job.catch(() => undefined);
+      if (out === undefined) return res.status(404).json({ ok: false, error: "cover not available right now" });
+      rememberLockedThumb(hash, out);
+      if (!out) return res.status(404).json({ ok: false, error: "no embedded thumbnail" });
+      res.set("Cache-Control", "private, no-store");
+      return res.type(out.type).send(out.buf);
+    }
 
     const sendCached = async () => {
       const entries = await fs.readdir(thumbCacheDir).catch(() => []);
@@ -2312,7 +3010,7 @@ app.post("/api/posters/generate", async (req, res) => {
     let index = 0;
     for (const { key, full } of planned) {
       index += 1;
-      const poster = await generatePosterThumbnail(full, { overwrite: mode === "all" });
+      const poster = await generatePosterForMedia(full, { overwrite: mode === "all" });
       if (poster) generatedCount += 1;
       else failedKeys.push({ key, message: "poster not produced (ffmpeg error or unsupported file)" });
       emit({ type: "progress", index, total, generated: generatedCount, skipped: skippedCount, failed: failedKeys.length, file: key });
@@ -2346,88 +3044,126 @@ app.post("/vnc/disable", async (_req, res) => {
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
-app.get("/api/config", (_req, res) => {
+// Settings page schema (user-friendly labels/controls over .env keys).
+// type: bool | number | duration (stored ms, shown in `unit`) | select | text | path | password
+// live: applies without a restart. advanced: hidden behind "Show advanced".
+function settingsSchema() {
   const home = process.env.HOME || process.env.USERPROFILE || require("os").homedir();
-  const groups = [
-    {
-      name: "Security",
-      vars: [
-        { key: "UI_PANEL_PASSWORD", value: "", def: "(blank = no password)", desc: "Admin panel password — blank disables auth", isPassword: true, hasValue: !!UI_PANEL_PASSWORD, placeholder: UI_PANEL_PASSWORD ? "•••• (set — type new to change)" : "blank = no password" },
-      ],
-    },
-    {
-      name: "Core",
-      vars: [
-        { key: "PORT", value: process.env.PORT || "6767", def: "6767", desc: "API server port" },
-        { key: "HEADLESS", value: process.env.HEADLESS ?? (!process.env.DISPLAY ? "1 (inferred)" : "0 (inferred)"), def: "!DISPLAY", desc: "Browser headless mode" },
-        { key: "API_HEADLESS", value: process.env.API_HEADLESS || "(falls back to HEADLESS)", def: "HEADLESS", desc: "Headless for API" },
-        { key: "BROWSER_USER_DATA_DIR", value: process.env.BROWSER_USER_DATA_DIR || `${home}/.config/cloakbrowser-profile`, def: "~/.config/cloakbrowser-profile", desc: "Chrome profile dir" },
-        { key: "BROWSER_PROFILE_DIR", value: process.env.BROWSER_PROFILE_DIR || "Default", def: "Default", desc: "Profile subdir" },
-        { key: "BROWSER_PATH", value: process.env.BROWSER_PATH || "(auto)", def: "(auto)", desc: "Custom Chrome binary" },
-        { key: "CLOAKBROWSER_CACHE_DIR", value: process.env.CLOAKBROWSER_CACHE_DIR || "/data/cloakbrowser", def: "/data/cloakbrowser", desc: "CloakBrowser cache" },
-        { key: "INSTAGRAM_USER_AGENT", value: process.env.INSTAGRAM_USER_AGENT || "(iPhone Safari default)", def: "iPhone Safari", desc: "Custom UA for Instagram" },
-        { key: "AUTO_CONTINUE", value: process.env.AUTO_CONTINUE ?? (!process.stdin.isTTY ? "1 (inferred)" : "0 (inferred)"), def: "!isTTY", desc: "Auto-continue prompts" },
-        { key: "AUTO_CONTINUE_WAIT_MS", value: process.env.AUTO_CONTINUE_WAIT_MS || "0", def: "0", desc: "ms to wait before auto-continue" },
-        { key: "MEDIA_RANGE_SIZE", value: process.env.MEDIA_RANGE_SIZE || "100", def: "100", desc: "Media grid rail: files per range" },
-        { key: "KEYBOARD_HINTS", value: process.env.KEYBOARD_HINTS ?? "1", def: "1", desc: "Show keyboard shortcut hint pills on buttons (0 = hide)" },
-      ],
-    },
-    {
-      name: "Capture Timing",
-      vars: [
-        { key: "AUTO_CAPTURE_TIMEOUT_MS", value: process.env.AUTO_CAPTURE_TIMEOUT_MS || "30000", def: "30000", desc: "Max wait for media signals" },
-        { key: "AUTO_CAPTURE_QUIET_MS", value: process.env.AUTO_CAPTURE_QUIET_MS || "1800", def: "1800", desc: "Quiet period before proceed" },
-        { key: "AUTO_CAPTURE_POLL_MS", value: process.env.AUTO_CAPTURE_POLL_MS || "250", def: "250", desc: "Poll interval" },
-      ],
-    },
-    {
-      name: "Timeouts",
-      vars: [
-        { key: "API_JOB_TIMEOUT_MS", value: process.env.API_JOB_TIMEOUT_MS || "1800000", def: "1800000 (30m)", desc: "Max API job duration" },
-        { key: "DOWNLOAD_FETCH_TIMEOUT_MS", value: process.env.DOWNLOAD_FETCH_TIMEOUT_MS || "300000", def: "300000 (5m)", desc: "HTTP fetch timeout" },
-        { key: "FFMPEG_TIMEOUT_MS", value: process.env.FFMPEG_TIMEOUT_MS || "900000", def: "900000 (15m)", desc: "ffmpeg timeout" },
-        { key: "FFPROBE_TIMEOUT_MS", value: process.env.FFPROBE_TIMEOUT_MS || "120000", def: "120000 (2m)", desc: "ffprobe timeout" },
-        { key: "MANUAL_BROWSER_TIMEOUT_MS", value: process.env.MANUAL_BROWSER_TIMEOUT_MS || "900000", def: "900000 (15m)", desc: "Manual browser auto-close" },
-      ],
-    },
-    {
-      name: "Instagram / Sync",
-      vars: [
-        { key: "INSTAGRAM_429_COOLDOWN_MS", value: process.env.INSTAGRAM_429_COOLDOWN_MS || "300000", def: "300000 (5m)", desc: "Cooldown after 429" },
-        { key: "SAVED_SYNC_STATE_FILE", value: process.env.SAVED_SYNC_STATE_FILE || ".saved-sync-state.json", def: ".saved-sync-state.json", desc: "Per-list scan state file" },
-        { key: "SAVED_SYNC_QUEUE_FILE", value: process.env.SAVED_SYNC_QUEUE_FILE || ".download-queue.json", def: ".download-queue.json", desc: "Sync daemon queue file" },
-        { key: "SAVED_SYNC_RETRY_DELAY_MS", value: process.env.SAVED_SYNC_RETRY_DELAY_MS || "3000", def: "3000", desc: "Retry delay" },
-        { key: "SAVED_SYNC_RETRY_COUNT", value: process.env.SAVED_SYNC_RETRY_COUNT || "20", def: "20", desc: "Retry count" },
-        { key: "API_BASE", value: process.env.API_BASE || "http://localhost:3001", def: "http://localhost:3001", desc: "Base URL for sync daemon" },
-        { key: "SNAPSHOT_DIR", value: process.env.SNAPSHOT_DIR || "media/.debug-snapshots", def: "media/.debug-snapshots", desc: "Snapshot dir on scrape miss" },
-      ],
-    },
-    {
-      name: "VNC / Docker",
-      vars: [
-        { key: "ENABLE_VNC", value: process.env.ENABLE_VNC || "0", def: "0", desc: "Start VNC at boot (flag file overrides)" },
-        { key: "VNC_FLAG", value: process.env.VNC_FLAG || "/data/browser/.vnc-enabled", def: "/data/browser/.vnc-enabled", desc: "Persisted VNC toggle" },
-        { key: "VNC_PORT", value: process.env.VNC_PORT || "6777", def: "6777", desc: "VNC port" },
-        { key: "NOVNC_PORT", value: process.env.NOVNC_PORT || "6778", def: "6778", desc: "noVNC port" },
-        { key: "DISPLAY", value: process.env.DISPLAY || ":99", def: ":99", desc: "X display" },
-      ],
-    },
+  const headlessDef = !process.env.DISPLAY ? "1" : "0";
+  const autoContinueDef = !process.stdin.isTTY ? "1" : "0";
+  return [
+    { name: "Media library", icon: "bi-collection-play", vars: [
+      { key: "ENCRYPT_NEW_MEDIA", label: "Encrypt new files automatically", type: "bool", def: "0", live: true, disabled: !isPanelProtected(), desc: isPanelProtected() ? "New downloads and uploads are saved encrypted. Needs encryption set up; works while it is locked." : "Set a panel password first." },
+      { key: "KEYBOARD_HINTS", label: "Show keyboard shortcut hints", type: "bool", def: "1", live: true, desc: "Small key labels on buttons in the media library." },
+      { key: "MEDIA_RANGE_SIZE", label: "Files per section on the scroll rail", type: "number", def: "100", min: 10, max: 5000, live: true, desc: "How many files each jump-to section on the right-hand rail covers." },
+    ] },
+    { name: "Browser", icon: "bi-window", vars: [
+      { key: "HEADLESS", label: "Run the browser hidden", type: "bool", def: headlessDef, desc: "Hidden (headless) is faster; visible lets you watch it work over VNC." },
+      { key: "API_HEADLESS", label: "Hidden browser for panel downloads", type: "select", def: "", options: [["", "Same as above"], ["1", "Hidden"], ["0", "Visible"]], desc: "Override just for downloads started from this panel." },
+      { key: "AUTO_CONTINUE", label: "Continue without asking", type: "bool", def: autoContinueDef, desc: "Skip the \"press Enter to continue\" pauses." },
+      { key: "AUTO_CONTINUE_WAIT_MS", label: "Pause before continuing", type: "duration", unit: "s", def: "0", desc: "Extra wait before an automatic continue." },
+      { key: "INSTAGRAM_USER_AGENT", label: "Instagram browser identity", type: "text", def: "", placeholder: "iPhone Safari (default)", advanced: true, desc: "Custom user-agent string sent to Instagram." },
+      { key: "BROWSER_USER_DATA_DIR", label: "Browser profile folder", type: "path", def: `${home}/.config/cloakbrowser-profile`, advanced: true, desc: "Where the browser keeps logins and cookies." },
+      { key: "BROWSER_PROFILE_DIR", label: "Profile name", type: "text", def: "Default", advanced: true, desc: "Sub-profile inside the profile folder." },
+      { key: "BROWSER_PATH", label: "Browser program", type: "path", def: "", placeholder: "automatic", advanced: true, desc: "Use a specific Chrome/Chromium binary." },
+      { key: "CLOAKBROWSER_CACHE_DIR", label: "Browser download cache", type: "path", def: "/data/cloakbrowser", advanced: true, desc: "Where the stealth browser itself is stored." },
+    ] },
+    { name: "Downloads & timing", icon: "bi-stopwatch", vars: [
+      { key: "AUTO_CAPTURE_TIMEOUT_MS", label: "Look for media for up to", type: "duration", unit: "s", def: "30000", desc: "How long a page is watched for video before giving up." },
+      { key: "API_JOB_TIMEOUT_MS", label: "Give up on a download after", type: "duration", unit: "min", def: "1800000", desc: "Whole-job limit; the browser is recycled after a timeout." },
+      { key: "DOWNLOAD_FETCH_TIMEOUT_MS", label: "File transfer timeout", type: "duration", unit: "min", def: "300000", desc: "Limit for fetching a single file." },
+      { key: "FFMPEG_TIMEOUT_MS", label: "Video processing timeout", type: "duration", unit: "min", def: "900000", desc: "Limit for ffmpeg (stream joining, merging audio)." },
+      { key: "MANUAL_BROWSER_TIMEOUT_MS", label: "Close a manually opened browser after", type: "duration", unit: "min", def: "900000", desc: "Auto-close for browsers opened from Profiles." },
+      { key: "AUTO_CAPTURE_QUIET_MS", label: "Quiet time before finishing a page", type: "duration", unit: "s", def: "1800", advanced: true, desc: "No new media for this long = page is done." },
+      { key: "AUTO_CAPTURE_POLL_MS", label: "Page check interval", type: "duration", unit: "ms", def: "250", minMs: 50, advanced: true, desc: "How often the page is re-checked for media." },
+      { key: "FFPROBE_TIMEOUT_MS", label: "Video inspection timeout", type: "duration", unit: "min", def: "120000", advanced: true, desc: "Limit for ffprobe." },
+    ] },
+    { name: "Instagram & sync", icon: "bi-instagram", vars: [
+      { key: "INSTAGRAM_429_COOLDOWN_MS", label: "Pause after Instagram rate-limits", type: "duration", unit: "min", def: "300000", desc: "Wait this long after a \"too many requests\" response." },
+      { key: "SAVED_SYNC_RETRY_COUNT", label: "Sync retries", type: "number", def: "20", min: 0, max: 1000, desc: "How many times the saved-collection sync retries a failed call." },
+      { key: "SAVED_SYNC_RETRY_DELAY_MS", label: "Wait between sync retries", type: "duration", unit: "s", def: "3000", desc: "" },
+      { key: "API_BASE", label: "Sync daemon API address", type: "text", def: "http://localhost:3001", advanced: true, desc: "Where the background sync daemon reaches this server." },
+      { key: "SAVED_SYNC_STATE_FILE", label: "Sync state file", type: "path", def: ".saved-sync-state.json", advanced: true, desc: "" },
+      { key: "SAVED_SYNC_QUEUE_FILE", label: "Sync queue file", type: "path", def: ".download-queue.json", advanced: true, desc: "" },
+      { key: "SNAPSHOT_DIR", label: "Debug snapshot folder", type: "path", def: "media/.debug-snapshots", advanced: true, desc: "Page snapshots saved when no media was found." },
+    ] },
+    { name: "Remote desktop (VNC)", icon: "bi-display", vars: [
+      { key: "ENABLE_VNC", label: "Start remote desktop at boot", type: "bool", def: "0", desc: "Watch/drive the browser in your web browser (noVNC). The Dashboard toggle overrides this." },
+      { key: "VNC_PORT", label: "VNC port", type: "number", def: "6777", min: 1, max: 65535, advanced: true, desc: "" },
+      { key: "NOVNC_PORT", label: "Web VNC port", type: "number", def: "6778", min: 1, max: 65535, advanced: true, desc: "" },
+      { key: "VNC_FLAG", label: "VNC on/off flag file", type: "path", def: "/data/browser/.vnc-enabled", advanced: true, desc: "" },
+      { key: "DISPLAY", label: "X display", type: "text", def: ":99", advanced: true, desc: "" },
+    ] },
+    { name: "Server", icon: "bi-hdd-network", vars: [
+      { key: "PORT", label: "Panel port", type: "number", def: "6767", min: 1, max: 65535, advanced: true, desc: "Port this panel listens on inside the container." },
+    ] },
   ];
+}
+app.get("/api/config", (_req, res) => {
+  const groups = settingsSchema().map((g) => ({
+    ...g,
+    vars: g.vars.map((v) => {
+      const raw = process.env[v.key];
+      const isPw = v.type === "password";
+      return {
+        ...v,
+        def: v.def ?? "",
+        value: isPw ? "" : raw == null ? "" : String(raw),
+        hasValue: raw != null && String(raw) !== "",
+        restart: !v.live,
+        lockedByContainer: ENV_FROM_CONTAINER.has(v.key),
+      };
+    }),
+  }));
   res.json({ ok: true, groups });
 });
+// Restart the server so restart-only settings apply (docker brings it back).
+app.post("/api/restart", (req, res) => {
+  const busy = Boolean(activeJob || scanActiveJob || queueActiveJob) || (lockJob && lockJob.status === "running") || activeUploads > 0;
+  if (busy && !req.body?.force) return res.status(409).json({ ok: false, error: "A download, scan, lock job or upload is running — wait for it to finish (or force)." });
+  res.json({ ok: true, restarting: true });
+  console.log("[settings] restart requested from the panel");
+  res.once("finish", () => setTimeout(() => { shuttingDown = true; process.exit(0); }, 250));
+});
+// .env value quoting: dotenv treats " #" / "#" as a comment and trims
+// surrounding spaces, so such values are written quoted (single quotes are
+// literal in dotenv; double quotes only when the value has a single quote).
+function envQuote(v) {
+  const s = String(v);
+  if (!/[#'"`]|^\s|\s$/.test(s)) return s;
+  // dotenv reads '...' and `...` literally; it can't unescape \" inside "...".
+  if (!s.includes("'")) return `'${s}'`;
+  if (!s.includes("`")) return "`" + s + "`";
+  return `"${s.replace(/"/g, "'")}"`; // has ' " and ` : keep it readable, swap " for '
+}
 app.post("/api/config", async (req, res) => {
   const key = String(req.body?.key || "").trim();
   const value = req.body?.value == null ? "" : String(req.body.value);
-  const allowed = new Set([
-    "PORT","HEADLESS","API_HEADLESS","BROWSER_USER_DATA_DIR","BROWSER_PROFILE_DIR","BROWSER_PATH","CLOAKBROWSER_CACHE_DIR","INSTAGRAM_USER_AGENT","AUTO_CONTINUE","AUTO_CONTINUE_WAIT_MS","MEDIA_RANGE_SIZE","KEYBOARD_HINTS",
-    "AUTO_CAPTURE_TIMEOUT_MS","AUTO_CAPTURE_QUIET_MS","AUTO_CAPTURE_POLL_MS",
-    "API_JOB_TIMEOUT_MS","DOWNLOAD_FETCH_TIMEOUT_MS","FFMPEG_TIMEOUT_MS","FFPROBE_TIMEOUT_MS","MANUAL_BROWSER_TIMEOUT_MS",
-    "INSTAGRAM_429_COOLDOWN_MS","SAVED_SYNC_STATE_FILE","SAVED_SYNC_QUEUE_FILE","SAVED_SYNC_RETRY_DELAY_MS","SAVED_SYNC_RETRY_COUNT","API_BASE","SNAPSHOT_DIR",
-    "ENABLE_VNC","VNC_FLAG","VNC_PORT","NOVNC_PORT","DISPLAY","UI_PANEL_PASSWORD",
-  ]);
+  const allowed = new Set(settingsSchema().flatMap((g) => g.vars.map((v) => v.key)));
   if (!key || !allowed.has(key)) return res.status(400).json({ ok: false, error: `Key not allowed: ${key}` });
   if (/[\n\r]/.test(key) || /[\n\r]/.test(value)) return res.status(400).json({ ok: false, error: "Invalid characters" });
+  // Type checks from the settings schema (empty = back to the default).
+  const meta = settingsSchema().flatMap((g) => g.vars).find((v) => v.key === key);
+  if (ENV_FROM_CONTAINER.has(key)) return res.status(409).json({ ok: false, error: `${meta ? meta.label : key} is set by the container (docker-compose.yml environment: or its startup script) — change it there and recreate the container` });
+  if (meta && value !== "") {
+    if (meta.type === "bool" && value !== "0" && value !== "1") return res.status(400).json({ ok: false, error: `${meta.label}: must be on or off` });
+    if ((meta.type === "number" || meta.type === "duration") && !/^\d+$/.test(value)) return res.status(400).json({ ok: false, error: `${meta.label}: must be a whole number` });
+    if (meta.type === "duration" && meta.minMs != null && Number(value) < meta.minMs) return res.status(400).json({ ok: false, error: `${meta.label}: must be at least ${meta.minMs} ms` });
+    if (meta.type === "number" && ((meta.min != null && Number(value) < meta.min) || (meta.max != null && Number(value) > meta.max))) return res.status(400).json({ ok: false, error: `${meta.label}: must be between ${meta.min} and ${meta.max}` });
+    if (meta.type === "select" && !meta.options.some(([v]) => v === value)) return res.status(400).json({ ok: false, error: `${meta.label}: not a valid choice` });
+  }
   const envPath = path.join(rootDir, ".env");
+  // Media encryption (plan 039): the setting needs a panel password, and a
+  // password change re-wraps the vault key before .env is rewritten.
+  try {
+    if (key === "ENCRYPT_NEW_MEDIA") {
+      if (value !== "0" && value !== "1" && value !== "") return res.status(400).json({ ok: false, error: "ENCRYPT_NEW_MEDIA must be 0 or 1" });
+      if (value === "1") {
+        if (!isPanelProtected()) return res.status(400).json({ ok: false, error: "Set a panel password first — encryption needs it" });
+        await mediaVault.encryptKey(); // requires encryption to be set up (no auto-create)
+      }
+    }
+  } catch (e) { return vaultHttpError(res, e); }
   try {
     let content = "";
     try { content = await fs.readFile(envPath, "utf8"); } catch (e) { if (e.code !== "ENOENT") throw e; }
@@ -2439,12 +3175,12 @@ app.post("/api/config", async (req, res) => {
       const eq = line.indexOf("=");
       if (eq === -1) return line;
       const k = line.slice(0, eq).trim();
-      if (k === key) { found = true; return `${key}=${value}`; }
+      if (k === key) { found = true; return `${key}=${envQuote(value)}`; }
       return line;
     });
     if (!found) {
       if (next.length && next[next.length - 1] !== "") next.push("");
-      next[next.length - 1] === "" ? next[next.length - 1] = `${key}=${value}` : next.push(`${key}=${value}`);
+      next[next.length - 1] === "" ? next[next.length - 1] = `${key}=${envQuote(value)}` : next.push(`${key}=${envQuote(value)}`);
       // ensure no double empty
       const cleaned = next.filter((l, i, a) => !(l === "" && a[i + 1] === ""));
       next.length = 0; next.push(...cleaned);
@@ -2454,7 +3190,6 @@ app.post("/api/config", async (req, res) => {
     if (!out.endsWith("\n")) out += "\n";
     await fs.writeFile(envPath, out, "utf8");
     process.env[key] = value;
-    if (key === "UI_PANEL_PASSWORD") UI_PANEL_PASSWORD = String(value).trim();
     res.json({ ok: true, key, value });
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
@@ -2780,8 +3515,7 @@ let crawlAllState = null;
 
 async function selfPost(pathname, body) {
   const headers = { "Content-Type": "application/json" };
-  const pw = String(process.env.UI_PANEL_PASSWORD || process.env.ADMIN_PASSWORD || "").trim();
-  if (pw) headers["x-panel-password"] = pw;
+  headers["x-xdl-internal"] = INTERNAL_MEDIA_TOKEN; // loopback-only internal auth
   const r = await fetch(`http://127.0.0.1:${port}${pathname}`, { method: "POST", headers, body: JSON.stringify(body || {}) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok || j.ok === false) throw new Error(j.error || `HTTP ${r.status}`);
@@ -3232,6 +3966,7 @@ app.post("/download", async (req, res) => {
   activeJob = { id: jobId, type: "download", startedAt: Date.now() };
 
   let clientDisconnected = false;
+  const downloadedPaths = [];
   const logToClientAndConsole = (message) => {
     const text = String(message == null ? "" : message);
     if (!text) return;
@@ -3239,6 +3974,8 @@ app.post("/download", async (req, res) => {
     const lines = text.split(/\r?\n/).filter((line) => line.trim());
     for (const line of lines) {
       console.log(`[scan:${jobId}] ${line}`);
+      const dl = /Downloaded media to:\s*(.+)/.exec(line);
+      if (dl) downloadedPaths.push(dl[1].trim());
     }
 
     if (!clientDisconnected && !res.writableEnded) {
@@ -3312,6 +4049,8 @@ app.post("/download", async (req, res) => {
       }
     } catch {}
   } finally {
+    // Encrypt whatever was written, also after a failure/timeout part-way.
+    await autoEncryptDownloaded(downloadedPaths, logToClientAndConsole).catch(() => {});
     activeJob = null;
     if (!res.writableEnded) {
       res.end();
@@ -3568,7 +4307,30 @@ app.get("/{*splat}", (req, res, next) => {
 
 let wss = null;
 const server = http.createServer(app);
-wss = new WebSocketServer({ server, path: "/ws" });
+// The live-updates socket carries queue URLs, logs and file names, and
+// accepts "queue:add" — so it needs the same login session as the rest of the
+// panel (the browser sends the httpOnly session cookie on the upgrade), and
+// cross-site pages may not open it.
+wss = new WebSocketServer({
+  server,
+  path: "/ws",
+  verifyClient: ({ req }, done) => {
+    try {
+      const origin = String(req.headers.origin || "");
+      if (origin) {
+        let originHost = "";
+        try { originHost = new URL(origin).host; } catch {}
+        if (originHost !== String(req.headers.host || "")) return done(false, 403, "Forbidden");
+      }
+      if (!isPanelProtected()) return done(true);
+      const cookies = parseCookies(req.headers.cookie);
+      if (patternAuth.validSession(cookies.xdl_session) || patternAuth.validSession(req.headers["x-xdl-session"])) return done(true);
+      return done(false, 401, "Unauthorized");
+    } catch {
+      return done(false, 401, "Unauthorized");
+    }
+  },
+});
 wss.on("connection", async (ws) => {
   if (!queueLoaded) await loadWebQueue();
   ws.send(JSON.stringify({ type: "queue:snapshot", active: webQueue.active, completed: webQueue.completed, gap: webQueue.gap || { minMs: 0, maxMs: 0 }, gapWait: gapWaitState, paused: queuePaused }));
@@ -3604,6 +4366,26 @@ setInterval(() => {
 
 server.listen(port, () => {
   console.log(`API server listening on http://localhost:${port}`);
+  // Remove temp files left by an interrupted encrypt/decrypt/upload (a
+  // partial .xdec- file would be plaintext sitting next to the locked file).
+  (async () => {
+    let removed = 0;
+    const stack = [mediaDir];
+    while (stack.length) {
+      const dir = stack.pop();
+      const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+      for (const en of entries) {
+        const full = path.join(dir, en.name);
+        if (en.isDirectory() && !en.isSymbolicLink() && !en.name.startsWith(".")) stack.push(full);
+        else if (en.isFile() && mediaCrypto.TEMP_RE.test(en.name)) { await fs.unlink(full).catch(() => {}); removed += 1; }
+      }
+    }
+    if (removed) console.log(`[vault] removed ${removed} leftover temp file(s) from an interrupted job`);
+  })().catch(() => {});
+  mediaVault.init().then(() => {
+    const st = mediaVault.status();
+    if (st.exists) console.log(`[vault] media vault found (key ${st.keyId}, copies: ${st.copies.join(", ")}) — locked until a password/pattern login${st.error ? ` — WARNING: ${st.error}` : ""}`);
+  }).catch((e) => console.error(`[vault] init failed: ${e.message}`));
   ensureDefaultStateFiles({ log: (msg) => console.log(`[state] ${msg}`) }).catch((error) => {
     console.error(`[state] failed to create default state files: ${error.message}`);
   });

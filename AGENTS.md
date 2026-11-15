@@ -53,6 +53,21 @@
 | POST | `/download` | JSON/query: `link` (req), `folder` (opt), `maxQuality` (opt) | `text/plain` streaming | Downloads media. Busy → 429. |
 | POST | `/scan-saved` | JSON/query: `url` (req), `endUrls` (opt), `account` (opt, default "default") | `{ ok, urls, ids, ... }` | Scans IG saved page using account's profile. |
 | GET | `/api/mediaorder` | query: `folder` (opt), `flat` (opt "1") | `{ ok, scope, order }` | Custom grid order per folder+flat scope (`.mediaorder.json`) |
+| GET | `/api/vault/status` | — | `{ ok, available, exists, unlocked, patternSlot, hasPattern, keyId, copies, autoLockMinutes }` | Media encryption state (plan 039) |
+| POST | `/api/vault/setup` | JSON: `password` (panel password, ≥12 chars) | vault status | One-time: random key pair sealed with the panel password; 409 if a vault exists. Never automatic |
+| POST | `/api/vault/unlock` | JSON: `password` or `pattern` `{size:5,dots}` | vault status | Opens the private key into memory (also happens automatically on login) |
+| POST | `/api/vault/lock` | — | vault status | Wipes the private key from memory |
+| POST | `/api/media/lock` | JSON: `action` ("lock"/"unlock"), `keys` (media-relative files), `dirs` (media-relative folders, recursive) | `{ ok, job }` | Background encrypt/decrypt job (one at a time, 409 if busy); file keys include `<stem>-poster.*` |
+| GET | `/api/media/lock/job` | — | `{ ok, job }` | Current/last lock job progress (also WS `media:lock`) |
+| POST | `/api/media/lock/cancel` | — | `{ ok, job }` | Stop the running lock job after the current file |
+| POST | `/api/media/upload` | query: `folder` (opt), `path` (req, may contain sub-folders); body = raw file bytes | `{ ok, name, rel, locked }` | Streams to disk (encrypted when `ENCRYPT_NEW_MEDIA=1`); collisions → `name (1).ext` |
+| POST | `/api/auth` | JSON: `password` | `{ ok, token }` | Public: password login → in-memory session token (cookie + `x-xdl-session`); also unlocks the vault. Rate-limited |
+| GET | `/api/auth/methods` | — | `{ ok, loginPattern, preferLogin, minDots }` | Public: what the login box offers |
+| POST | `/api/auth/pattern` | JSON: `pattern` `{size:5,dots}` | `{ ok, token }` | Public: pattern login → session token; also unlocks the vault via its pattern slot |
+| GET | `/api/auth/session` | — | `{ ok }` | Session probe |
+| GET/POST | `/api/security`, `/api/security/password` (`currentPassword`, `newPassword`), `/api/security/pattern` (`pattern` or null, `password`), `/api/security/prefs` (`preferLogin`, `autoLockMinutes`) | | settings | Password/pattern stored as scrypt hashes in `.xdl-auth.json` (root, gitignored); changing them re-seals the vault slots |
+| GET/POST | `/api/config` | `{key,value}` | schema groups | Settings page: friendly schema (`settingsSchema()`), type-checked; keys set by the container env are `lockedByContainer` (409 on save) |
+| POST | `/api/restart` | JSON: `force` (opt) | `{ ok }` | Exits so Docker restarts the app (409 while a job runs unless forced) |
 | PUT | `/api/mediaorder` | JSON: `folder` (opt), `flat` (opt), `order` (array, req) | `{ ok, scope, order }` | Saves custom grid order (deduped, sanitized, max 20000) |
 
 ## Environment Variables (all optional, defaults in parens)
@@ -69,6 +84,13 @@
 - `AUTO_CONTINUE_WAIT_MS` (0) — ms to wait before auto-continue
 - `MEDIA_RANGE_SIZE` (100) — media grid rail: files per range
 - `KEYBOARD_HINTS` (1) — show keyboard shortcut hint pills on buttons (0 = hide)
+
+### Media encryption & login (plans 039/040)
+- `ENCRYPT_NEW_MEDIA` (0) — encrypt new downloads + uploads; needs a panel password and a set-up vault. Read live. Works while the vault is locked.
+- **One secret:** the panel password (≥12 chars once encryption is set up) plus an optional 5×5 pattern (≥8 dots). Neither is stored readably: login checks use scrypt hashes in `.xdl-auth.json`; `UI_PANEL_PASSWORD` in `.env` is migrated into the hash once at startup and blanked. The browser keeps only a session token (memory-only on the server; restart = log in again). Header/query password auth no longer exists; internal calls use the loopback `X-Xdl-Internal` token.
+- **Vault v3** (`.xdl-vault.json` at the media root **and every drive mount root inside media/**): random X25519 key pair; public key in the clear (encrypts), private key sealed in two slots — scrypt(password) and scrypt(pattern, 2× cost). Login with either secret unlocks; Lock now / idle auto-lock (`autoLockMinutes`) wipe the key from memory. A stolen drive is only as safe as the weaker of the two secrets.
+- File format `XDLENC02` (`scan-videos/media-crypto.js`): per-file random key wrapped to the vault public key, chunked AES-256-GCM. `/media/*` decrypts on the fly with Range support (423 while locked); server-side ffmpeg/ffprobe read encrypted files through the loopback URL (`ffInputFor()`) — never pass an encrypted path to ffmpeg directly.
+- A vault is only created by explicit setup; the panel password can't be removed while one exists. `.xdl-created.json` (root) keeps original creation times of re-decrypted files.
 
 ### Capture Timing
 - `AUTO_CAPTURE_TIMEOUT_MS` (30000) — max wait for media signals
@@ -107,6 +129,9 @@ scan-videos/instagram-utils.js → { isReservedInstagramName, extractInstagramSh
 scan-videos/media-utils.js   → { isLikelyVideoUrl, stripByteRangeParams, isStreamingManifestUrl, isDirectFileUrl, extractQualityHint, metadataQualityScore, isInstagramAudioOnlyUrl, getInstagramAssetId, scoreDownloadCandidate, prioritizeInstagramCandidates, extractDownloadableVideoUrls, prioritizeXhamsterCandidates, isAdVideoUrl, isPreviewClipUrl, sanitizeFileToken }
 scan-videos/scan-saved.js    → { scanSavedPage({ browser, targetUrl, endUrls?, waitMs?, exitWaitMs?, maxIterations?, log? }) }
 scan-videos/site-hosts.js     → { SITE_HOSTS, hostMatchesSite, siteOfHostname }  // canonical + mirror hosts per site (plan 036 §8)
+scan-videos/media-crypto.js   → { encryptFileInPlace(pub), decryptFileInPlace(priv), decryptRange(priv), createDecryptStream, encryptIterableToFile(pub), readFileHeader, createVault, openVault(slot), setVaultSlot, vaultPublicKey, isLockableName, ... }  // plan 039 v3
+scan-videos/media-vault.js    → { createMediaVault({ mediaDir, rootDir, isProtected }) }  // setup/unlock(slot)/lock/setSlot, encryptKey()/decryptKey(), per-drive copies, lock cache, created-time overrides
+scan-videos/pattern-auth.js   → { createPatternAuth({ rootDir }) }  // password/pattern hashes, rate limiter, sessions, prefs, .env password migration
 ```
 
 ## Key Patterns

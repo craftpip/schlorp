@@ -11,3 +11,5 @@ node_modules/
 .env
 .docker-volumes.backup
 demo/
+.xdl-created.json
+.xdl-auth.json

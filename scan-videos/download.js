@@ -70,7 +70,10 @@ function selectPosterTargets(names, mode) {
 // Best-effort: extract a representative frame next to the video as
 // `<stem>-poster.jpg`. Never throws — a failed thumbnail is not a failed download.
 // `overwrite: true` re-extracts even when a poster already exists (ffmpeg `-y`).
-async function generatePosterThumbnail(videoPath, { overwrite = false } = {}) {
+// `input` ({ pre, src }) overrides how ffmpeg reads the video — used for
+// encrypted files, which are read through the server's decrypting URL
+// (plan 039). The poster is still written next to `videoPath`.
+async function generatePosterThumbnail(videoPath, { overwrite = false, input = null } = {}) {
   try {
     const ext = path.extname(videoPath).slice(1).toLowerCase();
     if (!VIDEO_EXTS.has(ext)) return null;
@@ -78,14 +81,16 @@ async function generatePosterThumbnail(videoPath, { overwrite = false } = {}) {
     const posterPath = posterPathFor(videoPath);
     if (posterPath === videoPath) return null;
     try { await fs.access(posterPath); if (!overwrite) return posterPath; } catch {}
+    const pre = input && Array.isArray(input.pre) ? input.pre : [];
+    const src = input && input.src ? input.src : videoPath;
 
     // Thumbnail frame timestamp: the exact middle of the video (t = duration/2).
-    const durationSeconds = await probeDurationSeconds(videoPath);
+    const durationSeconds = await probeDurationSeconds(src, pre);
     const seekMs = Number.isFinite(durationSeconds) ? (durationSeconds * 1000) / 2 : 0;
 
-    const args = ["-y"];
-    if (seekMs > 0) args.push("-i", videoPath, "-ss", String(seekMs / 1000));
-    else args.push("-i", videoPath);
+    const args = ["-y", ...pre];
+    if (seekMs > 0) args.push("-i", src, "-ss", String(seekMs / 1000));
+    else args.push("-i", src);
     args.push("-vf", "scale=320:-2", "-frames:v", "1", "-q:v", "2", posterPath);
     await execFileAsync("ffmpeg", args, { timeout: 60000 });
     return posterPath;
@@ -94,11 +99,11 @@ async function generatePosterThumbnail(videoPath, { overwrite = false } = {}) {
   }
 }
 
-async function probeDurationSeconds(filePath) {
+async function probeDurationSeconds(filePath, pre = []) {
   try {
     const { stdout } = await execFileAsync(
       "ffprobe",
-      ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", filePath],
+      ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", ...pre, filePath],
       { timeout: FFPROBE_TIMEOUT_MS }
     );
     const duration = Number(String(stdout || "").trim());

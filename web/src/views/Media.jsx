@@ -11,6 +11,7 @@ import PromptModal from "../components/PromptModal.jsx";
 import AlertModal from "../components/AlertModal.jsx";
 import MediaContextMenu from "../components/MediaContextMenu.jsx";
 import MoveDialog from "../components/MoveDialog.jsx";
+import { useMediaTasks, MediaTasksPanel, UploadDropOverlay, VaultLockedBanner, filesFromDataTransfer, isOsFileDrag } from "../components/MediaTasksPanel.jsx";
 import { moveKeys, pileLandMember, planDetach, planJoin } from "../lib/stackDrag.js";
 
 const ROT_STORE_KEY = "xdl_viewer_rotations";
@@ -373,6 +374,7 @@ export default function Media() {
         mtime: it.mtime || it.addedAt,
         created: it.created || it.mtime || it.addedAt,
         thumb: it.thumb || null,
+        locked: !!it.locked,
         playlistKey: key,
         _isPlaylistItem: true,
       };
@@ -765,6 +767,22 @@ export default function Media() {
   // Fresh content (mount / folder / flat change / explicit refresh) scrolls once
   // to the selection. Delete-triggered reloads must NOT scroll (plan 014).
   const refresh = () => { freshLoadRef.current = true; load(folder); };
+  // Uploads + lock/unlock jobs (plan 039). Finished work reloads the listing.
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+  const tasks = useMediaTasks({ onFilesChanged: () => { if (refreshRef.current) refreshRef.current(); } });
+  const vaultOn = !!(tasks.vault && tasks.vault.available);
+  const uploadInputRef = useRef(null);
+  const osDragDepth = useRef(0);
+  const [osDropActive, setOsDropActive] = useState(false);
+  // Safety net: a drop or drag-end anywhere always clears the upload overlay
+  // (a child that swallows the drop event would otherwise leave it stuck).
+  useEffect(() => {
+    const clear = () => { osDragDepth.current = 0; setOsDropActive(false); };
+    window.addEventListener("drop", clear);
+    window.addEventListener("dragend", clear);
+    return () => { window.removeEventListener("drop", clear); window.removeEventListener("dragend", clear); };
+  }, []);
   // Shift+G popup: POST to generate posters (missing-only or all), stream
   // NDJSON per-file progress into the popup. The grid refreshes on popup
   // close only — never while the popup is open.
@@ -1969,6 +1987,7 @@ const collapseSpreadUnlessMember = (fid) => {
         data-selected={selected}
         onClick={() => tapItem(it)}
         onDoubleClick={() => openItem(it)}
+        onContextMenu={(e) => { if (e.ctrlKey) return; openContextMenu(e, { kind: "folder", it, key: rk }); }}
         onMouseEnter={() => setHoveredFolderKey(rowKey(it))}
         onMouseLeave={() => setHoveredFolderKey((cur) => (cur === rowKey(it) ? null : cur))}
         title={`${displayName(it)} — click to select, double-click to open`}
@@ -2165,6 +2184,11 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         )}
         {!isDir && (
           <span style={{ position: "absolute", left: 0, right: 0, bottom: 0, padding: "4px 6px", fontSize: 10, color: "#fff", background: "linear-gradient(transparent, rgba(0,0,0,.65))", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", pointerEvents: "none" }}>{displayName(it)}</span>
+        )}
+        {!isDir && !it.locked && vaultOn && (
+          <span data-testid="media-tile-lock" data-locked={it.locked ? "true" : "false"} title={it.locked ? "Encrypted — opens only in this panel" : "Not encrypted"} style={{ position: "absolute", top: 6, right: 6, zIndex: 3, width: 22, height: 22, borderRadius: 999, display: "grid", placeItems: "center", pointerEvents: "none", background: it.locked ? "rgba(16,185,129,.9)" : "rgba(0,0,0,.5)", color: "#fff", border: "1px solid rgba(255,255,255,.18)", backdropFilter: "blur(6px)", WebkitBackdropFilter: "blur(6px)", opacity: it.locked ? 1 : 0.8 }}>
+            <i className={`bi ${it.locked ? "bi-lock-fill" : "bi-unlock"}`} style={{ fontSize: 11 }} />
+          </span>
         )}
         {!isDir && (
           <div
@@ -3369,9 +3393,10 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
           try { e.dataTransfer.setData("text/plain", mem[0]); } catch {}
         }}
         onDragEnd={() => { dragKeysRef.current = null; dragKeyRef.current = null; if (dropInfo) setDropInfo(null); }}
-        onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = "move"; e.currentTarget.style.outline = "3px solid var(--accent)"; }}
+        onDragOver={(e) => { if (isOsFileDrag(e)) return; /* OS files bubble to the page upload drop */ e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = "move"; e.currentTarget.style.outline = "3px solid var(--accent)"; }}
         onDragLeave={(e) => { e.currentTarget.style.outline = pileOutline; }}
         onDrop={(e) => {
+          if (isOsFileDrag(e)) return; // let the page-level handler upload them
           e.preventDefault(); e.stopPropagation();
           e.currentTarget.style.outline = pileOutline;
           if (dragKeysRef.current && dragKeysRef.current.length) {
@@ -4197,8 +4222,135 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     }
   };
 
+  // Lock / unlock (plan 039). Keys go to the server media-relative.
+  const mediaKeyOf = (it) => (it && it._isPlaylistItem ? String(it.rel || it.name) : folder ? `${folder}/${rowKey(it)}` : rowKey(it));
+  const runLock = async (action, body) => {
+    if (!(body.keys && body.keys.length) && !(body.dirs && body.dirs.length)) return;
+    try {
+      await tasks.startLock({ action, ...body });
+    } catch (e) {
+      setAlertState({ open: true, title: action === "lock" ? "Lock failed" : "Unlock failed", message: e.message || String(e) });
+    }
+  };
+  // Files a context-menu action applies to: the selection, plus a right-clicked
+  // pile's members, falling back to the right-clicked file itself.
+  const ctxFileItems = () => {
+    const entry = ctxMenu && ctxMenu.entry;
+    if (!entry) return [];
+    let rks = [...selectedKeysForStack];
+    if (entry.kind === "pile" && Array.isArray(entry.members)) rks = [...new Set([...rks, ...entry.members.map((m) => rowKey(m))])];
+    if (!rks.length && entry.it) rks = [rowKey(entry.it)];
+    const byKey = new Map();
+    for (const x of filtered) if (x && !x.dir) byKey.set(rowKey(x), x);
+    const its = rks.map((k) => byKey.get(k)).filter(Boolean);
+    if (!its.length && entry.it && !entry.it.dir) its.push(entry.it);
+    return its;
+  };
+  // Generate preview (poster) from the context menu — reuses the Shift+G
+  // popup: selected videos regenerate immediately; empty space opens the
+  // popup for the whole folder. Playlist views have no folder scope.
+  const openThumbGenPopup = () => {
+    setThumbGenResult(null);
+    setThumbGenProgress(null);
+    load(folder);
+    setThumbGenOpen(true);
+  };
+  const ctxPreview = (() => {
+    if (!ctxMenu || !ctxMenu.entry || inPlaylistView) return null;
+    const entry = ctxMenu.entry;
+    if (entry.kind === "folder") return null;
+    if (entry.kind === "file" && !entry.it) return { label: "Generate previews…", onGenerate: openThumbGenPopup };
+    const videoKeys = new Set(thumbGenVideos.map((v) => v.key));
+    const keys = ctxFileItems().map((x) => rowKey(x)).filter((k) => videoKeys.has(k));
+    if (!keys.length) return null;
+    return {
+      label: keys.length > 1 ? `Generate preview (${keys.length} videos)` : "Generate preview",
+      onGenerate: () => {
+        setThumbGenResult(null);
+        setThumbGenProgress(null);
+        setThumbGenOpen(true);
+        runThumbGen("all", keys);
+      },
+    };
+  })();
+  // Download (save to disk) for the clicked/selected files — folders never.
+  // Encrypted files arrive decrypted (server ?download=1 → attachment).
+  const mediaUrlOf = (it) => (it && it._isPlaylistItem ? "/media/" + String(it.rel || it.name).split("/").filter(Boolean).map(encodeURIComponent).join("/") : toMediaUrl(folder, rowKey(it)));
+  const ctxDownload = (() => {
+    if (!ctxMenu || !ctxMenu.entry) return null;
+    const entry = ctxMenu.entry;
+    if (entry.kind === "folder" || (entry.kind === "file" && !entry.it)) return null;
+    const its = ctxFileItems().filter((x) => x && !x.dir);
+    if (!its.length) return null;
+    return {
+      label: its.length > 1 ? `Download ${its.length} files` : "Download",
+      onDownload: () => {
+        its.forEach((it, i) => {
+          // Stagger so the browser accepts several downloads in a row.
+          setTimeout(() => {
+            const a = document.createElement("a");
+            a.href = `${mediaUrlOf(it)}?download=1`;
+            a.download = String(it.name || "").split("/").pop();
+            a.rel = "noopener";
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+          }, i * 400);
+        });
+      },
+    };
+  })();
+  const ctxLock = (() => {
+    if (!ctxMenu || !ctxMenu.entry || !tasks.vault) return null;
+    const entry = ctxMenu.entry;
+    const available = !!tasks.vault.available;
+    if (available && !tasks.vault.exists) return { available, needsSetup: true };
+    if (entry.kind === "folder" || (entry.kind === "file" && !entry.it)) {
+      if (inPlaylistView) return null;
+      const dirKey = entry.kind === "folder" ? (folder ? `${folder}/${entry.it.name}` : entry.it.name) : folder;
+      const label = entry.kind === "folder" ? entry.it.name : folder ? folder.split("/").pop() : "Media";
+      // Whole-folder jobs are recursive (and at the root: the entire library),
+      // so they ask first.
+      const askFolder = (verb) => window.confirm(dirKey
+        ? `${verb} every file in “${label}” and all its subfolders?`
+        : `${verb} EVERY file in your whole media library (all folders and drives)?\n\nThis can take a long time.`);
+      return {
+        available,
+        folderLabel: label,
+        onLockFolder: () => { if (askFolder("Encrypt")) runLock("lock", { dirs: [dirKey] }); },
+        onUnlockFolder: () => { if (askFolder("Decrypt")) runLock("unlock", { dirs: [dirKey] }); },
+      };
+    }
+    const its = ctxFileItems();
+    const locked = its.filter((x) => x.locked);
+    const unlocked = its.filter((x) => !x.locked);
+    return {
+      available,
+      files: { locked: locked.length, unlocked: unlocked.length },
+      onLockFiles: () => runLock("lock", { keys: unlocked.map(mediaKeyOf) }),
+      onUnlockFiles: () => runLock("unlock", { keys: locked.map(mediaKeyOf) }),
+    };
+  })();
+
   return (
-    <div data-testid="media-page" className="media-page">
+    <div
+      data-testid="media-page"
+      className="media-page"
+      onDragEnter={(e) => { if (inPlaylistView || !isOsFileDrag(e)) return; e.preventDefault(); osDragDepth.current += 1; if (!osDropActive) setOsDropActive(true); }}
+      onDragOver={(e) => { if (inPlaylistView || !isOsFileDrag(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = "copy"; }}
+      onDragLeave={(e) => { if (!isOsFileDrag(e)) return; osDragDepth.current = Math.max(0, osDragDepth.current - 1); if (!osDragDepth.current) setOsDropActive(false); }}
+      onDrop={(e) => {
+        if (inPlaylistView || !isOsFileDrag(e)) return;
+        e.preventDefault();
+        osDragDepth.current = 0;
+        setOsDropActive(false);
+        const target = folder;
+        filesFromDataTransfer(e.dataTransfer).then((picked) => tasks.enqueueUploads(picked, target)).catch(() => {});
+      }}
+    >
+      <UploadDropOverlay visible={osDropActive} folder={folder} encrypt={!!(tasks.vault && tasks.vault.encryptNew)} />
+      <MediaTasksPanel tasks={tasks} />
+      <VaultLockedBanner tasks={tasks} />
       <div className="media-page-title" style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
         <div data-testid="media-title" style={{ fontWeight: 700, fontSize: 14 }}><i className="bi bi-collection-play" style={{ marginRight: 8 }} /> Media library</div>
         <span data-testid="media-item-count" className="badge text-bg-secondary">{inPlaylistView ? (playlistItemsForView ? playlistItemsForView.length : 0) : items.length} items</span>
@@ -4213,6 +4365,8 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         <input data-testid="media-filter" ref={filterInputRef} className="form-control form-control-sm media-filter" style={{ width: "100%", maxWidth: "none", height: 31 }} placeholder="Filter files…" value={filter} onChange={(e) => setFilter(e.target.value)} onKeyDown={(e) => { if (e.key === "Escape") e.currentTarget.blur(); }} />
         </span>
         <button data-testid="media-refresh" className="btn btn-sm btn-outline-secondary" style={{ height: 31, display: "inline-flex", alignItems: "center" }} onClick={refresh} disabled={loading} title="Refresh"><i className="bi bi-arrow-clockwise" /></button>
+        <button data-testid="media-upload" type="button" className="btn btn-sm btn-outline-secondary" style={{ height: 31, display: "inline-flex", alignItems: "center", gap: 5 }} onClick={() => { if (uploadInputRef.current) uploadInputRef.current.click(); }} disabled={inPlaylistView} title={inPlaylistView ? "Open a folder to upload" : `Upload files to ${folder || "Media"} — or drag & drop files/folders here${tasks.vault && tasks.vault.encryptNew ? " (encrypted)" : ""}`}><i className="bi bi-cloud-arrow-up" /> <span className="media-btn-label">Upload</span></button>
+        <input data-testid="media-upload-input" ref={uploadInputRef} type="file" multiple hidden onChange={(e) => { const picked = Array.from(e.target.files || []).map((f) => ({ file: f, relPath: f.name })); e.target.value = ""; tasks.enqueueUploads(picked, folder); }} />
         </div>
         <div className="media-tools-row" data-tools-row="type" style={{ display: "contents" }}>
           <div data-testid="media-type-filter" style={{ position: "relative", display: "inline-flex", alignItems: "center", gap: 2, border: "1px solid var(--border)", borderRadius: 8, padding: 2, background: "var(--surface-2)" }} title="Type filter — press 2 to cycle">
@@ -4416,7 +4570,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                             {menuOpen && <div style={{ position: "absolute", top: 34, left: 0, zIndex: 90 }}><PlaylistHoverMenu mediaKey={pk} showIndex={viaF} /></div>}
                           </div>
                           <div data-testid="media-row-name" style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0, marginLeft: "5px" }}>
-                            <i className={`bi ${catIcon[fileCategory(it.name)]}`} style={{ color: "var(--accent)", display: "grid", placeItems: "center", width: 18, height: 18, fontSize: 14, lineHeight: 1, flex: "0 0 auto", transform: "translateY(1px)" }} />
+                            <i className={`bi ${catIcon[fileCategory(it.name)]}`} style={{ color: "var(--accent)", display: "grid", placeItems: "center", width: 18, height: 18, fontSize: 14, lineHeight: 1, flex: "0 0 auto", transform: "translateY(1px)" }} />{!it.dir && !it.locked && vaultOn && <i data-testid="media-row-lock" data-locked={it.locked ? "true" : "false"} className={`bi ${it.locked ? "bi-lock-fill" : "bi-unlock"}`} title={it.locked ? "Encrypted — opens only in this panel" : "Not encrypted"} style={{ color: it.locked ? "#10b981" : "var(--muted)", fontSize: 12, flex: "0 0 auto", marginLeft: -4, opacity: it.locked ? 1 : 0.7 }} />}
                             <button data-testid="media-row-open-file" onClick={(e) => { e.stopPropagation(); tapItem(it); }} onDoubleClick={(e) => { e.stopPropagation(); openItem(it); }} style={{ background: "none", border: 0, color: "var(--text)", fontWeight: 500, textAlign: "left", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", padding: 0, minWidth: 0, maxWidth: "100%", userSelect: "none", WebkitUserSelect: "none" }}>{displayName(it)}</button>
                           </div>
                           <span data-testid="media-row-size" className="small mcol-size" style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", color: "var(--muted)", whiteSpace: "nowrap" }}>{fmtSize(it.size)}</span>
@@ -4465,7 +4619,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                     const isSel = selKey === ky || selKeys.has(ky);
                     const isBookmarked = pk ? bookmarkedKeys.has(pk) : false;
                     return (
-                      <div key={isFlat ? it.rel || it.name : it.name} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={isSel} className={it.dir ? "mrow mrow-dir" : "mrow mrow-file"} style={{ display: "grid", gridTemplateColumns: "subgrid", gridColumn: "1 / -1", gap: "0 10px", alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: isSel ? "rgba(99,102,241,0.14)" : it.dir ? "var(--surface-2)" : "var(--surface)", cursor: "pointer", userSelect: "none", WebkitUserSelect: "none" }} onClick={(e) => { if (e.ctrlKey || e.metaKey) toggleSelection({ kind: "file", it, key: ky }); else tapItem(it); }} onContextMenu={(e) => { if (e.ctrlKey) { e.preventDefault(); toggleSelection({ kind: "file", it, key: ky }); } }} onDoubleClick={() => openItem(it)} title="Click to select, double-click to open">
+                      <div key={isFlat ? it.rel || it.name : it.name} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={isSel} className={it.dir ? "mrow mrow-dir" : "mrow mrow-file"} style={{ display: "grid", gridTemplateColumns: "subgrid", gridColumn: "1 / -1", gap: "0 10px", alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: isSel ? "rgba(99,102,241,0.14)" : it.dir ? "var(--surface-2)" : "var(--surface)", cursor: "pointer", userSelect: "none", WebkitUserSelect: "none" }} onClick={(e) => { if (e.ctrlKey || e.metaKey) toggleSelection({ kind: "file", it, key: ky }); else tapItem(it); }} onContextMenu={(e) => { if (e.ctrlKey) { e.preventDefault(); toggleSelection({ kind: "file", it, key: ky }); } else { openContextMenu(e, { kind: it.dir ? "folder" : "file", it, key: ky }); } }} onDoubleClick={() => openItem(it)} title="Click to select, double-click to open">
                         {!it.dir && (
                           <div style={{ position: "relative", display: "grid", placeItems: "center" }} onMouseEnter={() => { if (isCoarsePointer()) return; if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); setOpenMenuKey(ky); }} onMouseLeave={() => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); playlistMenuCloseTimer.current = setTimeout(() => setOpenMenuKey((cur) => cur === ky ? null : cur), 120); }}>
                             <button data-testid="media-row-playlist-btn" className="media-row-playlist-btn" type="button" onClick={(e) => { e.stopPropagation(); const coarse = isCoarsePointer(); if (coarse) setOpenMenuKey((cur) => cur === ky ? null : ky); else setOpenMenuKey(ky); }} style={{ width: 28, height: 28, padding: 0, borderRadius: 999, border: isBookmarked ? "1px solid rgba(99,102,241,.35)" : "1px solid var(--border)", background: menuOpen ? "rgba(99,102,241,.15)" : isBookmarked ? "rgba(99,102,241,.12)" : "var(--surface-2)", color: isBookmarked ? "#6366f1" : "var(--muted)", display: "grid", placeItems: "center", cursor: "pointer", opacity: 1 }}><i className={`bi ${isBookmarked ? "bi-bookmark-fill" : "bi-bookmark"}`} /></button>
@@ -4473,7 +4627,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                           </div>
                         )}
                         <div data-testid="media-row-name" style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0, marginLeft: "5px", ...(it.dir ? { gridColumn: "1 / span 2" } : {}) }}>
-                          <i className={`bi ${it.dir ? "bi-folder-fill" : catIcon[fileCategory(it.name)]}`} style={{ color: it.dir ? "#f59e0b" : "var(--accent)", display: "grid", placeItems: "center", width: 18, height: 18, fontSize: 14, lineHeight: 1, flex: "0 0 auto", transform: "translateY(1px)" }} />
+                          <i className={`bi ${it.dir ? "bi-folder-fill" : catIcon[fileCategory(it.name)]}`} style={{ color: it.dir ? "#f59e0b" : "var(--accent)", display: "grid", placeItems: "center", width: 18, height: 18, fontSize: 14, lineHeight: 1, flex: "0 0 auto", transform: "translateY(1px)" }} />{!it.dir && !it.locked && vaultOn && <i data-testid="media-row-lock" data-locked={it.locked ? "true" : "false"} className={`bi ${it.locked ? "bi-lock-fill" : "bi-unlock"}`} title={it.locked ? "Encrypted — opens only in this panel" : "Not encrypted"} style={{ color: it.locked ? "#10b981" : "var(--muted)", fontSize: 12, flex: "0 0 auto", marginLeft: -4, opacity: it.locked ? 1 : 0.7 }} />}
                           {it.dir ? (
                             <button data-testid="media-row-open-folder" onClick={(e) => { e.stopPropagation(); tapItem(it); }} onDoubleClick={(e) => { e.stopPropagation(); openItem(it); }} title={`${it.name} — click to select, double-click to open`} style={{ background: "none", border: 0, color: "var(--text)", fontWeight: 600, textAlign: "left", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0, maxWidth: "100%", userSelect: "none", WebkitUserSelect: "none" }}>{it.name}</button>
                           ) : (
@@ -4591,6 +4745,11 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         stacks={stackMenuEntries}
         selCount={selectedKeysForStack.size}
         noStacks={inPlaylistView}
+        lock={ctxLock}
+        preview={ctxPreview}
+        download={ctxDownload}
+        onRenameFolder={() => { const e = ctxMenu && ctxMenu.entry; if (e && e.kind === "folder" && e.it) setPromptState({ open: true, id: `folder:${e.it.name}`, value: e.it.name }); }}
+        onDeleteFolder={() => { const e = ctxMenu && ctxMenu.entry; if (e && e.kind === "folder" && e.it) setFolderDel({ name: e.it.name, phase: 1 }); }}
         onClose={() => setCtxMenu(null)}
         onGotoFile={() => {
           const entry = ctxMenu && ctxMenu.entry;
@@ -4630,7 +4789,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         onOpen={() => {
           const entry = ctxMenu && ctxMenu.entry;
           if (!entry) return;
-          if (entry.kind === "file" && entry.it) openItem(entry.it);
+          if ((entry.kind === "file" || entry.kind === "folder") && entry.it) openItem(entry.it);
           else if (entry.kind === "pile" && entry.members && entry.members.length) openViewer(entry.members[0]);
         }}
         onOpenStack={(stackId) => {

@@ -209,7 +209,7 @@ export default function MoveDialog({ open, items, sourceFolder, heading, stackNo
             <div className="small text-muted" style={{ padding: "8px 4px" }}>No subfolders here</div>
           )}
           {!loading && !fetchErr && dirs.map((d) => (
-            <div key={d.name} data-testid="media-move-row" style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderRadius: 6 }}>
+            <div key={d.name} data-testid="media-move-row" className="media-move-row" style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderRadius: 6 }}>
               <button
                 data-testid="media-move-enter"
                 type="button"
@@ -217,7 +217,7 @@ export default function MoveDialog({ open, items, sourceFolder, heading, stackNo
                 title={`Open ${d.name}`}
                 style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 8, background: "transparent", border: "none", padding: 0, cursor: "pointer", color: "var(--text)", fontSize: 13, textAlign: "left" }}
               >
-                <i className="bi bi-folder-fill" style={{ fontSize: 14, color: "var(--muted)", flexShrink: 0 }} />
+                <i className="bi bi-folder-fill media-move-icon" style={{ fontSize: 14, flexShrink: 0 }} />
                 <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.name}</span>
               </button>
               <button

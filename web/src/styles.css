@@ -988,3 +988,14 @@
         .media-ctx-card [data-testid="media-ctx-add-stack"]:active{transform:none}
       }
     
+/* Move dialog: highlight the whole folder row on hover so each "Move" button
+   is visibly tied to its folder name. */
+.media-move-row { transition: background .12s, box-shadow .12s; }
+.media-move-row .media-move-icon { color: var(--muted); transition: color .12s; }
+.media-move-row:hover,
+.media-move-row:focus-within {
+  background: rgba(99, 102, 241, .14);
+  box-shadow: inset 0 0 0 1px rgba(99, 102, 241, .45);
+}
+.media-move-row:hover .media-move-icon,
+.media-move-row:focus-within .media-move-icon { color: #f59e0b; }

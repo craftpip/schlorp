@@ -1,5 +1,6 @@
 import { NavLink, Outlet } from "react-router-dom";
 import { useEffect, useState } from "react";
+import PatternPad from "./components/PatternPad.jsx";
 
 
 if (typeof window !== "undefined" && !window._xdlFetchPatched) {
@@ -7,10 +8,10 @@ if (typeof window !== "undefined" && !window._xdlFetchPatched) {
   const _origFetch = window.fetch.bind(window);
   window.fetch = (url, opts = {}) => {
     try {
-      const t = localStorage.getItem("xdl_admin_pw") || localStorage.getItem("xdl_panel_pw") || "";
-      if (t) {
-        opts = { ...opts, headers: { ...(opts.headers || {}), "x-panel-password": t, "x-admin-password": t } };
-      }
+      // Logins carry a random session token — the password itself is never
+      // stored in the browser (plan 040).
+      const st = localStorage.getItem("xdl_session_token") || "";
+      if (st) opts = { ...opts, headers: { ...(opts.headers || {}), "x-xdl-session": st } };
     } catch {}
     return _origFetch(url, opts);
   };
@@ -22,6 +23,9 @@ export default function App() {
   const [pw, setPw] = useState("");
   const [pwErr, setPwErr] = useState("");
   const [showLogin, setShowLogin] = useState(false);
+  // Login box: both methods available; preferLogin picks the first tab.
+  const [loginMethods, setLoginMethods] = useState({ loginPattern: null, preferLogin: "password" });
+  const [loginTab, setLoginTab] = useState("password");
   const [hasFlagged, setHasFlagged] = useState(false);
   const [footerClicks, setFooterClicks] = useState(0);
 
@@ -70,14 +74,27 @@ export default function App() {
     fetch("/api/auth/status").then((r) => r.json()).then((j) => {
       if (!j.protected) setAuth({ checking: false, protected: false, authed: true });
       else {
+        // Older builds saved the password itself: trade it for a session
+        // token once, then delete it from the browser.
         const t2 = localStorage.getItem("xdl_panel_pw") || localStorage.getItem("xdl_admin_pw") || "";
-        if (!t2) setAuth({ checking: false, protected: true, authed: false });
-        else fetch("/api/auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: t2 }) }).then((r) => {
-          if (r.ok) setAuth({ checking: false, protected: true, authed: true });
+        localStorage.removeItem("xdl_panel_pw");
+        localStorage.removeItem("xdl_admin_pw");
+        const tok = localStorage.getItem("xdl_session_token") || "";
+        if (tok) {
+          fetch("/api/auth/session").then((r) => r.json().catch(() => ({})).then((j2) => {
+            if (r.ok && j2.ok) setAuth({ checking: false, protected: true, authed: true });
+            else { localStorage.removeItem("xdl_session_token"); setAuth({ checking: false, protected: true, authed: false }); }
+          })).catch(() => setAuth({ checking: false, protected: true, authed: false }));
+        }
+        else if (!t2) setAuth({ checking: false, protected: true, authed: false });
+        else fetch("/api/auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: t2 }) }).then((r) => r.json().catch(() => ({})).then((j3) => {
+          if (r.ok && j3.ok) { if (j3.token) localStorage.setItem("xdl_session_token", j3.token); setAuth({ checking: false, protected: true, authed: true }); }
           else setAuth({ checking: false, protected: true, authed: false });
-        }).catch(() => setAuth({ checking: false, protected: true, authed: false }));
+        })).catch(() => setAuth({ checking: false, protected: true, authed: false }));
       }
-    }).catch(() => setAuth({ checking: false, protected: false, authed: true }));
+    // If the status check itself fails, show the login rather than an
+    // empty panel (the server enforces auth either way).
+    }).catch(() => setAuth({ checking: false, protected: true, authed: false }));
   }, []);
   useEffect(() => {
     document.title = "Memo";
@@ -86,10 +103,27 @@ export default function App() {
     e.preventDefault(); setPwErr("");
     const r = await fetch("/api/auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: pw }) });
     const j = await r.json().catch(() => ({}));
-    if (r.ok && j.ok) { localStorage.setItem("xdl_admin_pw", pw); localStorage.setItem("xdl_panel_pw", pw); localStorage.setItem("xdl_last_activity", String(Date.now())); setShowLogin(false); setPwErr(""); setAuth({ checking: false, protected: true, authed: true }); setPw(""); }
+    if (r.ok && j.ok) { if (j.token) localStorage.setItem("xdl_session_token", j.token); localStorage.setItem("xdl_last_activity", String(Date.now())); setShowLogin(false); setPwErr(""); setAuth({ checking: false, protected: true, authed: true }); setPw(""); }
     else setPwErr(j.error || "Invalid password");
   };
-  const doLogout = () => { fetch("/api/auth/logout", { method: "POST" }); localStorage.removeItem("xdl_admin_pw"); localStorage.removeItem("xdl_panel_pw"); localStorage.removeItem("xdl_last_activity"); setShowLogin(false); setPw(""); setPwErr(""); setAuth({ checking: false, protected: true, authed: false }); };
+  // Pattern login: rejections bubble to the pad (red flash + message).
+  const doPatternLogin = async (pattern) => {
+    const r = await fetch("/api/auth/pattern", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pattern }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) throw new Error(j.error || "Wrong pattern");
+    if (j.token) localStorage.setItem("xdl_session_token", j.token);
+    localStorage.setItem("xdl_last_activity", String(Date.now()));
+    setTimeout(() => { setShowLogin(false); setPwErr(""); setAuth({ checking: false, protected: true, authed: true }); }, 350);
+  };
+  useEffect(() => {
+    if (!showLogin) return;
+    fetch("/api/auth/methods").then((r) => r.json()).then((j) => {
+      if (!j || !j.ok) return;
+      setLoginMethods({ loginPattern: j.loginPattern, preferLogin: j.preferLogin, minDots: j.minDots });
+      setLoginTab(j.loginPattern && j.preferLogin === "pattern" ? "pattern" : "password");
+    }).catch(() => {});
+  }, [showLogin]);
+  const doLogout = () => { fetch("/api/auth/logout", { method: "POST" }); localStorage.removeItem("xdl_admin_pw"); localStorage.removeItem("xdl_panel_pw"); localStorage.removeItem("xdl_session_token"); localStorage.removeItem("xdl_last_activity"); setShowLogin(false); setPw(""); setPwErr(""); setAuth({ checking: false, protected: true, authed: false }); };
 
   useEffect(() => {
     if (!auth.protected || !auth.authed) return;
@@ -425,12 +459,25 @@ export default function App() {
           {showLogin && (
             <div onClick={() => { setShowLogin(false); setPwErr(""); }} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,.45)", backdropFilter: "blur(6px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 50 }}>
               <div onClick={(e) => e.stopPropagation()} className="card" style={{ padding: 20, width: "100%", maxWidth: 320, boxShadow: "0 12px 32px rgba(0,0,0,.18)" }}>
-                <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 10, color: "var(--text)" }}>Enter password</div>
-                <form onSubmit={doLogin} style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <input type="password" className="form-control" value={pw} onChange={(e) => setPw(e.target.value)} placeholder="Password" autoFocus style={{ flex: 1, padding: "9px 10px", fontSize: 13 }} />
-                  <button type="submit" className="btn btn-primary btn-sm" style={{ padding: "9px 14px" }}>Continue</button>
-                </form>
-                {pwErr && <div style={{ color: "var(--danger)", fontSize: 11.5, marginTop: 8 }}>{pwErr}</div>}
+                {loginMethods.loginPattern && (
+                  <div data-testid="login-tabs" style={{ display: "flex", gap: 4, marginBottom: 12, padding: 3, borderRadius: 8, background: "var(--surface-2)", border: "1px solid var(--border)" }}>
+                    {[["pattern", "Pattern", "bi-grid-3x3-gap"], ["password", "Password", "bi-key"]].map(([k, label, icon]) => (
+                      <button key={k} type="button" data-testid={`login-tab-${k}`} className={`btn btn-sm ${loginTab === k ? "btn-primary" : "btn-link"}`} style={{ flex: 1, fontSize: 12, padding: "5px 8px", textDecoration: "none" }} onClick={() => { setLoginTab(k); setPwErr(""); }}><i className={`bi ${icon}`} /> {label}</button>
+                    ))}
+                  </div>
+                )}
+                {loginMethods.loginPattern && loginTab === "pattern" ? (
+                  <PatternPad size={loginMethods.loginPattern.size} px={260} minDots={loginMethods.minDots || 8} hint="Draw your pattern" testId="login-pattern" onComplete={doPatternLogin} />
+                ) : (
+                  <>
+                    <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 10, color: "var(--text)" }}>Enter password</div>
+                    <form onSubmit={doLogin} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      <input type="password" className="form-control" value={pw} onChange={(e) => setPw(e.target.value)} placeholder="Password" autoFocus style={{ flex: 1, padding: "9px 10px", fontSize: 13 }} />
+                      <button type="submit" className="btn btn-primary btn-sm" style={{ padding: "9px 14px" }}>Continue</button>
+                    </form>
+                    {pwErr && <div style={{ color: "var(--danger)", fontSize: 11.5, marginTop: 8 }}>{pwErr}</div>}
+                  </>
+                )}
                 <div style={{ marginTop: 10, textAlign: "right" }}>
                   <button type="button" className="btn btn-sm btn-outline-secondary" style={{ fontSize: 11, padding: "4px 8px" }} onClick={() => { setShowLogin(false); setPwErr(""); }}>Close</button>
                 </div>
