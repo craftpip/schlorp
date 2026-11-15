@@ -57,22 +57,22 @@ export default function MediaContextMenu({ menu, onClose, stacks, selCount, onSt
       <Divider />
       {!lock.available && (
         <div data-testid="media-ctx-lock-unavailable" style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", color: "var(--muted)", fontSize: 12 }}>
-          <i className="bi bi-shield-lock" style={{ fontSize: 12 }} /> Set a panel password in Settings to lock media
+          <i className="bi bi-shield-lock" style={{ fontSize: 12 }} /> Set a panel password in Settings to encrypt media
         </div>
       )}
       {lock.available && lock.needsSetup && (
         <MenuItem data-testid="media-ctx-setup-encryption" label="Set up encryption…" icon="bi-shield-lock" onClick={() => { onClose(); window.location.href = "/settings"; }} />
       )}
       {lock.available && !lock.needsSetup && !isFolder && !isEmptyArea && lockFiles.unlocked > 0 && (
-        <MenuItem data-testid="media-ctx-lock" label={lockFilesTotal > 1 ? `Lock ${lockFiles.unlocked} file${lockFiles.unlocked === 1 ? "" : "s"}` : "Lock file"} icon="bi-lock-fill" onClick={() => { onClose(); lock.onLockFiles(); }} />
+        <MenuItem data-testid="media-ctx-lock" label={lockFilesTotal > 1 ? `Encrypt ${lockFiles.unlocked} file${lockFiles.unlocked === 1 ? "" : "s"}` : "Encrypt file"} icon="bi-lock-fill" onClick={() => { onClose(); lock.onLockFiles(); }} />
       )}
       {lock.available && !lock.needsSetup && !isFolder && !isEmptyArea && lockFiles.locked > 0 && (
-        <MenuItem data-testid="media-ctx-unlock" label={lockFilesTotal > 1 ? `Unlock ${lockFiles.locked} file${lockFiles.locked === 1 ? "" : "s"}` : "Unlock file"} icon="bi-unlock" onClick={() => { onClose(); lock.onUnlockFiles(); }} />
+        <MenuItem data-testid="media-ctx-unlock" label={lockFilesTotal > 1 ? `Decrypt ${lockFiles.locked} file${lockFiles.locked === 1 ? "" : "s"}` : "Decrypt file"} icon="bi-unlock" onClick={() => { onClose(); lock.onUnlockFiles(); }} />
       )}
       {lock.available && !lock.needsSetup && (isFolder || isEmptyArea) && (
         <>
-          <MenuItem data-testid="media-ctx-lock-folder" label={`Lock folder${lock.folderLabel ? ` “${lock.folderLabel}”` : ""}`} icon="bi-folder-symlink" onClick={() => { onClose(); lock.onLockFolder(); }}><i className="bi bi-lock-fill" style={{ fontSize: 10, color: "var(--muted)", marginLeft: "auto" }} /></MenuItem>
-          <MenuItem data-testid="media-ctx-unlock-folder" label={`Unlock folder${lock.folderLabel ? ` “${lock.folderLabel}”` : ""}`} icon="bi-folder2-open" onClick={() => { onClose(); lock.onUnlockFolder(); }}><i className="bi bi-unlock" style={{ fontSize: 10, color: "var(--muted)", marginLeft: "auto" }} /></MenuItem>
+          <MenuItem data-testid="media-ctx-lock-folder" label={`Encrypt folder${lock.folderLabel ? ` “${lock.folderLabel}”` : ""}`} icon="bi-folder-symlink" onClick={() => { onClose(); lock.onLockFolder(); }}><i className="bi bi-lock-fill" style={{ fontSize: 10, color: "var(--muted)", marginLeft: "auto" }} /></MenuItem>
+          <MenuItem data-testid="media-ctx-unlock-folder" label={`Decrypt folder${lock.folderLabel ? ` “${lock.folderLabel}”` : ""}`} icon="bi-folder2-open" onClick={() => { onClose(); lock.onUnlockFolder(); }}><i className="bi bi-unlock" style={{ fontSize: 10, color: "var(--muted)", marginLeft: "auto" }} /></MenuItem>
         </>
       )}
     </>

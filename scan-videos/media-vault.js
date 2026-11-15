@@ -211,7 +211,8 @@ function createMediaVault({ mediaDir, rootDir, isProtected, scryptParams = null 
   }
 
   function encryptNewEnabled() {
-    return String(process.env.ENCRYPT_NEW_MEDIA || "0") === "1" && isProtected() && !!vault;
+    // On by default once encryption is set up; ENCRYPT_NEW_MEDIA=0 turns it off.
+    return String(process.env.ENCRYPT_NEW_MEDIA || "1") !== "0" && isProtected() && !!vault;
   }
 
   function status() {

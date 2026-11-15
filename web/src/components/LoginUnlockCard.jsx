@@ -31,7 +31,7 @@ export function CrackLine({ est, what }) {
 
 function Choice({ label, options, value, onChange, disabled }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+    <div className="sec-row">
       <span style={{ minWidth: 130, color: "var(--muted)" }}>{label}</span>
       <div style={{ display: "inline-flex", gap: 2, padding: 2, borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface-2)", opacity: disabled ? 0.5 : 1 }}>
         {options.map(([k, text, dis]) => (
@@ -83,14 +83,14 @@ export default function LoginUnlockCard() {
       <div style={{ padding: "10px 14px", fontWeight: 700, fontSize: 13, borderBottom: "1px solid var(--border)", background: "var(--surface-2)", display: "flex", alignItems: "center", gap: 8 }}>
         <i className="bi bi-key" /> Password &amp; pattern
       </div>
-      <div style={{ padding: "12px 14px", fontSize: 12, display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ padding: "12px 14px", fontSize: 12, display: "flex", flexDirection: "column", gap: 10 }}>
         <div style={{ color: "var(--muted)" }}>
           One password for everything: it logs you in and unlocks encrypted files. A 5×5 pattern can do the same. Neither is stored anywhere readable. 5 wrong tries lock attempts for a while.
         </div>
 
         {/* Password */}
         <section style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <div className="sec-row">
             <span style={{ minWidth: 130, color: "var(--muted)" }}>Password</span>
             <span data-testid="pw-status" style={{ fontWeight: 600 }}>{sec.hasPassword ? "Set" : "Not set — the panel is open to anyone on your network"}</span>
             {mode !== "password" && <button type="button" data-testid="pw-change" className="btn btn-sm btn-outline-primary" style={{ fontSize: 11, padding: "2px 10px" }} onClick={() => { reset(); setMode("password"); }}>{sec.hasPassword ? "Change" : "Set password"}</button>}
@@ -117,7 +117,7 @@ export default function LoginUnlockCard() {
 
         {/* Pattern */}
         <section style={{ display: "flex", flexDirection: "column", gap: 8, opacity: sec.hasPassword ? 1 : 0.6 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <div className="sec-row">
             <span style={{ minWidth: 130, color: "var(--muted)" }}>Pattern (5×5)</span>
             <span data-testid="pattern-status" style={{ fontWeight: 600 }}>{sec.pattern ? "Set" : "Not set"}</span>
             {sec.hasPassword && mode !== "pattern" && <button type="button" data-testid="pattern-set" className="btn btn-sm btn-outline-primary" style={{ fontSize: 11, padding: "2px 10px" }} onClick={() => { reset(); setMode("pattern"); }}>{sec.pattern ? "Change" : "Set pattern"}</button>}
@@ -154,12 +154,11 @@ export default function LoginUnlockCard() {
         </section>
 
         <Choice label="Login shows first" value={sec.preferLogin} onChange={(v) => act(() => vaultCall("/api/security/prefs", { preferLogin: v }), "Saved ✓")} options={[["password", "Password"], ["pattern", "Pattern", !sec.pattern]]} />
-        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          <span style={{ minWidth: 130, color: "var(--muted)" }}>Lock files when idle</span>
-          <select data-testid="autolock-select" className="form-select form-select-sm" style={{ width: 160, height: 28, fontSize: 12 }} disabled={!vaultExists} value={sec.autoLockMinutes} onChange={(e) => act(() => vaultCall("/api/security/prefs", { autoLockMinutes: Number(e.target.value) }), "Auto-lock saved ✓")}>
+        <div className="sec-row">
+          <span style={{ minWidth: 130, color: "var(--muted)" }} title="After this long without using the panel you're logged out everywhere, and encrypted files need your password or pattern again">Log out after idle</span>
+          <select data-testid="autolock-select" className="form-select form-select-sm" style={{ width: 160, height: 28, fontSize: 12 }} disabled={!sec.hasPassword} value={sec.autoLockMinutes} onChange={(e) => act(async () => { const j = await vaultCall("/api/security/prefs", { autoLockMinutes: Number(e.target.value) }); window.dispatchEvent(new Event("xdl-security-changed")); return j; }, "Saved ✓")}>
             {(sec.autoLockChoices || [0, 15, 30, 60]).map((m) => <option key={m} value={m}>{LOCK_LABELS[m] || `${m} min`}</option>)}
           </select>
-          {!vaultExists && <span style={{ color: "var(--muted)" }}>(after encryption is set up)</span>}
         </div>
         {err && <div style={{ color: "#f87171" }}>{err}</div>}
         {msg && <div style={{ color: "#10b981" }}>{msg}</div>}

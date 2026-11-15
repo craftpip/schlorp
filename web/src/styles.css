@@ -1032,3 +1032,5 @@
       .wiz-err{color:#f87171;font-size:12px;margin-top:8px}
       .wiz-skip{margin-top:18px;align-self:center;background:none;border:0;color:var(--muted);font-size:11.5px;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
       .wiz-skip:hover{color:var(--text-2)}
+      /* Settings rows (Password & pattern): same height, so the spacing between rows is even. */
+      .sec-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-height:30px}

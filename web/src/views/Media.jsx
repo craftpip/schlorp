@@ -4250,7 +4250,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     try {
       await tasks.startLock({ action, ...body });
     } catch (e) {
-      setAlertState({ open: true, title: action === "lock" ? "Lock failed" : "Unlock failed", message: e.message || String(e) });
+      setAlertState({ open: true, title: action === "lock" ? "Encryption failed" : "Decryption failed", message: e.message || String(e) });
     }
   };
   // Files a context-menu action applies to: the selection, plus a right-clicked

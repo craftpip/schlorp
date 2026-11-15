@@ -277,8 +277,8 @@ export function MediaTasksPanel({ tasks, thumbGen }) {
   const sentBytes = uploads.reduce((s, u) => s + (u.status === "done" ? u.size : u.status === "uploading" ? u.loaded : 0), 0);
   const lockRunning = lockJob && lockJob.status === "running";
   const lockPct = lockJob && lockJob.total ? ((lockJob.done + lockJob.skipped + lockJob.failed) / lockJob.total) * 100 : lockRunning ? 0 : 100;
-  const verb = lockJob && lockJob.action === "unlock" ? "Unlocking" : "Locking";
-  const verbDone = lockJob && lockJob.action === "unlock" ? "Unlocked" : "Locked";
+  const verb = lockJob && lockJob.action === "unlock" ? "Decrypting" : "Encrypting";
+  const verbDone = lockJob && lockJob.action === "unlock" ? "Decrypted" : "Encrypted";
   return (
     <div data-testid="media-tasks-panel" style={{ position: "fixed", right: 16, bottom: 16, zIndex: 130, width: "min(360px, calc(100vw - 32px))", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, boxShadow: "0 12px 32px rgba(0,0,0,.3)", fontSize: 12, overflow: "hidden" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", borderBottom: collapsed ? "none" : "1px solid var(--border)" }}>
@@ -317,7 +317,7 @@ export function MediaTasksPanel({ tasks, thumbGen }) {
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <i className={`bi ${lockJob.action === "unlock" ? "bi-unlock" : "bi-lock-fill"}`} />
                 <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={lockJob.current || ""}>
-                  {lockRunning ? (lockJob.current || "Preparing…") : `${verbDone} ${lockJob.done} file${lockJob.done === 1 ? "" : "s"}${lockJob.skipped ? ` · ${lockJob.skipped} already ${lockJob.action === "unlock" ? "unlocked" : "locked"}` : ""}${lockJob.status === "cancelled" ? " · cancelled" : ""}`}
+                  {lockRunning ? (lockJob.current || "Preparing…") : `${verbDone} ${lockJob.done} file${lockJob.done === 1 ? "" : "s"}${lockJob.skipped ? ` · ${lockJob.skipped} already ${lockJob.action === "unlock" ? "decrypted" : "encrypted"}` : ""}${lockJob.status === "cancelled" ? " · cancelled" : ""}`}
                 </span>
                 <span style={{ color: "var(--muted)" }}>{lockJob.done + lockJob.skipped + lockJob.failed}/{lockJob.total}</span>
                 {lockRunning && <button type="button" className="btn btn-sm btn-link" style={{ padding: "0 4px", color: "#f87171" }} onClick={tasks.cancelLock} title="Stop"><i className="bi bi-stop-circle" /></button>}

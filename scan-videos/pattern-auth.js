@@ -284,6 +284,7 @@ function createPatternAuth({ rootDir, hashParams = HASH, patternHashParams = nul
     validSession,
     endSession,
     endAllSessions,
+    sessionCount: () => sessions.size,
     hasPassword: () => !!cfg.password || !!corrupt,
     hasPattern: () => !!cfg.pattern,
     autoLockMinutes: () => Number(cfg.autoLockMinutes) || 0,

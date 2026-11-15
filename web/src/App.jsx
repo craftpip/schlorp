@@ -133,21 +133,31 @@ export default function App() {
   }, [showLogin]);
   const doLogout = () => { fetch("/api/auth/logout", { method: "POST" }); localStorage.removeItem("xdl_admin_pw"); localStorage.removeItem("xdl_panel_pw"); localStorage.removeItem("xdl_session_token"); localStorage.removeItem("xdl_last_activity"); setShowLogin(false); setPw(""); setPwErr(""); setAuth({ checking: false, protected: true, authed: false }); };
 
+  // "Log out after idle" (Settings → Password & pattern; 0 = never). The
+  // server enforces it too; this logs the page out at the same moment.
+  const [idleMins, setIdleMins] = useState(0);
   useEffect(() => {
     if (!auth.protected || !auth.authed) return;
+    const load = () => fetch("/api/security").then((r) => r.json()).then((j) => { if (j && j.ok) setIdleMins(Number(j.autoLockMinutes) || 0); }).catch(() => {});
+    load();
+    window.addEventListener("xdl-security-changed", load);
+    return () => window.removeEventListener("xdl-security-changed", load);
+  }, [auth.protected, auth.authed]);
+  useEffect(() => {
+    if (!auth.protected || !auth.authed || !idleMins) return;
     const touch = () => { try { localStorage.setItem("xdl_last_activity", String(Date.now())); } catch {} };
     const events = ["keydown", "click", "mousedown", "touchstart", "scroll"];
     events.forEach((ev) => document.addEventListener(ev, touch, { passive: true }));
     const check = () => {
       try {
         const last = Number(localStorage.getItem("xdl_last_activity") || 0);
-        if (last && Date.now() - last > 600000) doLogout();
+        if (last && Date.now() - last > idleMins * 60000) doLogout();
       } catch {}
     };
     const t = setInterval(check, 30000);
     check();
     return () => { events.forEach((ev) => document.removeEventListener(ev, touch)); clearInterval(t); };
-  }, [auth.protected, auth.authed]);
+  }, [auth.protected, auth.authed, idleMins]);
 
   // Hidden login hotkey when logged out: Ctrl+Shift+L -> open login modal, Esc -> close
   useEffect(() => {

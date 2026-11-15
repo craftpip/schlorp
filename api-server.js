@@ -2197,16 +2197,19 @@ app.post("/api/security/prefs", async (req, res) => {
     res.json({ ok: true, ...(await patternAuth.setPrefs(req.body || {})) });
   } catch (e) { return vaultHttpError(res, e); }
 });
-// Idle auto-lock: forget the key; the password or pattern opens it again.
+// "Log out after idle": end every session and forget the encryption key;
+// logging in again (password or pattern) opens both.
 setInterval(() => {
   const mins = patternAuth.autoLockMinutes();
-  if (!mins) return;
-  if (!mediaVault.status().unlocked) return;
+  if (!mins || !isPanelProtected()) return;
   if (Date.now() - lastPanelActivity < mins * 60000) return;
+  const unlocked = mediaVault.status().unlocked;
+  if (!unlocked && !patternAuth.sessionCount()) return;
+  patternAuth.endAllSessions();
   mediaVault.lockNow();
   lockedThumbCache.clear();
   lockedThumbBytes = 0;
-  console.log(`[vault] auto-locked after ${mins} min idle`);
+  console.log(`[auth] logged out after ${mins} min idle${unlocked ? " (encrypted files locked)" : ""}`);
 }, 30000).unref();
 app.get("/api/vault/status", async (_req, res) => {
   await mediaVault.init();
@@ -3377,7 +3380,7 @@ function settingsSchema() {
   const autoContinueDef = !process.stdin.isTTY ? "1" : "0";
   return [
     { name: "Media library", icon: "bi-collection-play", vars: [
-      { key: "ENCRYPT_NEW_MEDIA", label: "Encrypt new files automatically", type: "bool", def: "0", live: true, disabled: !isPanelProtected(), desc: isPanelProtected() ? "New downloads and uploads are saved encrypted. Needs encryption set up; works while it is locked." : "Set a panel password first." },
+      { key: "ENCRYPT_NEW_MEDIA", label: "Encrypt new files automatically", type: "bool", def: "1", live: true, disabled: !isPanelProtected(), desc: isPanelProtected() ? "New downloads and uploads are saved encrypted. Needs encryption set up; works while it is locked." : "Set a panel password first." },
       { key: "KEYBOARD_HINTS", label: "Show keyboard shortcut hints", type: "bool", def: "1", live: true, desc: "Small key labels on buttons in the media library." },
       { key: "MEDIA_RANGE_SIZE", label: "Files per section on the scroll rail", type: "number", def: "100", min: 10, max: 5000, live: true, desc: "How many files each jump-to section on the right-hand rail covers." },
     ] },
@@ -3481,11 +3484,8 @@ app.post("/api/config", async (req, res) => {
   // password change re-wraps the vault key before .env is rewritten.
   try {
     if (key === "ENCRYPT_NEW_MEDIA") {
+      // On is the default; it only takes effect once encryption is set up.
       if (value !== "0" && value !== "1" && value !== "") return res.status(400).json({ ok: false, error: "ENCRYPT_NEW_MEDIA must be 0 or 1" });
-      if (value === "1") {
-        if (!isPanelProtected()) return res.status(400).json({ ok: false, error: "Set a panel password first — encryption needs it" });
-        await mediaVault.encryptKey(); // requires encryption to be set up (no auto-create)
-      }
     }
   } catch (e) { return vaultHttpError(res, e); }
   try {

@@ -112,7 +112,8 @@ function SettingRow({ v: v0, onSaved }) {
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flex: "0 0 auto" }}>
         {control}
-        {!isDefault && v.type !== "password" && !v.lockedByContainer && (
+        {/* No Reset on on/off switches: flipping the switch is the reset. */}
+        {!isDefault && v.type !== "password" && v.type !== "bool" && !v.lockedByContainer && (
           <button type="button" data-testid={`reset-${v.key}`} className="btn btn-sm btn-link" style={{ fontSize: 11, padding: 0, color: "var(--muted)" }} title={`Back to default (${v.type === "bool" ? (v.def === "1" ? "on" : "off") : toDisplay(v, v.def) || "empty"})`} onClick={() => save("")}>Reset</button>
         )}
       </div>
