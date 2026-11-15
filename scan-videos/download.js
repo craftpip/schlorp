@@ -36,6 +36,13 @@ function posterPathFor(videoPath) {
 }
 
 const POSTER_SIBLING_RE = /^(.*)-poster\.(jpe?g|png|webp|avif|gif)$/i;
+// The stem a poster file belongs to ("clip-poster.jpg" -> "clip"), or null
+// when `name` isn't a poster. Hidden-name files (plan 041) are matched on
+// their real name.
+function posterStemOfName(name) {
+  const m = POSTER_SIBLING_RE.exec(String(name || ""));
+  return m ? m[1] : null;
+}
 
 // Stem of a file name (extension stripped) — "<video>-poster.jpg" pair key.
 function posterStemOf(name) {
@@ -55,8 +62,8 @@ function selectPosterTargets(names, mode) {
   const videos = (names || []).filter(isVideoFileName).sort();
   const posterStems = new Set();
   for (const n of names || []) {
-    const m = POSTER_SIBLING_RE.exec(n);
-    if (m) posterStems.add(m[1].toLowerCase());
+    const stem = posterStemOfName(n);
+    if (stem) posterStems.add(stem.toLowerCase());
   }
   const targets = [];
   const skipped = [];
@@ -73,10 +80,12 @@ function selectPosterTargets(names, mode) {
 // `input` ({ pre, src }) overrides how ffmpeg reads the video — used for
 // encrypted files, which are read through the server's decrypting URL
 // (plan 039). The poster is still written next to `videoPath`.
-async function generatePosterThumbnail(videoPath, { overwrite = false, input = null } = {}) {
+// `isVideo: true` = the caller already knows it's a video (hidden-name
+// encrypted files have no extension on disk).
+async function generatePosterThumbnail(videoPath, { overwrite = false, input = null, isVideo = false } = {}) {
   try {
     const ext = path.extname(videoPath).slice(1).toLowerCase();
-    if (!VIDEO_EXTS.has(ext)) return null;
+    if (!isVideo && !VIDEO_EXTS.has(ext)) return null;
     if (!(await hasFfmpeg())) return null;
     const posterPath = posterPathFor(videoPath);
     if (posterPath === videoPath) return null;
@@ -1246,4 +1255,5 @@ module.exports = {
   isVideoFileName,
   selectPosterTargets,
   POSTER_SIBLING_RE,
+  posterStemOfName,
 };

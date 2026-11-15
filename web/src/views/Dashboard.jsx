@@ -315,7 +315,7 @@ export default function Dashboard() {
                       <button className="btn btn-sm btn-outline-secondary" onClick={() => remove(it.id)} title="Remove from queue"><i className="bi bi-x-lg" /> Remove</button>
                     )}
                       </div>
-                  <div style={{ fontWeight: 600, fontSize: 13, marginTop: 6, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={deriveTitle(it.url, it.filePath)}>{deriveTitle(it.url, it.filePath)}</div>
+                  <div style={{ fontWeight: 600, fontSize: 13, marginTop: 6, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={deriveTitle(it.url, it.fileName || it.filePath)}>{deriveTitle(it.url, it.fileName || it.filePath)}</div>
                   <div className="queue-url" style={{ marginTop: 2, fontSize: 11, color: "var(--faint)" }}>{it.url}</div>
                   <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4, display: "flex", gap: 12, flexWrap: "wrap" }}>
                     <span><i className="bi bi-folder2" /> {it.folder || "—"}</span>
@@ -343,7 +343,7 @@ export default function Dashboard() {
                         {it.status === "error" && <button className="btn btn-sm btn-outline-secondary" onClick={(e) => { e.stopPropagation(); retry(it.id); }}><i className="bi bi-arrow-counterclockwise" /> Retry</button>}
                         <button className="btn btn-sm btn-outline-secondary" onClick={(e) => { e.stopPropagation(); remove(it.id); }} title="Remove entry only — keeps file in /media"><i className="bi bi-x-lg" /> Remove</button>
                       </div>
-                  <div style={{ fontWeight: 600, fontSize: 13, marginTop: 6, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={deriveTitle(it.url, it.filePath)}>{deriveTitle(it.url, it.filePath)}</div>
+                  <div style={{ fontWeight: 600, fontSize: 13, marginTop: 6, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={deriveTitle(it.url, it.fileName || it.filePath)}>{deriveTitle(it.url, it.fileName || it.filePath)}</div>
                   <div className="queue-url" style={{ marginTop: 2, fontSize: 11, color: "var(--faint)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: "100%", display: "block" }} title={it.url}>{it.url}</div>
                   {it.status === "done" && it.filePath && (
                     <div className="small" style={{ marginTop: 6, padding: "8px 10px", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden", minWidth: 0 }}>
@@ -371,8 +371,8 @@ export default function Dashboard() {
       {(() => {
         if (!viewerFile) return null;
         const viewable = completed.filter((c) => c.status === "done" && c.filePath);
-        const curCat = fileCategoryFromPath(viewerFile.filePath);
-        const sameViewable = viewable.filter((v) => fileCategoryFromPath(v.filePath) === curCat);
+        const curCat = fileCategoryFromPath(viewerFile.fileName || viewerFile.filePath);
+        const sameViewable = viewable.filter((v) => fileCategoryFromPath(v.fileName || v.filePath) === curCat);
         const idx = sameViewable.findIndex((v) => v.id === viewerFile.id);
         const scrollAndHighlight = (el) => {
           if (!el) return;

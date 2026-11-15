@@ -420,6 +420,26 @@
         background-repeat:no-repeat;
       }
       .form-select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 4px var(--accent-ring)}
+      /* Every dropdown (.form-select and <select class="form-control">): one
+         arrow style, the browser's option list in dark colours (readable
+         options instead of light text on a white popup). */
+      select.form-control,.form-select{
+        color-scheme:dark;appearance:none;-webkit-appearance:none;cursor:pointer;
+        padding-right:36px;
+        background-image:
+          linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+          linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+        background-position:calc(100% - 18px) 50%, calc(100% - 13px) 50%;
+        background-size:5px 5px;
+        background-repeat:no-repeat;
+      }
+      select.form-control option,select.form-control optgroup,.form-select option,.form-select optgroup{background-color:var(--surface);color:var(--text)}
+      select.form-control:disabled,.form-select:disabled{opacity:.55;cursor:not-allowed}
+      .decoy-group-select{padding-right:30px !important}
+      /* Small fields (fixed 28–30px height): compact padding so text isn't clipped. */
+      .form-control-sm,.form-select-sm{padding-top:4px;padding-bottom:4px;padding-left:10px;font-size:12px;border-radius:8px;line-height:1.3}
+      .form-control-sm{padding-right:10px}
+      .form-select-sm{padding-right:30px;background-position:calc(100% - 15px) 50%, calc(100% - 10px) 50%}
       .helper{font-size:12px;color:var(--muted);margin-top:6px}
       /* Buttons */
       .btn{
@@ -999,3 +1019,16 @@
 }
 .media-move-row:hover .media-move-icon,
 .media-move-row:focus-within .media-move-icon { color: #f59e0b; }
+
+      /* First-run wizard (plan 043) */
+      .wiz-shell{min-height:100vh;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:24px 16px;box-sizing:border-box}
+      .wiz-card{width:100%;max-width:440px;padding:28px 26px 18px;box-sizing:border-box;display:flex;flex-direction:column;align-items:stretch;text-align:left}
+      .wiz-brand{display:flex;align-items:center;gap:8px;font-weight:700;font-size:14px;color:var(--text);margin-bottom:22px}
+      .wiz-icon{width:46px;height:46px;border-radius:14px;display:grid;place-items:center;background:var(--accent-soft);color:var(--accent);font-size:22px;margin-bottom:14px}
+      .wiz-title{font-size:20px;font-weight:700;letter-spacing:-.02em;color:var(--text);margin:0 0 10px}
+      .wiz-text{font-size:13.5px;line-height:1.55;color:var(--text-2);margin:0 0 12px}
+      .wiz-form{display:flex;flex-direction:column;gap:8px;margin-top:4px}
+      .wiz-form .btn{margin-top:4px}
+      .wiz-err{color:#f87171;font-size:12px;margin-top:8px}
+      .wiz-skip{margin-top:18px;align-self:center;background:none;border:0;color:var(--muted);font-size:11.5px;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+      .wiz-skip:hover{color:var(--text-2)}

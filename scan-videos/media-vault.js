@@ -31,8 +31,6 @@ function createMediaVault({ mediaDir, rootDir, isProtected, scryptParams = null 
   let error = null;
   let initPromise = null;
   const copies = new Set();
-  // Vault files in the old v2 format (separate passphrase); upgradeable.
-  let legacy = []; // [{ dir, vault }]
   // Vault files that exist but can't be read/parsed — never overwrite them.
   let unreadable = []; // [{ dir, error }]
   // Other readable copies of the current vault (tried on unlock as fallbacks).
@@ -41,6 +39,9 @@ function createMediaVault({ mediaDir, rootDir, isProtected, scryptParams = null 
   let slotChain = Promise.resolve();
   const checkedDevs = new Set();
   const infoCache = new Map();
+  // Real names of hidden-name files (plan 041), cached per unlock: bumping
+  // the generation on lock makes every cached name unreachable.
+  let nameGen = 0;
 
   let created = {};
   try {
@@ -65,10 +66,9 @@ function createMediaVault({ mediaDir, rootDir, isProtected, scryptParams = null 
         return;
       }
       if (v && v.v === 3 && v.pub) found.push({ dir, vault: v });
-      else if (v && v.v === 2 && v.pub) legacy.push({ dir, vault: v });
-      else if (v && v.pub) error = `found an unsupported vault format in ${path.relative(mediaDir, dir) || "media"}`;
+      // Any other format is never overwritten — treated like an unreadable key.
+      else if (v) unreadable.push({ dir, error: "unsupported key file format" });
     };
-    legacy = [];
     unreadable = [];
     await tryDir(mediaDir);
     const entries = await fs.readdir(mediaDir, { withFileTypes: true }).catch(() => []);
@@ -220,10 +220,9 @@ function createMediaVault({ mediaDir, rootDir, isProtected, scryptParams = null 
       exists: !!vault,
       unlocked: !!privateKey,
       patternSlot: !!(vault && vault.slots && vault.slots.pattern),
-      legacy: !vault && legacy.length > 0,
       unreadable: unreadable.map((u) => path.relative(mediaDir, u.dir) || "."),
       error: !vault && unreadable.length ? `A key file exists but can't be read (${unreadable.map((u) => `${path.relative(mediaDir, u.dir) || "media"}: ${u.error}`).join("; ")}) — restore it from a backup or another drive; setup is blocked so it isn't replaced`
-        : !vault && legacy.length ? "Encryption was set up with the earlier separate passphrase — upgrade it once to use your password" : error,
+        : error,
       encryptNew: encryptNewEnabled(),
       keyId: vault ? vault.kid : null,
       createdAt: vault ? vault.createdAt || null : null,
@@ -232,20 +231,28 @@ function createMediaVault({ mediaDir, rootDir, isProtected, scryptParams = null 
     };
   }
 
-  // The caller has already verified `password` against the login hash.
-  async function setup(password) {
+  // Slow part of sealing a slot, done ahead of time (at login) so encryption
+  // can later be switched on with only a confirmation (plan 042).
+  function deriveSlotKey(slotName, secret) {
+    return mc.deriveSlotKey(secret, scryptParams || (slotName === "pattern" ? mc.SCRYPT_PATTERN : mc.SCRYPT));
+  }
+
+  // `secret` = the panel password (already verified against the login hash)
+  // or { passwordKey, patternKey } derived from it at login.
+  async function setup(secret) {
     await init();
     if (!isProtected()) throw httpError(400, "Set a panel password first", "NO_PASSWORD");
     await load(); // a drive may have been mounted since startup
     if (vault) throw httpError(409, "Encryption is already set up", "VAULT_EXISTS");
     // Never create a new key over an old one: files locked with it would be lost.
-    if (legacy.length) throw httpError(409, "An earlier encryption key exists — upgrade it with your old passphrase instead", "LEGACY_VAULT");
     if (unreadable.length) throw httpError(409, "A key file exists but can't be read — fix or restore it first; a new key would make existing locked files unreadable", "VAULT_UNREADABLE");
     const already = await anyEncryptedFile();
     if (already) throw httpError(409, `Encrypted files already exist (e.g. ${already}) but their key file wasn't found — is the right drive mounted? Setup is blocked so they aren't stranded.`, "ORPHAN_FILES");
     let made;
     try {
-      made = await mc.createVault(password, scryptParams || undefined);
+      made = typeof secret === "string"
+        ? await mc.createVault(secret, scryptParams || undefined)
+        : mc.createVaultWithKeys(secret && secret.passwordKey, secret && secret.patternKey);
     } catch (e) {
       throw httpError(e.status || 400, e.message, e.code);
     }
@@ -255,31 +262,6 @@ function createMediaVault({ mediaDir, rootDir, isProtected, scryptParams = null 
     publicKey = made.publicKey;
     privateKey = made.privateKey;
     copies.add(mediaDir);
-    await copyToDriveRoots();
-  }
-
-  // v2 → v3: open the old vault with its passphrase, re-seal the same key
-  // pair with the panel password, and replace every copy.
-  async function upgrade(passphrase, password) {
-    await init();
-    await load();
-    if (vault) throw httpError(409, "Encryption is already in the current format", "VAULT_EXISTS");
-    if (!legacy.length) throw httpError(404, "No earlier encryption key found", "NO_LEGACY");
-    const kids = new Set(legacy.map((l) => l.vault.kid));
-    if (kids.size > 1) throw httpError(409, "Several different old keys were found — upgrade is ambiguous", "LEGACY_AMBIGUOUS");
-    let res;
-    try {
-      res = await mc.upgradeV2Vault(legacy[0].vault, passphrase, password, scryptParams || undefined);
-    } catch (e) {
-      throw httpError(e.status || 400, e.message, e.code);
-    }
-    for (const l of legacy) copies.add(l.dir);
-    vault = res.vault;
-    publicKey = res.publicKey;
-    privateKey = res.privateKey;
-    await writeEverywhere(vault);
-    legacy = [];
-    error = null;
     await copyToDriveRoots();
   }
 
@@ -313,6 +295,8 @@ function createMediaVault({ mediaDir, rootDir, isProtected, scryptParams = null 
 
   function lockNow() {
     privateKey = null;
+    nameGen += 1;
+    for (const e of infoCache.values()) { e.realName = undefined; e.nameGenOf = -1; }
   }
 
   // Re-seal a slot (password change, pattern set/removed). Needs the private
@@ -396,6 +380,24 @@ function createMediaVault({ mediaDir, rootDir, isProtected, scryptParams = null 
     infoCache.delete(fullPath);
   }
 
+  // The real name stored in an encrypted file. null when the vault is
+  // locked, the file isn't encrypted or the stored name is unusable.
+  async function fileName(fullPath, hint) {
+    const info = await fileInfo(fullPath, hint);
+    if (!info || !info.locked || !info.header) return null;
+    if (!privateKey) return null;
+    if (info.nameGenOf === nameGen) return info.realName;
+    let name = null;
+    try {
+      name = safeStoredName(mc.decryptFileName(info.header, privateKey));
+    } catch {
+      name = null;
+    }
+    info.realName = name;
+    info.nameGenOf = nameGen;
+    return name;
+  }
+
   function createdOverride(stat) {
     if (!stat || !stat.ino) return null;
     const e = created[`${stat.dev}:${stat.ino}`];
@@ -416,7 +418,7 @@ function createMediaVault({ mediaDir, rootDir, isProtected, scryptParams = null 
     reload: load,
     status,
     setup,
-    upgrade,
+    deriveSlotKey,
     unlock,
     lockNow,
     setSlot,
@@ -425,6 +427,7 @@ function createMediaVault({ mediaDir, rootDir, isProtected, scryptParams = null 
     decryptKey,
     ensureCopyFor,
     fileInfo,
+    fileName,
     forget,
     createdOverride,
     setCreatedOverride,
@@ -433,4 +436,13 @@ function createMediaVault({ mediaDir, rootDir, isProtected, scryptParams = null 
   };
 }
 
-module.exports = { createMediaVault, httpError, VAULT_NAME };
+// A stored name is only used if it's a plain, safe file name (it comes out of
+// a file anyone with the drive could have swapped in).
+function safeStoredName(name) {
+  const n = String(name || "");
+  if (!n || n.length > 255 || n === "." || n === ".." || n.startsWith(".")) return null;
+  if (/[\/\\\0-\x1f]/.test(n)) return null;
+  return n;
+}
+
+module.exports = { createMediaVault, httpError, VAULT_NAME, safeStoredName };

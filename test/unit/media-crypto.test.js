@@ -85,9 +85,14 @@ test("tampering, truncation and another vault's key are rejected", async () => {
     const raw = await fs.readFile(file);
 
     const flipped = Buffer.from(raw);
-    flipped[mc.HEADER_LEN + 5] ^= 1;
+    flipped[mc.HEADER_LEN + mc.NAME_BLOCK_LEN + 5] ^= 1;
     await fs.writeFile(file, flipped);
     await assert.rejects(collect(mc.decryptRange(file, keys.privateKey)));
+
+    const badName = Buffer.from(raw);
+    badName[mc.HEADER_LEN + 40] ^= 1; // inside the encrypted name
+    await fs.writeFile(file, badName);
+    await assert.rejects(async () => mc.decryptFileName(await mc.readFileHeader(file), keys.privateKey));
 
     const badWrap = Buffer.from(raw);
     badWrap[50] ^= 1; // inside the wrapped file key
@@ -151,12 +156,62 @@ test("vault: no usable secret on disk; password and pattern slots open the same 
   });
 });
 
-test("short passwords are refused for encryption", async () => {
-  await assert.rejects(mc.createVault("short", FAST), { code: "WEAK_PASSWORD" });
-  await assert.rejects(mc.setVaultSlot(keys.vault, keys.privateKey, "password", "tiny", FAST), { code: "WEAK_PASSWORD" });
+test("any non-empty password works for encryption (no length rule)", async () => {
+  await assert.rejects(mc.createVault("", FAST), { code: "WEAK_PASSWORD" });
+  const v = await mc.createVault("tiny", FAST);
+  assert.ok(await mc.openVault(v.vault, "tiny", "password"));
 });
 
 test("lockable names skip dotfiles, stacks and partials", () => {
   for (const n of ["a.mp4", "b-poster.jpg", "notes.txt"]) assert.equal(mc.isLockableName(n), true, n);
   for (const n of [".xdl-vault.json", "s.xdlstack", "v.mp4.part", ".a.mp4.xenc-1234", ""]) assert.equal(mc.isLockableName(n), false, n);
+});
+
+test("v03 stores the real name encrypted; temp encrypt/decrypt round-trips it", async () => {
+  await withTempDir(async (dir) => {
+    const file = path.join(dir, "Holiday – beach (2).mp4");
+    const body = crypto.randomBytes(2 * CS + 7);
+    await fs.writeFile(file, body);
+    const enc = await mc.encryptToTemp(file, keys.publicKey, { chunkSize: CS });
+    const raw = await fs.readFile(enc.tmp);
+    assert.ok(raw.subarray(0, 8).equals(mc.MAGIC));
+    assert.equal(raw.includes(Buffer.from("Holiday")), false, "the name must not appear in the file");
+    const h = await mc.readFileHeader(enc.tmp);
+    assert.equal(h.plainSize, body.length);
+    assert.equal(mc.decryptFileName(h, keys.privateKey), "Holiday – beach (2).mp4");
+    const dec = await mc.decryptToTemp(enc.tmp, keys.privateKey);
+    assert.equal(dec.name, "Holiday – beach (2).mp4");
+    assert.ok((await fs.readFile(dec.tmp)).equals(body));
+    const other = await mc.createVault("a different long passphrase", FAST);
+    assert.throws(() => mc.decryptFileName(h, other.privateKey), { code: "WRONG_VAULT" });
+  });
+});
+
+test("code names: random 16 chars, no extension, and are recognisable", () => {
+  const a = mc.codeName();
+  const b = mc.codeName();
+  assert.match(a, /^[a-km-z2-9]{16}$/);
+  assert.notEqual(a, b);
+  assert.ok(mc.isCodeName(a));
+  assert.equal(mc.isCodeName("My Video.mp4"), false);
+  assert.equal(mc.isCodeName(`${a}.jpg`), false);
+});
+
+test("an over-long name is refused with a 400", async () => {
+  await withTempDir(async (dir) => {
+    const file = path.join(dir, "x.bin");
+    await fs.writeFile(file, "hi");
+    await assert.rejects(mc.encryptToTemp(file, keys.publicKey, { name: "é".repeat(200) }), { code: "NAME_TOO_LONG", status: 400 });
+  });
+});
+
+test("an unlocked file is readable like normal media, even if the encrypted one was owner-only", async () => {
+  await withTempDir(async (dir) => {
+    const file = path.join(dir, "up.png");
+    await mc.encryptIterableToFile([Buffer.from("png bytes")], file, keys.publicKey, { name: "up.png" });
+    assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
+    await mc.decryptFileInPlace(file, keys.privateKey);
+    const mode = (await fs.stat(file)).mode & 0o777;
+    assert.equal(mode & 0o044, 0o044 & ~process.umask(), mode.toString(8));
+  });
 });

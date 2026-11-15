@@ -89,3 +89,44 @@ test("parallel wrong guesses can't slip past the lockout", async () => {
     assert.equal(await pa.check("password", "the right password", "5.6.7.8"), "the right password");
   });
 });
+
+test("fileName gives the real name only while unlocked, and rejects unsafe stored names", async () => {
+  await withTempDir(async (root) => {
+    const v = mk(root);
+    await v.setup("a long enough password");
+    const media = path.join(root, "media");
+    const put = async (diskName, realName) => {
+      const f = path.join(media, diskName);
+      await fs.writeFile(f, "data");
+      const r = await mc.encryptToTemp(f, await v.encryptKey(), { name: realName });
+      await fs.rename(r.tmp, f);
+      return f;
+    };
+    const good = await put(mc.codeName(), "Secret trip.mp4");
+    const evil = await put(mc.codeName(), "../../etc/passwd");
+    assert.equal(await v.fileName(good), "Secret trip.mp4");
+    assert.equal(await v.fileName(evil), null);
+    v.lockNow();
+    assert.equal(await v.fileName(good), null, "no names while the vault is locked");
+    await v.unlock("password", "a long enough password");
+    assert.equal(await v.fileName(good), "Secret trip.mp4");
+  });
+});
+
+test("setup from keys derived at login: no password needed later, and both slots open it", async () => {
+  await withTempDir(async (root) => {
+    const v = mk(root);
+    await v.init();
+    const passwordKey = await v.deriveSlotKey("password", "pw");
+    const patternKey = await v.deriveSlotKey("pattern", "5:0.1.2.3.4.9.14.19");
+    await v.setup({ passwordKey, patternKey });
+    assert.equal(v.status().unlocked, true);
+    assert.equal(v.status().patternSlot, true);
+    const v2 = mk(root);
+    await v2.init();
+    await v2.unlock("pattern", "5:0.1.2.3.4.9.14.19");
+    v2.lockNow();
+    await v2.unlock("password", "pw");
+    await assert.rejects(mk(root).setup({ passwordKey: null }), { code: "VAULT_EXISTS" });
+  });
+});

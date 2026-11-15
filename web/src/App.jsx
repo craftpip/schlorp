@@ -1,6 +1,7 @@
 import { NavLink, Outlet } from "react-router-dom";
 import { useEffect, useState } from "react";
 import PatternPad from "./components/PatternPad.jsx";
+import SetupWizard, { setupSkipped } from "./components/SetupWizard.jsx";
 
 
 if (typeof window !== "undefined" && !window._xdlFetchPatched) {
@@ -20,6 +21,8 @@ if (typeof window !== "undefined" && !window._xdlFetchPatched) {
 export default function App() {
   const [health, setHealth] = useState({ busy: false, browserReady: false });
   const [auth, setAuth] = useState({ checking: true, protected: false, authed: false });
+  // First-run wizard state from /api/setup/state (no panel password yet).
+  const [setup, setSetup] = useState(null);
   const [pw, setPw] = useState("");
   const [pwErr, setPwErr] = useState("");
   const [showLogin, setShowLogin] = useState(false);
@@ -72,7 +75,12 @@ export default function App() {
   };
   useEffect(() => {
     fetch("/api/auth/status").then((r) => r.json()).then((j) => {
-      if (!j.protected) setAuth({ checking: false, protected: false, authed: true });
+      if (!j.protected) {
+        // No password yet: fresh install (or lost settings) — maybe show the wizard.
+        fetch("/api/setup/state").then((r) => r.json()).then((s) => {
+          if (s && s.ok && s.needsSetup && !setupSkipped()) setSetup(s);
+        }).catch(() => {}).finally(() => setAuth({ checking: false, protected: false, authed: true }));
+      }
       else {
         // Older builds saved the password itself: trade it for a session
         // token once, then delete it from the browser.
@@ -208,6 +216,20 @@ export default function App() {
   if (auth.checking) {
     return (
       <div style={{ minHeight: "100vh", background: "var(--bg)" }} />
+    );
+  }
+  if (setup) {
+    return (
+      <SetupWizard
+        state={setup}
+        onDone={(token) => {
+          if (token) localStorage.setItem("xdl_session_token", token);
+          localStorage.setItem("xdl_last_activity", String(Date.now()));
+          setSetup(null);
+          setAuth({ checking: false, protected: true, authed: true });
+        }}
+        onSkip={() => setSetup(null)}
+      />
     );
   }
   if (auth.protected && !auth.authed) {

@@ -102,6 +102,13 @@ function fileCategory(name) {
   if (/^(mp3|m4a|aac|ogg|wav|flac|opus)$/i.test(ext)) return "audio";
   return "other";
 }
+// "a/b/<code>.mp4" + real name "x.mp4" -> "a/b/x.mp4" (hidden-name files).
+function withRealName(rel, real) {
+  const r = String(rel || "");
+  if (!real) return r;
+  const i = r.lastIndexOf("/");
+  return i === -1 ? String(real) : `${r.slice(0, i + 1)}${real}`;
+}
 function isPosterFile(name) {
   return /-poster\.(jpe?g|png|webp|avif|gif)$/i.test(String(name || ""));
 }
@@ -195,10 +202,18 @@ export default function Media() {
   const [thumbGenBusy, setThumbGenBusy] = useState(false);
   const [thumbGenResult, setThumbGenResult] = useState(null);
   const [thumbGenProgress, setThumbGenProgress] = useState(null);
+  // Bottom-right toast for the run while the popup is closed; dismissed by
+  // its close button once finished, re-armed by the next run.
+  const [thumbToastDismissed, setThumbToastDismissed] = useState(false);
   // Poster overwrites keep the same URL, so the browser serves the stale
   // cached bytes after a regenerate. Bumped on every thumbgen refresh and
   // appended to poster URLs to force a refetch of the new bytes.
   const [thumbBust, setThumbBust] = useState(0);
+  // Per-file bust for posters written by a live thumbnail run, so each new
+  // poster swaps in as it lands without refetching every other thumbnail.
+  const [posterBust, setPosterBust] = useState({});
+  const thumbLiveTimerRef = useRef(null);
+  const folderNowRef = useRef("");
   const thumbGenStateRef = useRef({ busy: false, result: null, open: false });
   thumbGenStateRef.current = { busy: thumbGenBusy, result: thumbGenResult, open: thumbGenOpen };
   const [ratios, setRatios] = useState({});
@@ -271,9 +286,11 @@ export default function Media() {
     if (it && it._isPlaylistItem) return it.rel || it.name;
     return isFlat ? it.rel || it.name : it.name;
   };
+  // Encrypted files have a random code name on disk; the listing sends the
+  // real one as `displayName` while the vault is unlocked (plan 041).
   const displayName = (it) => {
-    if (it && it._isPlaylistItem) return String(it.rel || it.name).replace(/\//g, " > ");
-    return isFlat ? String(it.rel || it.name).replace(/\//g, " > ") : it.name;
+    if (it && it._isPlaylistItem) return withRealName(it.rel || it.name, it.displayName).replace(/\//g, " > ");
+    return isFlat ? withRealName(it.rel || it.name, it.displayName).replace(/\//g, " > ") : (it.displayName || it.name);
   };
   // Single-select model (plan 014): `?s=<base64url rowKey>` is the source of truth (single select only).
   // 1 click = select, double-click = open. Derived index follows the key across reloads.
@@ -375,6 +392,7 @@ export default function Media() {
         created: it.created || it.mtime || it.addedAt,
         thumb: it.thumb || null,
         locked: !!it.locked,
+        displayName: it.displayName || undefined,
         playlistKey: key,
         _isPlaylistItem: true,
       };
@@ -389,7 +407,7 @@ export default function Media() {
   // M without a poster sibling (`it.thumb`), derived from the loaded listing.
   const thumbGenVideos = useMemo(() => {
     if (inPlaylistView) return [];
-    return (items || []).filter((it) => !it.dir && fileCategory(it.name) === "video").map((it) => ({ key: rowKey(it), name: it.name, missing: !it.thumb }));
+    return (items || []).filter((it) => !it.dir && fileCategory(it.displayName || it.name) === "video").map((it) => ({ key: rowKey(it), name: it.name, missing: !it.thumb }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, inPlaylistView, isFlat]);
   const thumbGenMissingCount = thumbGenVideos.filter((v) => v.missing).length;
@@ -553,13 +571,13 @@ export default function Media() {
     let base = list.filter((it) => {
       if (it.dir) return true;
       if (term) {
-        const hay = (isFlat ? it.rel || it.name : it.name).toLowerCase();
+        const hay = `${isFlat ? withRealName(it.rel || it.name, it.displayName) : it.displayName || it.name} ${it.name}`.toLowerCase();
         const hit = hay.includes(term);
         if (isNeg ? hit : !hit) return false;
       }
       if (type === "stacks") {
         if (!(Array.isArray(it.stacks) && it.stacks.length > 0)) return false;
-      } else if (type !== "all" && fileCategory(it.name) !== type) {
+      } else if (type !== "all" && fileCategory(it.displayName || it.name) !== type) {
         return false;
       }
       return true;
@@ -598,7 +616,7 @@ export default function Media() {
       for (const it of base) (it.dir ? dirs : files).push(it);
       const col = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
       const by = (a, b) => {
-        if (sort === "name") return col.compare(a.name, b.name);
+        if (sort === "name") return col.compare(a.displayName || a.name, b.displayName || b.name);
         if (sort === "size") return (a.size || 0) - (b.size || 0);
         if (sort === "time") return createdMsOf(a) - createdMsOf(b);
         return 0;
@@ -709,7 +727,7 @@ export default function Media() {
       const j = await r.json();
       if (seq !== loadSeqRef.current) return;
       if (!j.ok) throw new Error(j.error || "failed");
-      const fresh = (j.items || []).filter((it) => it.dir || !isPosterFile(it.name));
+      const fresh = (j.items || []).filter((it) => it.dir || !isPosterFile(it.displayName || it.name));
       const keyOf = (it) => (isFlat ? it.rel || it.name : it.name);
       if (clear) {
         setRatios({});
@@ -768,6 +786,7 @@ export default function Media() {
   // to the selection. Delete-triggered reloads must NOT scroll (plan 014).
   const refresh = () => { freshLoadRef.current = true; load(folder); };
   // Uploads + lock/unlock jobs (plan 039). Finished work reloads the listing.
+  folderNowRef.current = folder;
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
   const tasks = useMediaTasks({ onFilesChanged: () => { if (refreshRef.current) refreshRef.current(); } });
@@ -784,12 +803,24 @@ export default function Media() {
     return () => { window.removeEventListener("drop", clear); window.removeEventListener("dragend", clear); };
   }, []);
   // Shift+G popup: POST to generate posters (missing-only or all), stream
-  // NDJSON per-file progress into the popup. The grid refreshes on popup
-  // close only — never while the popup is open.
+  // NDJSON per-file progress into the bottom-right toast (the popup closes on
+  // start). Each new poster swaps in live via a per-file cache bust, and the
+  // listing reloads silently (throttled) so missing thumbnails appear.
   const runThumbGen = async (mode, keys) => {
     setThumbGenBusy(true);
+    setThumbToastDismissed(false);
     setThumbGenResult(null);
     setThumbGenProgress(null);
+    // Progress runs in the bottom-right toast, not the popup.
+    setThumbGenOpen(false);
+    const runFolder = folder;
+    // Silent listing reload (no scroll-to-selection), throttled so a fast run
+    // reloads at most every ~1.5s; the final reload happens on completion.
+    const liveReload = (now) => {
+      if (thumbLiveTimerRef.current) { if (!now) return; clearTimeout(thumbLiveTimerRef.current); }
+      thumbLiveTimerRef.current = setTimeout(() => { thumbLiveTimerRef.current = null; if (folderNowRef.current === runFolder) load(runFolder); }, now ? 0 : 1500);
+    };
+    let lastGenerated = 0;
     try {
       const r = await fetch("/api/posters/generate", {
         method: "POST",
@@ -801,12 +832,8 @@ export default function Media() {
         const j = await r.json().catch(() => ({ ok: false, error: "invalid response" }));
         if (!r.ok || !j.ok) throw new Error(j.error || `HTTP ${r.status}`);
         setThumbGenResult(j);
-        // Popup already closed (early close, job finished in background):
-        // refresh now so late files light up. Otherwise closeThumbGen does it.
-        if (!thumbGenStateRef.current.open) {
-          setThumbBust((v) => v + 1);
-          refresh();
-        }
+        setThumbBust((v) => v + 1);
+        liveReload(true);
         return;
       }
       if (!r.ok || !r.body) throw new Error(`HTTP ${r.status}`);
@@ -827,6 +854,12 @@ export default function Media() {
           try { ev = JSON.parse(line); } catch { continue; }
           if (ev.type === "progress") {
             setThumbGenProgress({ index: ev.index, total: ev.total, generated: ev.generated, skipped: ev.skipped, failed: ev.failed, file: ev.file });
+            if (ev.generated > lastGenerated && ev.file) {
+              const stamp = Date.now();
+              setPosterBust((m) => ({ ...m, [ev.file]: stamp }));
+              liveReload(false);
+            }
+            lastGenerated = ev.generated || lastGenerated;
           } else if (ev.type === "done") {
             result = ev;
           }
@@ -835,30 +868,17 @@ export default function Media() {
       if (!result) throw new Error("connection closed before the job finished");
       if (!result.ok) throw new Error(result.error || "generation failed");
       setThumbGenResult(result);
-      // Same as above: only refresh here when the popup is already closed
-      // (background finish after an early close). Otherwise the close does it.
-      if (!thumbGenStateRef.current.open) {
-        setThumbBust((v) => v + 1);
-        refresh();
-      }
+      liveReload(true);
     } catch (e) {
       setThumbGenResult({ ok: false, error: e.message || String(e) });
     } finally {
       setThumbGenBusy(false);
     }
   };
-  // Grid refresh happens on popup close only: posters written so far light
-  // up immediately; if closed mid-run the stream keeps going and refreshes
-  // again on background completion. Closing before any run does nothing.
   const closeThumbGen = () => {
+    // Runs refresh the grid live (per-poster bust + silent reloads), so
+    // closing the popup needs no reload of its own.
     setThumbGenOpen(false);
-    const s = thumbGenStateRef.current;
-    if (s.busy || s.result) {
-      // Posters written so far may overwrite the same URLs — bust the cache
-      // so the grid fetches the new bytes instead of the stale cached ones.
-      setThumbBust((v) => v + 1);
-      refresh();
-    }
   };
   // Playlist detail fetch when ?pl is set
   useEffect(() => {
@@ -1437,7 +1457,7 @@ const collapseSpreadUnlessMember = (fid) => {
         // "Done" from last time.
         e.preventDefault();
         if (!viewerOpen && !inPlaylistView) {
-          if (!thumbGenOpen) {
+          if (!thumbGenOpen && !thumbGenStateRef.current.busy) {
             setThumbGenResult(null);
             setThumbGenProgress(null);
             load(folder);
@@ -1943,13 +1963,14 @@ const collapseSpreadUnlessMember = (fid) => {
     const isPlItem = !!it._isPlaylistItem;
     if (thumb && !isPlItem) {
       const u = toMediaUrl(folder, thumb);
-      return thumbBust ? `${u}?v=${thumbBust}` : u;
+      const v = posterBust[rowKey(it)] || thumbBust;
+      return v ? `${u}?v=${v}` : u;
     }
     if (isPlItem && thumb) {
       const u = "/media/" + String(thumb).split("/").filter(Boolean).map(encodeURIComponent).join("/");
       return thumbBust ? `${u}?v=${thumbBust}` : u;
     }
-    const cat = fileCategory(it.name);
+    const cat = fileCategory(it.displayName || it.name);
     if (cat === "photo" || cat === "gif") {
       if (isPlItem) return "/media/" + String(it.rel || it.name).split("/").filter(Boolean).map(encodeURIComponent).join("/");
       return toMediaUrl(folder, it.rel || it.name);
@@ -2063,7 +2084,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     // `.gif` files that are actually MP4 bytes (mislabeled at download time,
     // e.g. reddit saves) fail in <img> — the server sniffs them as video/mp4.
     // Flip to a muted looping <video> on image error so they still preview.
-    const cat = fileCategory(it.name);
+    const cat = fileCategory(it.displayName || it.name);
     const asVideo = cat === "gif" && !!gifVideo[rk];
     const loaded = !!thumbLoaded[rk];
     const rotKey = it._isPlaylistItem ? rowKey(it) : (folder ? `${folder}/${rowKey(it)}` : rowKey(it));
@@ -2177,7 +2198,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         ) : isDir ? (
           <i className="bi bi-folder-fill" style={{ fontSize: 44, color: "#f59e0b" }} />
         ) : (
-          <i className={`bi ${catIcon[fileCategory(it.name)]}`} style={{ fontSize: 34, color: "var(--muted)" }} />
+          <i className={`bi ${catIcon[fileCategory(it.displayName || it.name)]}`} style={{ fontSize: 34, color: "var(--muted)" }} />
         )}
         {isDir && (
           <span style={{ position: "absolute", left: 0, right: 0, bottom: 0, padding: "4px 6px", fontSize: 11, color: "#fff", background: "linear-gradient(transparent, rgba(0,0,0,.7))", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", pointerEvents: "none" }}>{displayName(it)}</span>
@@ -4250,9 +4271,12 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
   // popup: selected videos regenerate immediately; empty space opens the
   // popup for the whole folder. Playlist views have no folder scope.
   const openThumbGenPopup = () => {
-    setThumbGenResult(null);
-    setThumbGenProgress(null);
-    load(folder);
+    // A run in progress keeps its state so the popup shows its progress.
+    if (!thumbGenStateRef.current.busy) {
+      setThumbGenResult(null);
+      setThumbGenProgress(null);
+      load(folder);
+    }
     setThumbGenOpen(true);
   };
   const ctxPreview = (() => {
@@ -4266,10 +4290,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     return {
       label: keys.length > 1 ? `Generate preview (${keys.length} videos)` : "Generate preview",
       onGenerate: () => {
-        setThumbGenResult(null);
-        setThumbGenProgress(null);
-        setThumbGenOpen(true);
-        runThumbGen("all", keys);
+        if (!thumbGenStateRef.current.busy) runThumbGen("all", keys);
       },
     };
   })();
@@ -4349,7 +4370,16 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
       }}
     >
       <UploadDropOverlay visible={osDropActive} folder={folder} encrypt={!!(tasks.vault && tasks.vault.encryptNew)} />
-      <MediaTasksPanel tasks={tasks} />
+      <MediaTasksPanel
+        tasks={tasks}
+        thumbGen={!thumbGenOpen && !thumbToastDismissed ? {
+          busy: thumbGenBusy,
+          progress: thumbGenProgress,
+          result: thumbGenResult,
+          onOpen: () => setThumbGenOpen(true),
+          onDismiss: () => setThumbToastDismissed(true),
+        } : null}
+      />
       <VaultLockedBanner tasks={tasks} />
       <div className="media-page-title" style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
         <div data-testid="media-title" style={{ fontWeight: 700, fontSize: 14 }}><i className="bi bi-collection-play" style={{ marginRight: 8 }} /> Media library</div>
@@ -4570,7 +4600,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                             {menuOpen && <div style={{ position: "absolute", top: 34, left: 0, zIndex: 90 }}><PlaylistHoverMenu mediaKey={pk} showIndex={viaF} /></div>}
                           </div>
                           <div data-testid="media-row-name" style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0, marginLeft: "5px" }}>
-                            <i className={`bi ${catIcon[fileCategory(it.name)]}`} style={{ color: "var(--accent)", display: "grid", placeItems: "center", width: 18, height: 18, fontSize: 14, lineHeight: 1, flex: "0 0 auto", transform: "translateY(1px)" }} />{!it.dir && !it.locked && vaultOn && <i data-testid="media-row-lock" data-locked={it.locked ? "true" : "false"} className={`bi ${it.locked ? "bi-lock-fill" : "bi-unlock"}`} title={it.locked ? "Encrypted — opens only in this panel" : "Not encrypted"} style={{ color: it.locked ? "#10b981" : "var(--muted)", fontSize: 12, flex: "0 0 auto", marginLeft: -4, opacity: it.locked ? 1 : 0.7 }} />}
+                            <i className={`bi ${catIcon[fileCategory(it.displayName || it.name)]}`} style={{ color: "var(--accent)", display: "grid", placeItems: "center", width: 18, height: 18, fontSize: 14, lineHeight: 1, flex: "0 0 auto", transform: "translateY(1px)" }} />{!it.dir && !it.locked && vaultOn && <i data-testid="media-row-lock" data-locked={it.locked ? "true" : "false"} className={`bi ${it.locked ? "bi-lock-fill" : "bi-unlock"}`} title={it.locked ? "Encrypted — opens only in this panel" : "Not encrypted"} style={{ color: it.locked ? "#10b981" : "var(--muted)", fontSize: 12, flex: "0 0 auto", marginLeft: -4, opacity: it.locked ? 1 : 0.7 }} />}
                             <button data-testid="media-row-open-file" onClick={(e) => { e.stopPropagation(); tapItem(it); }} onDoubleClick={(e) => { e.stopPropagation(); openItem(it); }} style={{ background: "none", border: 0, color: "var(--text)", fontWeight: 500, textAlign: "left", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", padding: 0, minWidth: 0, maxWidth: "100%", userSelect: "none", WebkitUserSelect: "none" }}>{displayName(it)}</button>
                           </div>
                           <span data-testid="media-row-size" className="small mcol-size" style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", color: "var(--muted)", whiteSpace: "nowrap" }}>{fmtSize(it.size)}</span>
@@ -4627,7 +4657,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                           </div>
                         )}
                         <div data-testid="media-row-name" style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0, marginLeft: "5px", ...(it.dir ? { gridColumn: "1 / span 2" } : {}) }}>
-                          <i className={`bi ${it.dir ? "bi-folder-fill" : catIcon[fileCategory(it.name)]}`} style={{ color: it.dir ? "#f59e0b" : "var(--accent)", display: "grid", placeItems: "center", width: 18, height: 18, fontSize: 14, lineHeight: 1, flex: "0 0 auto", transform: "translateY(1px)" }} />{!it.dir && !it.locked && vaultOn && <i data-testid="media-row-lock" data-locked={it.locked ? "true" : "false"} className={`bi ${it.locked ? "bi-lock-fill" : "bi-unlock"}`} title={it.locked ? "Encrypted — opens only in this panel" : "Not encrypted"} style={{ color: it.locked ? "#10b981" : "var(--muted)", fontSize: 12, flex: "0 0 auto", marginLeft: -4, opacity: it.locked ? 1 : 0.7 }} />}
+                          <i className={`bi ${it.dir ? "bi-folder-fill" : catIcon[fileCategory(it.displayName || it.name)]}`} style={{ color: it.dir ? "#f59e0b" : "var(--accent)", display: "grid", placeItems: "center", width: 18, height: 18, fontSize: 14, lineHeight: 1, flex: "0 0 auto", transform: "translateY(1px)" }} />{!it.dir && !it.locked && vaultOn && <i data-testid="media-row-lock" data-locked={it.locked ? "true" : "false"} className={`bi ${it.locked ? "bi-lock-fill" : "bi-unlock"}`} title={it.locked ? "Encrypted — opens only in this panel" : "Not encrypted"} style={{ color: it.locked ? "#10b981" : "var(--muted)", fontSize: 12, flex: "0 0 auto", marginLeft: -4, opacity: it.locked ? 1 : 0.7 }} />}
                           {it.dir ? (
                             <button data-testid="media-row-open-folder" onClick={(e) => { e.stopPropagation(); tapItem(it); }} onDoubleClick={(e) => { e.stopPropagation(); openItem(it); }} title={`${it.name} — click to select, double-click to open`} style={{ background: "none", border: 0, color: "var(--text)", fontWeight: 600, textAlign: "left", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0, maxWidth: "100%", userSelect: "none", WebkitUserSelect: "none" }}>{it.name}</button>
                           ) : (
@@ -4672,6 +4702,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
             <FileViewer
               src={viewerSrc}
               title={label}
+              name={it.displayName || undefined}
               filePath={viewerFilePath}
               url=""
               viewable={viewable}

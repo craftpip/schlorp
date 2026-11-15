@@ -150,6 +150,27 @@ function createPatternAuth({ rootDir, hashParams = HASH, patternHashParams = nul
     checkChain = p.catch(() => {});
     return p;
   }
+  // Same rate limit + one-at-a-time queue, but the secret is checked by
+  // `verify` (recovery on a fresh install: against the drive's key file).
+  // `verify` rejects with status 401 for a wrong secret.
+  function checkWith(clientKey, label, verify) {
+    const run = async () => {
+      const limiter = limiterFor(clientKey);
+      limiter.check();
+      try {
+        const r = await verify();
+        limiter.success();
+        return r;
+      } catch (e) {
+        if (!e || e.status !== 401) throw e;
+        const left = limiter.fail();
+        throw httpError(401, `${label}${left ? ` — ${left} attempt${left === 1 ? "" : "s"} left` : " — locked for a while"}`, e.code || "BAD_SECRET");
+      }
+    };
+    const p = checkChain.then(run, run);
+    checkChain = p.catch(() => {});
+    return p;
+  }
   async function checkNow(kind, input, limiter) {
     if (corrupt) throw httpError(503, `login is unavailable: ${corrupt}`, "AUTH_FILE");
     limiter.check();
@@ -253,6 +274,7 @@ function createPatternAuth({ rootDir, hashParams = HASH, patternHashParams = nul
     file,
     publicSettings,
     check,
+    checkWith,
     setPassword,
     setPattern,
     setPrefs,

@@ -912,7 +912,7 @@ function deriveTitleLocal(url, filePath) {
     return u.hostname.replace(/^www\./, "") + u.pathname.slice(0, 40);
   } catch { return url; }
 }
-export default function FileViewer({ src, title, filePath, url, file, viewable, idx, onPrev, onNext, onGoto, onClose, onDeleted }) {
+export default function FileViewer({ src, title, name, filePath, url, file, viewable, idx, onPrev, onNext, onGoto, onClose, onDeleted }) {
   const effFilePath = filePath || file?.filePath || "";
   const effUrl = url || file?.url || "";
   const effSrc = src || (effFilePath ? toMediaUrlLocal(effFilePath) : "");
@@ -1061,7 +1061,9 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
   const loading = mediaUrl !== loadedUrl;
   const titleEff = effTitle;
   const urlEff = effUrl;
-  const ext = String(filePathEff || effSrc || "").split(".").pop()?.toLowerCase() || "";
+  // Hidden-name (encrypted) files have no extension on disk: use the real name.
+  const nameEff = name || file?.fileName || "";
+  const ext = String(nameEff || filePathEff || effSrc || "").split(".").pop()?.toLowerCase() || "";
   const isVideo = /^(mp4|webm|mkv|mov|m4v|avi|mpg|mpeg|3gp|flv|ts|m3u8)$/i.test(ext);
   const isAudio = /^(mp3|m4a|aac|ogg|wav|flac|opus)$/i.test(ext);
   const isImage = /^(jpg|jpeg|png|gif|webp|bmp|avif)$/i.test(ext);
@@ -2683,7 +2685,8 @@ export default function FileViewer({ src, title, filePath, url, file, viewable, 
             <button type="button" tabIndex={-1} className="btn btn-sm" onClick={(e) => { e.stopPropagation(); dispatchPrevRef.current(); }} onTouchStart={(e) => e.stopPropagation()} disabled={endMode !== "random" && !hasPrev} title="Previous (↑)" style={{ position: "relative", width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}><span className="btn-kbd-hint">↑</span><i className="bi bi-chevron-up" /></button>
             {(() => {
               const { base } = parseFolderBase(filePathEff);
-              const label = base || titleEff;
+              // `name` = real name of a hidden-name (encrypted) file.
+              const label = nameEff || base || titleEff;
               if (!label) return null;
               return (
                 <span data-testid="viewer-filename" className="fv-filename" title={label} style={{ position: "absolute", left: "calc(100% + 8px)", top: "50%", transform: "translateY(-50%)", fontSize: 12, fontWeight: 500, color: "#fff", background: "rgba(0,0,0,.55)", border: "1px solid rgba(255,255,255,.18)", backdropFilter: "blur(6px)", padding: "6px 10px", borderRadius: 999, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>

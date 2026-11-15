@@ -6,12 +6,18 @@
 // key is in the clear so the server can encrypt new files at any time; reading
 // needs the private key, which only lives in server memory after unlock.
 //
-// Encrypted files keep their original name. Content = chunked AES-256-GCM so
-// it decrypts at random offsets (HTTP Range / video seeking):
+// Content = chunked AES-256-GCM so it decrypts at random offsets (HTTP Range
+// / video seeking). The file name is hidden too: the file on disk gets a
+// random code name (plan 041) and the real name is stored encrypted right
+// after the header.
 //
 //   header (128 B):
-//     "XDLENC02"(8) | ephPub(32) | wrappedFileKey(48) | salt(16)
+//     "XDLENC03"(8) | ephPub(32) | wrappedFileKey(48) | salt(16)
 //     | chunkSize u32 BE(4) | createdMs u64 BE(8) | kid(4) | reserved(8)
+//   name block (286 B):
+//     nonce(12) | AES-256-GCM(nameKey, AAD="xdl-name"|salt,
+//                             u16 len | utf8 name | zero pad to 258) | tag(16)
+//     nameKey = HKDF-SHA256(fileKey, salt, "xdl-name-v3")
 //   body: N >= 1 chunks, each = ciphertext(<= chunkSize) + GCM tag(16)
 //
 //   fileKey  = 32 random bytes per file
@@ -28,8 +34,12 @@ const fsSync = require("fs");
 const path = require("path");
 const { Readable } = require("stream");
 
-const MAGIC = Buffer.from("XDLENC02", "latin1");
+const MAGIC = Buffer.from("XDLENC03", "latin1");
 const HEADER_LEN = 128;
+const NAME_PLAIN_LEN = 258; // u16 length + up to 256 bytes of UTF-8
+const NAME_BLOCK_LEN = 12 + NAME_PLAIN_LEN + 16;
+const NAME_INFO = Buffer.from("xdl-name-v3", "latin1");
+const NAME_AAD = Buffer.from("xdl-name", "latin1");
 const TAG_LEN = 16;
 const DEFAULT_CHUNK = 64 * 1024;
 const MAX_CHUNK = 16 * 1024 * 1024;
@@ -72,12 +82,15 @@ function buildHeader({ ephPub, wrapped, salt, chunkSize, createdMs, kid }) {
   return h;
 }
 
+// `buf` holds the header plus the name block (null if not an encrypted file).
 function parseHeader(buf) {
-  if (!buf || buf.length < HEADER_LEN) return null;
+  if (!buf || buf.length < HEADER_LEN + NAME_BLOCK_LEN) return null;
   if (!buf.subarray(0, 8).equals(MAGIC)) return null;
   const chunkSize = buf.readUInt32BE(104);
   if (!chunkSize || chunkSize > MAX_CHUNK) return null;
   return {
+    bodyOffset: HEADER_LEN + NAME_BLOCK_LEN,
+    nameBlock: Buffer.from(buf.subarray(HEADER_LEN, HEADER_LEN + NAME_BLOCK_LEN)),
     ephPub: Buffer.from(buf.subarray(8, 40)),
     wrapped: Buffer.from(buf.subarray(40, 88)),
     salt: Buffer.from(buf.subarray(88, 104)),
@@ -88,8 +101,8 @@ function parseHeader(buf) {
 }
 
 // Chunk geometry for an encrypted file of `fileSize` bytes. null = malformed.
-function cipherLayout(fileSize, chunkSize) {
-  const body = fileSize - HEADER_LEN;
+function cipherLayout(fileSize, chunkSize, bodyOffset = HEADER_LEN + NAME_BLOCK_LEN) {
+  const body = fileSize - bodyOffset;
   if (body < TAG_LEN) return null;
   const full = chunkSize + TAG_LEN;
   const chunks = Math.ceil(body / full);
@@ -156,6 +169,35 @@ function unwrapFileKey(header, vaultPrivateKey) {
   return Buffer.concat([d.update(header.wrapped.subarray(0, 32)), d.final()]);
 }
 
+function nameKeyOf(fileKey, salt) {
+  return Buffer.from(crypto.hkdfSync("sha256", fileKey, salt, NAME_INFO, 32));
+}
+function sealName(fileKey, salt, name) {
+  const utf8 = Buffer.from(String(name || ""), "utf8");
+  if (utf8.length > NAME_PLAIN_LEN - 2) throw Object.assign(new Error("file name too long to encrypt"), { code: "NAME_TOO_LONG", status: 400 });
+  const plain = Buffer.alloc(NAME_PLAIN_LEN);
+  plain.writeUInt16BE(utf8.length, 0);
+  utf8.copy(plain, 2);
+  const nonce = crypto.randomBytes(12);
+  const c = crypto.createCipheriv("aes-256-gcm", nameKeyOf(fileKey, salt), nonce);
+  c.setAAD(Buffer.concat([NAME_AAD, salt]));
+  return Buffer.concat([nonce, c.update(plain), c.final(), c.getAuthTag()]);
+}
+function openName(fileKey, salt, block) {
+  const d = crypto.createDecipheriv("aes-256-gcm", nameKeyOf(fileKey, salt), block.subarray(0, 12));
+  d.setAAD(Buffer.concat([NAME_AAD, salt]));
+  d.setAuthTag(block.subarray(12 + NAME_PLAIN_LEN));
+  const plain = Buffer.concat([d.update(block.subarray(12, 12 + NAME_PLAIN_LEN)), d.final()]);
+  const len = plain.readUInt16BE(0);
+  if (len > NAME_PLAIN_LEN - 2) throw new Error("bad name block");
+  return plain.subarray(2, 2 + len).toString("utf8");
+}
+// The real file name stored in the header. Needs the vault PRIVATE key.
+function decryptFileName(header, vaultPrivateKey) {
+  if (!header || !header.nameBlock) return null;
+  return openName(unwrapFileKey(header, vaultPrivateKey), header.salt, header.nameBlock);
+}
+
 async function readFully(fh, buf, position) {
   let off = 0;
   while (off < buf.length) {
@@ -183,12 +225,13 @@ async function readFileHeader(filePath) {
   try {
     fh = await fs.open(filePath, "r");
     const st = await fh.stat();
-    if (!st.isFile() || st.size < HEADER_LEN + TAG_LEN) return null;
-    const buf = Buffer.alloc(HEADER_LEN);
-    if ((await readFully(fh, buf, 0)) < HEADER_LEN) return null;
-    const h = parseHeader(buf);
+    if (!st.isFile() || st.size < HEADER_LEN + NAME_BLOCK_LEN + TAG_LEN) return null;
+    const buf = Buffer.alloc(Math.min(st.size, HEADER_LEN + NAME_BLOCK_LEN));
+    const got = await readFully(fh, buf, 0);
+    if (got < HEADER_LEN) return null;
+    const h = parseHeader(buf.subarray(0, got));
     if (!h) return null;
-    const layout = cipherLayout(st.size, h.chunkSize);
+    const layout = cipherLayout(st.size, h.chunkSize, h.bodyOffset);
     if (!layout) return null;
     return { ...h, ...layout, size: st.size, mtimeMs: st.mtimeMs };
   } finally {
@@ -198,9 +241,13 @@ async function readFileHeader(filePath) {
 
 // Incremental encryptor: feed plaintext with push(), finish with end().
 // Needs only the vault PUBLIC key.
-function createChunkEncryptor(vaultPublicKey, { chunkSize = DEFAULT_CHUNK, createdMs = Date.now() } = {}) {
+// `name` = the real file name, stored encrypted in the header.
+function createChunkEncryptor(vaultPublicKey, { chunkSize = DEFAULT_CHUNK, createdMs = Date.now(), name = "" } = {}) {
   const w = wrapNewFileKey(vaultPublicKey);
-  const header = buildHeader({ ephPub: w.ephPub, wrapped: w.wrapped, salt: w.salt, chunkSize, createdMs, kid: w.kid });
+  const header = Buffer.concat([
+    buildHeader({ ephPub: w.ephPub, wrapped: w.wrapped, salt: w.salt, chunkSize, createdMs, kid: w.kid }),
+    sealName(w.fileKey, w.salt, name),
+  ]);
   let pending = [];
   let pendingLen = 0;
   let index = 0;
@@ -264,25 +311,41 @@ function fileBirthMs(st) {
 
 // Encrypt a plain file in place (temp file + atomic rename). Keeps mtime/atime;
 // the original creation time is stored in the header. Public key only.
-async function encryptFileInPlace(filePath, vaultPublicKey, { chunkSize = DEFAULT_CHUNK, createdMs } = {}) {
+// Encrypt a plain file into a hidden temp file next to it (same folder, so it
+// can be committed with link/rename). Keeps mode/mtime/atime; the original
+// creation time and `name` (default: the current name) go into the header.
+// The caller commits `tmp` and removes the source. Public key only.
+async function encryptToTemp(filePath, vaultPublicKey, { chunkSize = DEFAULT_CHUNK, createdMs, name } = {}) {
   const st = await fs.stat(filePath);
   if (!st.isFile()) throw new Error("not a file");
   if (await readFileHeader(filePath)) throw Object.assign(new Error("already encrypted"), { code: "ALREADY_LOCKED" });
   const born = Number.isFinite(createdMs) && createdMs > 0 ? createdMs : fileBirthMs(st);
   const tmp = tempSiblingPath(filePath, "xenc");
-  await encryptIterableToFile(fsSync.createReadStream(filePath, { highWaterMark: chunkSize }), tmp, vaultPublicKey, { chunkSize, createdMs: born });
+  const realName = name == null ? path.basename(filePath) : String(name);
+  await encryptIterableToFile(fsSync.createReadStream(filePath, { highWaterMark: chunkSize }), tmp, vaultPublicKey, { chunkSize, createdMs: born, name: realName });
   try {
     // The source may have changed while we read it (e.g. still downloading).
     const now = await fs.stat(filePath);
     if (now.size !== st.size || now.mtimeMs !== st.mtimeMs) throw Object.assign(new Error("file changed while encrypting"), { code: "CHANGED" });
     await fs.chmod(tmp, st.mode & 0o7777).catch(() => {});
     await fs.utimes(tmp, st.atime, st.mtime);
-    await fs.rename(tmp, filePath);
   } catch (e) {
     await fs.unlink(tmp).catch(() => {});
     throw e;
   }
-  return { stat: await fs.stat(filePath), createdMs: born, before: st };
+  return { tmp, createdMs: born, before: st };
+}
+
+// Encrypt a plain file in place (temp file + atomic rename, name unchanged).
+async function encryptFileInPlace(filePath, vaultPublicKey, opts = {}) {
+  const r = await encryptToTemp(filePath, vaultPublicKey, opts);
+  try {
+    await fs.rename(r.tmp, filePath);
+  } catch (e) {
+    await fs.unlink(r.tmp).catch(() => {});
+    throw e;
+  }
+  return { stat: await fs.stat(filePath), createdMs: r.createdMs, before: r.before };
 }
 
 // Async generator of plaintext for bytes [start, end] (inclusive) of an
@@ -304,7 +367,7 @@ async function* decryptRange(filePath, vaultPrivateKey, { start = 0, end = Infin
       const isLast = i === h.chunks - 1;
       const len = isLast ? h.lastLen : full;
       const buf = Buffer.alloc(len);
-      if ((await readFully(fh, buf, HEADER_LEN + i * full)) < len) throw new Error("encrypted file truncated");
+      if ((await readFully(fh, buf, h.bodyOffset + i * full)) < len) throw new Error("encrypted file truncated");
       const plain = decryptChunk(fileKey, h.salt, i, isLast, buf);
       const chunkStart = i * cs;
       yield plain.subarray(Math.max(0, start - chunkStart), Math.min(plain.length, last - chunkStart + 1));
@@ -319,26 +382,65 @@ function createDecryptStream(filePath, vaultPrivateKey, opts = {}) {
 }
 
 // Decrypt in place (temp + rename). Keeps mtime/atime. Private key.
-async function decryptFileInPlace(filePath, vaultPrivateKey) {
+// Permissions for a decrypted file: the encrypted file's, plus the normal
+// read/write bits for new files (0666 minus the umask, usually 0644).
+function plainFileMode(encryptedMode) {
+  let umask = 0o022;
+  try { umask = process.umask(); } catch {}
+  return ((encryptedMode & 0o7777) | (0o666 & ~umask)) & 0o7777;
+}
+
+// Decrypt into a hidden temp file next to the source (keeps mode/mtime/atime).
+// Returns the temp path, the stored creation time and the stored real name
+// The caller commits `tmp`. Private key.
+async function decryptToTemp(filePath, vaultPrivateKey) {
   const st = await fs.stat(filePath);
   const h = await readFileHeader(filePath);
   if (!h) throw Object.assign(new Error("not encrypted"), { code: "NOT_LOCKED" });
   unwrapFileKey(h, vaultPrivateKey); // fail fast before creating the temp file
+  const name = decryptFileName(h, vaultPrivateKey);
   const tmp = tempSiblingPath(filePath, "xdec");
   const out = await fs.open(tmp, "wx", 0o600);
   try {
     for await (const piece of decryptRange(filePath, vaultPrivateKey, { header: h })) await writeFully(out, piece);
     await out.sync();
     await out.close();
-    await fs.chmod(tmp, st.mode & 0o7777).catch(() => {});
+    // Unlocked files are ordinary media again: readable like any other file
+    // (encrypted uploads are written owner-only, and the app may run as root).
+    await fs.chmod(tmp, plainFileMode(st.mode)).catch(() => {});
     await fs.utimes(tmp, st.atime, st.mtime);
-    await fs.rename(tmp, filePath);
   } catch (e) {
     await out.close().catch(() => {});
     await fs.unlink(tmp).catch(() => {});
     throw e;
   }
-  return { stat: await fs.stat(filePath), createdMs: h.createdMs, before: st };
+  return { tmp, createdMs: h.createdMs, name, header: h, before: st };
+}
+
+// Decrypt in place (temp + rename, name on disk unchanged). Private key.
+async function decryptFileInPlace(filePath, vaultPrivateKey) {
+  const r = await decryptToTemp(filePath, vaultPrivateKey);
+  try {
+    await fs.rename(r.tmp, filePath);
+  } catch (e) {
+    await fs.unlink(r.tmp).catch(() => {});
+    throw e;
+  }
+  return { stat: await fs.stat(filePath), createdMs: r.createdMs, name: r.name, before: r.before };
+}
+
+// Random on-disk name for a locked file: 16 characters (80 bits), no
+// extension — the type is read from the real name stored inside the file.
+const CODE_ALPHABET = "abcdefghijkmnpqrstuvwxyz23456789";
+function codeName() {
+  const bytes = crypto.randomBytes(16);
+  let code = "";
+  for (const b of bytes) code += CODE_ALPHABET[b & 31];
+  return code;
+}
+const CODE_RE = /^[a-km-z2-9]{16}$/;
+function isCodeName(name) {
+  return CODE_RE.test(String(name || ""));
 }
 
 // ---- Vault (v3): X25519 key pair; the private half is sealed in "slots" ----
@@ -350,7 +452,7 @@ const SCRYPT = { N: 1 << 17, r: 8, p: 1 };
 // Patterns have far fewer combinations than a password, so their slot uses
 // a 2x more expensive scrypt to slow offline guessing a little more.
 const SCRYPT_PATTERN = { N: 1 << 18, r: 8, p: 1 };
-const MIN_PASSWORD = 12;
+const MIN_PASSWORD = 1; // no length rule: the panel shows how long a password would take to crack
 const SLOTS = new Set(["password", "pattern"]);
 
 function scryptAsync(secret, salt, params) {
@@ -361,14 +463,27 @@ function scryptAsync(secret, salt, params) {
 
 function checkPassword(password) {
   const p = String(password || "");
-  if (p.length < MIN_PASSWORD) throw Object.assign(new Error(`the password must be at least ${MIN_PASSWORD} characters to protect encrypted files`), { code: "WEAK_PASSWORD", status: 400 });
+  if (p.length < MIN_PASSWORD) throw Object.assign(new Error("a password is required"), { code: "WEAK_PASSWORD", status: 400 });
   return p;
 }
 
-async function sealSlot(privateKey, secret, params) {
+// scrypt(secret) with a fresh salt — the slow part of sealing a slot. Done
+// at login (plan 042) so encryption can be switched on later with just a
+// confirmation; only this derived key is kept in memory, never the secret.
+async function deriveSlotKey(secret, params = SCRYPT) {
   const salt = crypto.randomBytes(16);
-  const iv = crypto.randomBytes(12);
   const kek = await scryptAsync(secret, salt, params);
+  return { kek, salt, params: { N: params.N, r: params.r, p: params.p } };
+}
+
+async function sealSlot(privateKey, secret, params) {
+  return sealSlotWithKey(privateKey, await deriveSlotKey(secret, params));
+}
+
+// Seal the private key with an already-derived key (one use per derived key).
+function sealSlotWithKey(privateKey, derived) {
+  const { kek, salt, params } = derived;
+  const iv = crypto.randomBytes(12);
   const pubRaw = rawPublic(crypto.createPublicKey(privateKey));
   const c = crypto.createCipheriv("aes-256-gcm", kek, iv);
   c.setAAD(Buffer.concat([VAULT_AAD, pubRaw]));
@@ -381,7 +496,7 @@ function vaultPublicKey(vault) {
   return publicKeyFromRaw(Buffer.from(vault.pub, "base64"));
 }
 
-// Open a sealed private key (a v3 slot, or a whole v2 vault — same fields).
+// Open a sealed private key (one vault slot).
 async function openSealed(slot, pubB64, secret, label) {
   const pubRaw = Buffer.from(pubB64, "base64");
   const kek = await scryptAsync(secret, Buffer.from(slot.salt, "base64"), slot);
@@ -407,24 +522,20 @@ async function openVault(vault, secret, slotName = "password") {
   return openSealed(slot, vault.pub, secret, slotName);
 }
 
-// Convert a v2 vault (private key sealed by a separate passphrase) into v3
-// with the SAME key pair, sealed by the panel password — files encrypted
-// under v2 stay readable (the file format did not change).
-async function upgradeV2Vault(v2, passphrase, newPassword, params = SCRYPT) {
-  if (!v2 || v2.v !== 2 || !v2.pub) throw new Error("not a v2 vault");
-  checkPassword(newPassword);
-  const privateKey = await openSealed(v2, v2.pub, passphrase, "passphrase");
-  const now = new Date().toISOString();
-  const vault = { v: 3, pub: v2.pub, kid: v2.kid, createdAt: v2.createdAt || now, updatedAt: now, upgradedFrom: 2, slots: { password: await sealSlot(privateKey, newPassword, params) } };
-  return { vault, privateKey, publicKey: publicKeyFromRaw(Buffer.from(v2.pub, "base64")) };
-}
-
 async function createVault(password, params = SCRYPT) {
   checkPassword(password);
+  return createVaultWithKeys(await deriveSlotKey(password, params));
+}
+
+// New vault from derived slot keys (password required; pattern optional).
+function createVaultWithKeys(passwordKey, patternKey = null) {
+  if (!passwordKey || !passwordKey.kek) throw Object.assign(new Error("password key required"), { code: "NEEDS_PASSWORD", status: 400 });
   const { privateKey, publicKey } = crypto.generateKeyPairSync("x25519");
   const pubRaw = rawPublic(publicKey);
   const now = new Date().toISOString();
-  const vault = { v: 3, pub: pubRaw.toString("base64"), kid: keyIdOf(pubRaw).toString("hex"), createdAt: now, updatedAt: now, slots: { password: await sealSlot(privateKey, password, params) } };
+  const slots = { password: sealSlotWithKey(privateKey, passwordKey) };
+  if (patternKey && patternKey.kek) slots.pattern = sealSlotWithKey(privateKey, patternKey);
+  const vault = { v: 3, pub: pubRaw.toString("base64"), kid: keyIdOf(pubRaw).toString("hex"), createdAt: now, updatedAt: now, slots };
   return { vault, privateKey, publicKey };
 }
 
@@ -485,6 +596,12 @@ function isLockableName(name) {
 module.exports = {
   MAGIC,
   HEADER_LEN,
+  NAME_BLOCK_LEN,
+  decryptFileName,
+  encryptToTemp,
+  decryptToTemp,
+  codeName,
+  isCodeName,
   TAG_LEN,
   DEFAULT_CHUNK,
   SCRYPT,
@@ -501,9 +618,10 @@ module.exports = {
   decryptRange,
   createDecryptStream,
   createVault,
+  createVaultWithKeys,
+  deriveSlotKey,
   openVault,
   setVaultSlot,
-  upgradeV2Vault,
   vaultPublicKey,
   checkPassword,
   SCRYPT_PATTERN,

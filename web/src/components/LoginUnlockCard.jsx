@@ -13,16 +13,14 @@ function suggest(n = 6) {
   crypto.getRandomValues(b);
   return Array.from(b, (x) => WORDS[x % WORDS.length]).join("-");
 }
-function strengthOf(p) {
+export function strengthOf(p) {
   const s = String(p || "");
   if (!s) return null;
-  const est = crackEstimate(passwordBits(s), "password");
-  if (s.length < 12) return { ...est, label: "Too short to protect encrypted files (min 12)", tone: "#f87171" };
-  return est;
+  return crackEstimate(passwordBits(s), "password");
 }
 
 // "Time to crack" line shown under the password / pattern being set.
-function CrackLine({ est, what }) {
+export function CrackLine({ est, what }) {
   if (!est) return null;
   return (
     <div data-testid="crack-estimate" style={{ color: est.tone, fontSize: 11.5 }}>
@@ -77,7 +75,7 @@ export default function LoginUnlockCard() {
   const vaultExists = vault && vault.exists;
   const strength = strengthOf(p1);
   const mismatch = p2 && p1 !== p2;
-  const pwBad = !p1 || p1 !== p2 || (vaultExists && p1.length < 12);
+  const pwBad = !p1 || p1 !== p2;
   const inputStyle = { maxWidth: 280, height: 30, fontSize: 12 };
 
   return (

@@ -99,7 +99,7 @@ function clearFinishedUploads() {
 export async function vaultCall(url, body) {
   const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
   const j = await r.json().catch(() => ({}));
-  if (!r.ok || !j.ok) throw new Error(j.error || `request failed (${r.status})`);
+  if (!r.ok || !j.ok) throw Object.assign(new Error(j.error || `request failed (${r.status})`), { code: j.code || null, status: r.status });
   return j;
 }
 
@@ -259,11 +259,17 @@ function Bar({ pct, tone }) {
   );
 }
 
-export function MediaTasksPanel({ tasks }) {
+// `thumbGen` (optional): { busy, progress, result, onOpen, onDismiss } — the
+// Shift+G thumbnail run, shown here while its popup is closed.
+export function MediaTasksPanel({ tasks, thumbGen }) {
   const [collapsed, setCollapsed] = useState(false);
   if (!tasks) return null;
   const { uploads, lockJob } = tasks;
-  if (!uploads.length && !lockJob) return null;
+  const tg = thumbGen && (thumbGen.busy || thumbGen.result) ? thumbGen : null;
+  if (!uploads.length && !lockJob && !tg) return null;
+  const tgRunning = !!(tg && tg.busy);
+  const tgP = tg && tg.progress;
+  const tgPct = tgRunning ? (tgP && tgP.total ? (tgP.index / tgP.total) * 100 : 0) : 100;
   const active = uploads.filter((u) => u.status === "queued" || u.status === "uploading");
   const done = uploads.filter((u) => u.status === "done").length;
   const failed = uploads.filter((u) => u.status === "error").length;
@@ -276,17 +282,36 @@ export function MediaTasksPanel({ tasks }) {
   return (
     <div data-testid="media-tasks-panel" style={{ position: "fixed", right: 16, bottom: 16, zIndex: 130, width: "min(360px, calc(100vw - 32px))", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, boxShadow: "0 12px 32px rgba(0,0,0,.3)", fontSize: 12, overflow: "hidden" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", borderBottom: collapsed ? "none" : "1px solid var(--border)" }}>
-        <i className={`bi ${lockRunning ? "bi-shield-lock" : active.length ? "bi-cloud-arrow-up" : "bi-check2-circle"}`} style={{ color: "var(--accent, #6366f1)" }} />
+        <i className={`bi ${lockRunning ? "bi-shield-lock" : active.length ? "bi-cloud-arrow-up" : tgRunning ? "bi-images" : "bi-check2-circle"}`} style={{ color: "var(--accent, #6366f1)" }} />
         <span style={{ fontWeight: 700, flex: 1 }}>
-          {lockRunning ? `${verb} ${lockJob.label}…` : active.length ? `Uploading ${done + 1 > uploads.length ? uploads.length : done + 1} of ${uploads.filter((u) => u.status !== "cancelled").length}` : "Tasks finished"}
+          {lockRunning ? `${verb} ${lockJob.label}…` : tgRunning && !active.length ? (tgP && tgP.total ? `Generating thumbnails ${tgP.index} of ${tgP.total}` : "Generating thumbnails…") : active.length ? `Uploading ${done + 1 > uploads.length ? uploads.length : done + 1} of ${uploads.filter((u) => u.status !== "cancelled").length}` : "Tasks finished"}
         </span>
         <button type="button" className="btn btn-sm btn-link" style={{ padding: "0 4px", color: "var(--muted)" }} onClick={() => setCollapsed((v) => !v)} title={collapsed ? "Expand" : "Collapse"}><i className={`bi ${collapsed ? "bi-chevron-up" : "bi-chevron-down"}`} /></button>
-        {!lockRunning && !active.length && (
-          <button type="button" data-testid="media-tasks-close" className="btn btn-sm btn-link" style={{ padding: "0 4px", color: "var(--muted)" }} onClick={() => { tasks.clearUploads(); tasks.dismissLock(); }} title="Close"><i className="bi bi-x-lg" /></button>
+        {!lockRunning && !active.length && !tgRunning && (
+          <button type="button" data-testid="media-tasks-close" className="btn btn-sm btn-link" style={{ padding: "0 4px", color: "var(--muted)" }} onClick={() => { tasks.clearUploads(); tasks.dismissLock(); if (tg && tg.onDismiss) tg.onDismiss(); }} title="Close"><i className="bi bi-x-lg" /></button>
         )}
       </div>
       {!collapsed && (
         <div style={{ maxHeight: 280, overflowY: "auto", padding: "6px 10px 10px", display: "flex", flexDirection: "column", gap: 8 }}>
+          {tg && (
+            <div data-testid="media-tasks-thumbgen" style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <i className="bi bi-images" />
+                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: tg.onOpen ? "pointer" : undefined }} title={(tgP && tgP.file) || "Open thumbnail generator"} onClick={tg.onOpen}>
+                  {tgRunning
+                    ? ((tgP && tgP.file) || "Preparing…")
+                    : tg.result.ok
+                      ? `Thumbnails: ${tg.result.generated} generated${tg.result.skipped ? ` · ${tg.result.skipped} skipped` : ""}`
+                      : `Thumbnails failed: ${tg.result.error || "unknown error"}`}
+                </span>
+                {tgP && tgP.total > 0 && <span style={{ color: "var(--muted)" }}>{tgRunning ? tgP.index : tgP.total}/{tgP.total}</span>}
+              </div>
+              <Bar pct={tgPct} tone={(tg.result && !tg.result.ok) || (tg.result ? tg.result.failed : tgP && tgP.failed) ? "#f59e0b" : undefined} />
+              {((tg.result && tg.result.ok && tg.result.failed > 0) || (tgRunning && tgP && tgP.failed > 0)) && (
+                <div style={{ color: "#f87171" }}>{tg.result ? tg.result.failed : tgP.failed} failed</div>
+              )}
+            </div>
+          )}
           {lockJob && (
             <div data-testid="media-tasks-lock" style={{ display: "flex", flexDirection: "column", gap: 4 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -354,6 +379,21 @@ export function VaultLockedBanner({ tasks }) {
   const [showPad, setShowPad] = useState(null); // null = follow preferLogin
   const v = tasks && tasks.vault;
   if (!v || !v.exists || v.unlocked) return null;
+  if (v.needsRestore) {
+    // Fresh install on an encrypted drive, wizard skipped: nothing to type
+    // here — the restore happens in the welcome wizard.
+    const reopen = () => {
+      try { localStorage.removeItem("xdl_setup_skipped"); } catch {}
+      window.location.reload();
+    };
+    return (
+      <div data-testid="media-vault-restore" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", padding: "8px 12px", marginBottom: 8, borderRadius: 10, border: "1px solid rgba(245,158,11,.45)", background: "rgba(245,158,11,.12)", fontSize: 12 }}>
+        <i className="bi bi-shield-lock-fill" style={{ color: "#f59e0b", fontSize: 16 }} />
+        <span style={{ flex: "1 1 220px" }}><b>Some files on this drive are encrypted.</b> They open with the password you used before — it also becomes your panel password here.</span>
+        <button type="button" data-testid="vault-restore" className="btn btn-sm btn-warning" style={{ height: 28 }} onClick={reopen}><i className="bi bi-unlock" /> Restore my files</button>
+      </div>
+    );
+  }
   const patternOk = !!(v.hasPattern && v.patternSlot);
   const padOpen = patternOk && (showPad === null ? v.preferLogin === "pattern" : showPad);
   const done = () => setTimeout(() => window.location.reload(), 300); // re-fetch failed (423) thumbnails

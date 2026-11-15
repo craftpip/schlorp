@@ -9,7 +9,7 @@ const { buildBrowserFromLocalProfile } = require("./scan-videos/browser");
 const { scanSavedPage } = require("./scan-videos/scan-saved");
 const { sanitizeMoveKey, isInsideMedia, mediaRelOf, resolveMoveSource, findCompanionPosters, splitStacksByCoverage, stashMovedSlot, takeMovedSlot } = require("./scan-videos/media-move");
 const { loadAppConfig, normalizeAccountName, resolveAccountConfig, resolveProfileConfig, getStateFilePath, normalizeCdpUrl, ensureDefaultStateFiles } = require("./scan-videos/config");
-const { generatePosterThumbnail, selectPosterTargets, posterStemOf, isVideoFileName, POSTER_SIBLING_RE } = require("./scan-videos/download");
+const { generatePosterThumbnail, selectPosterTargets, posterStemOf, isVideoFileName, POSTER_SIBLING_RE, posterStemOfName } = require("./scan-videos/download");
 const { WebSocketServer } = require("ws");
 const http = require("http");
 const { EventEmitter } = require("events");
@@ -72,7 +72,7 @@ const ENV_FROM_CONTAINER = (() => {
 // The password is never kept in plain text: a one-time migration moves any
 // UI_PANEL_PASSWORD / ADMIN_PASSWORD from .env into a scrypt hash (done
 // synchronously here, before the server accepts requests) and blanks .env.
-const { createPatternAuth } = require("./scan-videos/pattern-auth");
+const { createPatternAuth, normalizePattern } = require("./scan-videos/pattern-auth");
 const patternAuth = createPatternAuth({ rootDir });
 (() => {
   const plain = String(process.env.UI_PANEL_PASSWORD || process.env.ADMIN_PASSWORD || "").trim();
@@ -97,15 +97,28 @@ function isPanelProtected() {
 }
 // --- Media encryption (plan 039) ---
 const mediaCrypto = require("./scan-videos/media-crypto");
-const { createMediaVault } = require("./scan-videos/media-vault");
+const { createMediaVault, safeStoredName } = require("./scan-videos/media-vault");
 const mediaVault = createMediaVault({ mediaDir, rootDir, isProtected: isPanelProtected });
 let lastPanelActivity = Date.now();
 function vaultStatusFull() {
   const sec = patternAuth.publicSettings();
-  return { ...mediaVault.status(), hasPattern: !!sec.pattern, preferLogin: sec.preferLogin, autoLockMinutes: sec.autoLockMinutes };
+  // needsRestore: an encrypted drive on an install without a password yet
+  // (fresh install / lost settings) — the first password must be the drive's.
+  return { ...mediaVault.status(), needsRestore: mediaVault.exists() && !isPanelProtected(), hasPattern: !!sec.pattern, preferLogin: sec.preferLogin, autoLockMinutes: sec.autoLockMinutes };
+}
+// Keys derived from the login secret while encryption is off (plan 042), so
+// "Turn on encryption" needs only a confirmation. These are scrypt outputs —
+// the password/pattern itself is never kept. Dropped once a vault exists.
+const setupKeys = { password: null, pattern: null };
+function prepareSetupKey(kind, secret) {
+  if (mediaVault.exists() || secret == null || secret === "") { setupKeys[kind] = null; return; }
+  const p = mediaVault.deriveSlotKey(kind, secret);
+  setupKeys[kind] = p;
+  p.catch(() => { if (setupKeys[kind] === p) setupKeys[kind] = null; });
 }
 // After a successful login, open the media vault with the same secret.
 async function unlockVaultAfterLogin(kind, secret) {
+  if (!mediaVault.exists()) prepareSetupKey(kind, secret);
   try {
     const st = mediaVault.status();
     if (!st.exists || st.unlocked) return;
@@ -650,7 +663,13 @@ async function queueWorkerLoop() {
       try {
         const doneLogs = (nextItem.logs || []).join("\n");
         const written = [...doneLogs.matchAll(/Downloaded media to:\s*(.+)/g)].map((m) => m[1].trim());
-        await autoEncryptDownloaded(written, logToWs);
+        const renamed = await autoEncryptDownloaded(written, logToWs);
+        if (nextItem.filePath && renamed.has(nextItem.filePath)) {
+          // Hidden name on disk now; the app keeps the real name for the
+          // Dashboard (title + type). This file is in the app folder, not on the media drive.
+          nextItem.fileName = path.basename(nextItem.filePath);
+          nextItem.filePath = renamed.get(nextItem.filePath);
+        }
       } catch {}
       queueActiveJob = null;
       // move from active to completed
@@ -722,7 +741,7 @@ app.post("/api/auth", async (req, res) => {
     if (!isPanelProtected()) return res.json({ ok: true });
     const pw = await patternAuth.check("password", String(req.body?.password ?? ""), req.ip);
     const token = patternAuth.newSession();
-    res.cookie("xdl_session", token, { httpOnly: true, sameSite: "lax", path: "/" });
+    res.cookie(sessionCookieName(req), token, { httpOnly: true, sameSite: "lax", path: "/" });
     await unlockVaultAfterLogin("password", pw);
     lastPanelActivity = Date.now();
     return res.json({ ok: true, token });
@@ -742,7 +761,7 @@ app.post("/api/auth/pattern", async (req, res) => {
     if (!isPanelProtected()) return res.json({ ok: true });
     const canonical = await patternAuth.check("pattern", req.body?.pattern, req.ip);
     const token = patternAuth.newSession();
-    res.cookie("xdl_session", token, { httpOnly: true, sameSite: "lax", path: "/" });
+    res.cookie(sessionCookieName(req), token, { httpOnly: true, sameSite: "lax", path: "/" });
     await unlockVaultAfterLogin("pattern", canonical);
     lastPanelActivity = Date.now();
     return res.json({ ok: true, token });
@@ -753,8 +772,8 @@ app.post("/api/auth/pattern", async (req, res) => {
 app.post("/api/auth/logout", (req, res) => {
   const cookies = parseCookies(req.headers.cookie);
   patternAuth.endSession(req.headers["x-xdl-session"]);
-  patternAuth.endSession(cookies.xdl_session);
-  res.clearCookie("xdl_session", { path: "/" });
+  patternAuth.endSession(cookies[sessionCookieName(req)]);
+  res.clearCookie(sessionCookieName(req), { path: "/" });
   res.json({ ok: true });
 });
 
@@ -803,6 +822,14 @@ app.get("/vnc/status", async (_req, res) => {
 });
 
 // ---- Auth middleware: everything below this line requires a password when set ----
+// Session cookie name per browser-facing port: cookies are shared by every
+// port on a host, so two installs (e.g. :6768 and a test copy on :6899)
+// would otherwise overwrite each other's session and media stops loading.
+function sessionCookieName(req) {
+  const host = String((req && req.headers && req.headers.host) || "");
+  const m = /:(\d{1,5})$/.exec(host);
+  return `xdl_session_${m ? m[1] : "80"}`;
+}
 function parseCookies(header) {
   const out = {};
   if (!header) return out;
@@ -832,11 +859,11 @@ app.use((req, res, next) => {
   // which a form or page on another origin/port cannot send (CSRF).
   const cookies = parseCookies(req.headers.cookie);
   const headerOk = patternAuth.validSession(req.headers["x-xdl-session"]);
-  const cookieOk = patternAuth.validSession(cookies.xdl_session);
+  const cookieOk = patternAuth.validSession(cookies[sessionCookieName(req)]);
   const isRead = req.method === "GET" || req.method === "HEAD";
   const authed = headerOk || (isRead && cookieOk);
-  // Older builds stored the plain password in this cookie — drop stale ones.
-  if (cookies.xdl_session && !cookieOk) res.clearCookie("xdl_session", { path: "/" });
+  // Drop an expired/invalid session cookie.
+  if (cookies[sessionCookieName(req)] && !cookieOk) res.clearCookie(sessionCookieName(req), { path: "/" });
   if (authed) {
     // Idle auto-lock clock: background polls don't count as activity.
     if (req.path !== "/api/vault/status" && req.path !== "/api/media/lock/job") lastPanelActivity = Date.now();
@@ -882,16 +909,20 @@ app.use("/media", async (req, res, next) => {
   if (!key) return res.status(423).json({ ok: false, error: "media vault is locked — unlock it with your password or pattern" });
   const h = info.header;
   const total = h.plainSize;
+  // Hidden-name file (plan 041): no extension on disk — the type and the
+  // download name come from the real name stored inside.
+  const realName = (await mediaVault.fileName(fullPath).catch(() => null)) || path.basename(fullPath);
+  if (String(req.query?.download || "") === "1") res.attachment(realName);
   try {
     let type = null;
-    if (/\.gif$/i.test(fullPath) && total >= 8) {
+    if (/\.gif$/i.test(realName) && total >= 8) {
       // Same sniff as the static route: mp4 bytes saved as .gif.
       const parts = [];
       for await (const p of mediaCrypto.decryptRange(fullPath, key, { start: 0, end: 11, header: h })) parts.push(p);
       const head = Buffer.concat(parts);
       if (head.length >= 8 && head.subarray(4, 8).toString("latin1") === "ftyp") type = "video/mp4";
     }
-    res.type(type || path.extname(fullPath) || "application/octet-stream");
+    res.type(type || path.extname(realName) || "application/octet-stream");
     res.setHeader("Accept-Ranges", "bytes");
     res.setHeader("Cache-Control", "private, no-store");
     res.setHeader("X-Xdl-Locked", "1");
@@ -1056,15 +1087,29 @@ async function listMediaDir(resolved, flat) {
     it.locked = true;
     it.size = info.header.plainSize;
     if (info.header.createdMs > 0) it.created = new Date(info.header.createdMs).toISOString();
+    // Hidden name (plan 041): the real name, only while the vault is unlocked.
+    const real = await mediaVault.fileName(full).catch(() => null);
+    if (real) it.displayName = real;
   });
+  // Poster pairing by the shown name: hidden-name files pair through their
+  // real names ("Trip.mp4" + "Trip-poster.jpg"), plain files by disk name.
+  const shownKey = (it) => {
+    const key = String(it.rel || it.name);
+    const slash = key.lastIndexOf("/");
+    return { dirPart: key.slice(0, slash + 1), shown: it.displayName || key.slice(slash + 1) };
+  };
   const posterByStem = new Map();
   for (const it of items) {
-    const m = /^(.*)-poster\.(jpe?g|png|webp|avif|gif)$/i.exec(it.rel || it.name);
-    if (m && !posterByStem.has(m[1].toLowerCase())) posterByStem.set(m[1].toLowerCase(), it);
+    if (it.dir) continue;
+    const { dirPart, shown } = shownKey(it);
+    const stem = posterStemOfName(shown);
+    const full = stem == null ? null : `${dirPart}${stem}`.toLowerCase();
+    if (full != null && !posterByStem.has(full)) posterByStem.set(full, it);
   }
   for (const it of items) {
     if (it.dir) continue;
-    const key = (it.rel || it.name).replace(/\.[^.]+$/, "").toLowerCase();
+    const { dirPart, shown } = shownKey(it);
+    const key = `${dirPart}${shown.replace(/\.[^.]+$/, "")}`.toLowerCase();
     const poster = posterByStem.get(key);
     it.thumb = poster ? (poster.rel || poster.name) : null;
   }
@@ -1170,7 +1215,7 @@ async function runDimsWarmQueue() {
       const batch = dimsWarmQueue.splice(0, DIMS_PROBE_CONCURRENCY);
       const results = await Promise.all(batch.map(async (e) => {
         try {
-          if (!DIMS_PROBEABLE_EXT.test(e.key)) return null;
+          if (!DIMS_PROBEABLE_EXT.test(await realNameOf(e.fullPath, e.key))) return null;
           // Encrypted + vault locked: ffprobe would only get a 423, so skip.
           const lk = await mediaVault.fileInfo(e.fullPath).catch(() => null);
           if (lk && lk.locked && !(await mediaVault.decryptKey())) return null;
@@ -1672,8 +1717,7 @@ app.post("/api/media/move", async (req, res) => {
       // Companion poster/thumbnail (<stem>-poster.<img>) travels with the
       // file: same skip-on-collision policy, sidecar cleanup per poster.
       try {
-        const siblings = await fs.readdir(path.dirname(src));
-        const posters = findCompanionPosters(siblings, base);
+        const posters = await companionPosterNames(path.dirname(src), base, await realNameOrNull(dest));
         if (posters.length) entry.posters = [];
         for (const poster of posters) {
           const pSrc = path.join(path.dirname(src), poster);
@@ -1712,9 +1756,127 @@ async function purgePlainCachesFor(fullPath, beforeStat) {
     await fs.unlink(path.join(gifCacheDir, `${gifHash}.mp4`)).catch(() => {});
   } catch {}
 }
-// Encrypt ("lock") or decrypt ("unlock") one file in place. Returns
-// "done" | "skipped" | "missing"; throws on failure.
-async function lockMediaFile(fullPath, action) {
+// Lock/unlock renames a file inside its folder (plan 041: hidden names).
+// Playlists, the size cache, custom order and stacks follow it in place.
+async function renameMediaKeyInPlace(oldRel, newRel) {
+  if (!oldRel || !newRel || oldRel === newRel) return;
+  const oldBase = path.posix.basename(oldRel);
+  const newBase = path.posix.basename(newRel);
+  const parent = path.posix.dirname(oldRel);
+  const folderKey = parent === "." ? "" : parent;
+  try {
+    await withPlaylistFile(async () => {
+      const data = await loadPlaylistsRaw();
+      let mutated = false;
+      for (const pl of data.playlists) {
+        for (const it of pl.items) if (it.key === oldRel) { it.key = newRel; mutated = true; }
+      }
+      if (mutated) await savePlaylistsRaw(data);
+    });
+  } catch {}
+  try {
+    const dims = await loadMediadims();
+    if (dims[oldRel]) {
+      dims[newRel] = dims[oldRel];
+      delete dims[oldRel];
+      await saveMediadims();
+    }
+  } catch {}
+  try {
+    const scopes = await loadMediaorder();
+    let mutated = false;
+    for (const [scope, arr] of Object.entries(scopes)) {
+      if (!Array.isArray(arr)) continue;
+      const pairs = [];
+      if (scope === mediaorderScope(folderKey, false)) pairs.push([oldBase, newBase]);
+      if (scope.startsWith("flat:")) {
+        const f = scope.slice(5);
+        pairs.push([oldRel, newRel]);
+        if (f && oldRel.startsWith(`${f}/`)) pairs.push([oldRel.slice(f.length + 1), newRel.slice(f.length + 1)]);
+      }
+      for (const [from, to] of pairs) {
+        const at = arr.indexOf(from);
+        if (at !== -1) { arr[at] = to; mutated = true; }
+      }
+    }
+    if (mutated) await saveMediaorder();
+  } catch {}
+  try {
+    const dir = path.join(mediaDir, ...folderKey.split("/").filter(Boolean));
+    await withStacksFile(dir, async () => {
+      for (const s of await readStacksInFolder(dir)) {
+        if (!s.items.includes(oldBase)) continue;
+        const full = path.join(dir, s.id);
+        const data = parseStackFile(await fs.readFile(full, "utf8"));
+        data.items = data.items.map((x) => (x === oldBase ? newBase : x));
+        await fs.writeFile(full, JSON.stringify(data, null, 2), "utf8");
+      }
+    });
+  } catch {}
+}
+// Put a finished temp file in place under `wanted` in `dir` without ever
+// overwriting: link() fails with EEXIST when the name is taken, then
+// `next(name)` picks another. Drives without hard links fall back to a
+// checked rename. Returns the final path.
+async function commitTempAs(tmp, dir, wanted, next) {
+  let name = wanted;
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const candidate = path.join(dir, name);
+    try {
+      await fs.link(tmp, candidate);
+      await fs.unlink(tmp).catch(() => {});
+      return candidate;
+    } catch (e) {
+      if (e.code === "EEXIST") { name = await next(name); continue; }
+      if (e.code !== "EPERM" && e.code !== "ENOTSUP" && e.code !== "EOPNOTSUPP" && e.code !== "ENOSYS") throw e;
+      if (await fs.lstat(candidate).catch(() => null)) { name = await next(name); continue; }
+      await fs.rename(tmp, candidate);
+      return candidate;
+    }
+  }
+  throw new Error("could not find a free file name");
+}
+// "<stem>-poster.<img>" (or "<code>-poster") next to a file with that stem:
+// the poster follows its file's name (it's renamed together with it), so it's
+// locked/unlocked in place. Returns the partner's path or null.
+async function posterPartnerOf(fullPath) {
+  const base = path.basename(fullPath);
+  const pStem = posterStemOfName(base);
+  if (pStem == null) return null;
+  const stem = pStem.toLowerCase();
+  const siblings = await fs.readdir(path.dirname(fullPath)).catch(() => []);
+  for (const n of siblings) {
+    if (n === base || n.startsWith(".") || posterStemOfName(n) != null || !mediaCrypto.isLockableName(n)) continue;
+    if (posterStemOf(n).toLowerCase() === stem) return path.join(path.dirname(fullPath), n);
+  }
+  return null;
+}
+// The name to read a file's type from: the real name stored inside a
+// hidden-name file (when the vault is unlocked), else the name on disk.
+async function realNameOf(fullPath, fallback) {
+  if (mediaCrypto.isCodeName(path.basename(fullPath))) {
+    const real = await mediaVault.fileName(fullPath).catch(() => null);
+    if (real) return real;
+  }
+  return fallback == null ? path.basename(fullPath) : String(fallback);
+}
+async function keepDimsFresh(fullPath) {
+  try {
+    const relKey = mediaRelOf(fullPath, mediaDir);
+    const dims = await loadMediadims();
+    if (dims[relKey]) {
+      const st = await fs.stat(fullPath);
+      dims[relKey] = { ...dims[relKey], size: st.size, mtimeMs: st.mtimeMs };
+      await saveMediadims();
+    }
+  } catch {}
+}
+// Encrypt ("lock") or decrypt ("unlock") one file. Locking hides the name:
+// the file gets a random code name (same extension) and the real name goes
+// into the encrypted header; unlocking puts the real name back (plan 041).
+// Companion posters are renamed with their file. Returns "done" | "skipped"
+// | "missing"; throws on failure.
+async function lockMediaFile(fullPath, action, out = null) {
   if (!isInsideMedia(fullPath, mediaDir)) throw new Error("invalid path");
   const name = path.basename(fullPath);
   if (!mediaCrypto.isLockableName(name)) return "skipped";
@@ -1723,46 +1885,122 @@ async function lockMediaFile(fullPath, action) {
   if (lst && lst.isSymbolicLink()) return "skipped";
   const info = await mediaVault.fileInfo(fullPath);
   if (!info) return "missing";
-  if ((action === "lock") === info.locked) return "skipped";
   // Locking needs only the public key (works while the vault is locked);
   // unlocking needs the private key (opened by the password or pattern).
-  const key = action === "lock" ? await mediaVault.encryptKey() : await mediaVault.decryptKey();
-  if (!key) throw Object.assign(new Error("media vault is locked — unlock it with your password or pattern"), { status: 423 });
-  if (action === "lock") await mediaVault.ensureCopyFor(fullPath);
-  let result;
+  const priv = await mediaVault.decryptKey();
   if (action === "lock") {
-    const st = await fs.stat(fullPath);
-    result = await mediaCrypto.encryptFileInPlace(fullPath, key, { createdMs: mediaVault.createdOverride(st) || undefined });
-    await purgePlainCachesFor(fullPath, result.before);
-  } else {
-    result = await mediaCrypto.decryptFileInPlace(fullPath, key);
-    await mediaVault.setCreatedOverride(result.stat, result.createdMs);
+    const pub = await mediaVault.encryptKey();
+    if (info.locked) return "skipped";
+    await mediaVault.ensureCopyFor(fullPath);
+    const finalPath = await lockOneFile(fullPath, info, pub, priv);
+    if (out) out.path = finalPath;
+    return "done";
   }
-  mediaVault.forget(fullPath);
-  // Keep the dims cache valid: same picture, new on-disk size.
-  try {
-    const relKey = mediaRelOf(fullPath, mediaDir);
-    const dims = await loadMediadims();
-    if (dims[relKey]) {
-      dims[relKey] = { ...dims[relKey], size: result.stat.size, mtimeMs: result.stat.mtimeMs };
-      await saveMediadims();
-    }
-  } catch {}
+  if (!info.locked) return "skipped";
+  if (!priv) throw Object.assign(new Error("media vault is locked — unlock it with your password or pattern"), { status: 423 });
+  const finalPath = await unlockOneFile(fullPath, info, priv);
+  if (out) out.path = finalPath;
   return "done";
+}
+// Encrypt `fullPath` (plain, or an old v02 file) into a temp file with
+// `realName` stored inside. Returns { tmp, before, wasPlain }.
+async function encryptForLock(fullPath, info, pub, priv, realName) {
+  const st = await fs.stat(fullPath);
+  const r = await mediaCrypto.encryptToTemp(fullPath, pub, { createdMs: mediaVault.createdOverride(st) || undefined, name: realName });
+  return { ...r, wasPlain: true };
+}
+// Every locked file — posters too — gets its own unrelated random code, so the
+// drive shows neither names, types nor which file is whose thumbnail. The
+// pairing lives only in the encrypted real names ("Trip.mp4" +
+// "Trip-poster.jpg").
+async function lockOneFile(fullPath, info, pub, priv) {
+  const dir = path.dirname(fullPath);
+  const oldName = path.basename(fullPath);
+  const oldRel = mediaRelOf(fullPath, mediaDir);
+  // A poster just made for a hidden-name video ("<code>-poster.jpg") stores
+  // the video's real stem, so it pairs again by real name.
+  let realName = oldName;
+  const partner = await posterPartnerOf(fullPath);
+  if (partner && mediaCrypto.isCodeName(path.basename(partner))) {
+    const partnerReal = await mediaVault.fileName(partner).catch(() => null);
+    if (partnerReal) realName = `${posterStemOf(partnerReal)}-poster${path.extname(oldName)}`;
+  }
+  const r = await encryptForLock(fullPath, info, pub, priv, realName);
+  let finalPath;
+  try {
+    finalPath = await commitTempAs(r.tmp, dir, mediaCrypto.codeName(), async () => mediaCrypto.codeName());
+  } catch (e) {
+    await fs.unlink(r.tmp).catch(() => {});
+    throw e;
+  }
+  await fs.unlink(fullPath);
+  if (r.wasPlain) await purgePlainCachesFor(fullPath, r.before);
+  mediaVault.forget(fullPath);
+  mediaVault.forget(finalPath);
+  await renameMediaKeyInPlace(oldRel, mediaRelOf(finalPath, mediaDir));
+  await keepDimsFresh(finalPath);
+  return finalPath;
+}
+async function unlockOneFile(fullPath, info, priv) {
+  const dir = path.dirname(fullPath);
+  const oldName = path.basename(fullPath);
+  const oldRel = mediaRelOf(fullPath, mediaDir);
+  const r = await mediaCrypto.decryptToTemp(fullPath, priv);
+  const real = safeStoredName(r.name) || oldName;
+  let finalPath;
+  try {
+    if (real === oldName) {
+      await fs.rename(r.tmp, fullPath);
+      finalPath = fullPath;
+    } else {
+      finalPath = await commitTempAs(r.tmp, dir, await uniqueMediaName(dir, real), (n) => uniqueMediaName(dir, n));
+    }
+  } catch (e) {
+    await fs.unlink(r.tmp).catch(() => {});
+    throw e;
+  }
+  if (finalPath !== fullPath) await fs.unlink(fullPath);
+  await mediaVault.setCreatedOverride(await fs.stat(finalPath), r.createdMs);
+  mediaVault.forget(fullPath);
+  mediaVault.forget(finalPath);
+  if (finalPath !== fullPath) await renameMediaKeyInPlace(oldRel, mediaRelOf(finalPath, mediaDir));
+  await keepDimsFresh(finalPath);
+  return finalPath;
 }
 // Poster generation that works for encrypted videos too: ffmpeg reads the
 // decrypting URL and the poster gets encrypted like its video.
 async function generatePosterForMedia(fullPath, opts = {}) {
   const input = await ffInputFor(fullPath);
-  const poster = await generatePosterThumbnail(fullPath, { ...opts, input: input.locked ? { pre: input.pre, src: input.src } : null });
+  const poster = await generatePosterThumbnail(fullPath, { ...opts, input: input.locked ? { pre: input.pre, src: input.src } : null, isVideo: input.locked ? isVideoFileName(await realNameOf(fullPath)) : false });
   if (poster && input.locked) {
     try { await lockMediaFile(poster, "lock"); } catch (e) { console.error(`[lock] poster encrypt failed: ${e.message}`); }
   }
   return poster;
 }
+// Posters of a file in `dir`: "<stem>-poster.<img>" on disk, plus hidden-name
+// posters whose real name is "<real stem>-poster.<img>" (needs the vault
+// unlocked). `realName` = the file's real name (null if unknown).
+async function companionPosterNames(dir, base, realName) {
+  const siblings = await fs.readdir(dir).catch(() => []);
+  const out = findCompanionPosters(siblings, base);
+  if (realName) {
+    const stem = posterStemOf(realName).toLowerCase();
+    for (const n of siblings) {
+      if (n === base || out.includes(n) || !mediaCrypto.isCodeName(n)) continue;
+      const rn = await mediaVault.fileName(path.join(dir, n)).catch(() => null);
+      const ps = rn ? posterStemOfName(rn) : null;
+      if (ps != null && ps.toLowerCase() === stem) out.push(n);
+    }
+  }
+  return out;
+}
+async function realNameOrNull(fullPath) {
+  const base = path.basename(fullPath);
+  return mediaCrypto.isCodeName(base) ? mediaVault.fileName(fullPath).catch(() => null) : base;
+}
 async function companionPosterPaths(fullPath) {
-  const siblings = await fs.readdir(path.dirname(fullPath)).catch(() => []);
-  return findCompanionPosters(siblings, path.basename(fullPath)).map((p) => path.join(path.dirname(fullPath), p));
+  const dir = path.dirname(fullPath);
+  return (await companionPosterNames(dir, path.basename(fullPath), await realNameOrNull(fullPath))).map((n) => path.join(dir, n));
 }
 async function walkLockable(dir, out, depth = 0) {
   if (depth > 32 || out.length > 200000) return;
@@ -1833,23 +2071,61 @@ async function runLockJob(job, targets) {
   job.finishedAt = new Date().toISOString();
   broadcastLockJob(true);
 }
-// Downloads finished with ENCRYPT_NEW_MEDIA=1: lock each file and its poster.
+// Downloads finished with ENCRYPT_NEW_MEDIA=1: lock each file and its poster
+// (they get code names). Returns Map(original path string → new path, same
+// absolute/relative style) for callers that saved the old path.
 async function autoEncryptDownloaded(paths, log) {
-  if (!mediaVault.encryptNewEnabled() || !paths || !paths.length) return;
+  const renamed = new Map();
+  if (!mediaVault.encryptNewEnabled() || !paths || !paths.length) return renamed;
   for (const p of new Set(paths)) {
     const full = path.isAbsolute(p) ? p : path.resolve(rootDir, p);
     if (!isInsideMedia(full, mediaDir)) continue;
     for (const target of [full, ...(await companionPosterPaths(full))]) {
       try {
-        const r = await lockMediaFile(target, "lock");
-        if (r === "done" && log) log(`[encrypt] locked ${mediaRelOf(target, mediaDir)}`);
+        const out = {};
+        const r = await lockMediaFile(target, "lock", out);
+        if (r === "done" && target === full && out.path && out.path !== full) renamed.set(p, path.isAbsolute(p) ? out.path : path.relative(rootDir, out.path));
+        if (r === "done" && log) log(`[encrypt] locked ${target === full ? "the download" : "its poster"}`);
       } catch (e) {
         console.error(`[encrypt] ${target}: ${e.message}`);
         if (log) log(`[encrypt] failed for ${path.basename(target)}: ${e.message}`);
       }
     }
   }
+  return renamed;
 }
+// First-run wizard (plan 043): only while no panel password is set. Tells a
+// brand-new install from a returning one (media already there) and from a
+// returning one with encrypted files (key file on the drive).
+app.get("/api/setup/state", async (_req, res) => {
+  try {
+    if (isPanelProtected()) return res.json({ ok: true, needsSetup: false });
+    await mediaVault.init();
+    const st = mediaVault.status();
+    const CAP = 50000;
+    let files = 0, folders = 0, encrypted = 0;
+    const stack = [mediaDir];
+    while (stack.length && files < CAP) {
+      const dir = stack.pop();
+      const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+      for (const en of entries) {
+        if (en.name.startsWith(".") || en.isSymbolicLink()) continue;
+        if (en.isDirectory()) { folders += 1; stack.push(path.join(dir, en.name)); continue; }
+        if (!en.isFile() || /\.xdlstack$/i.test(en.name)) continue;
+        files += 1;
+        if (mediaCrypto.isCodeName(en.name)) encrypted += 1;
+      }
+    }
+    res.json({
+      ok: true,
+      needsSetup: true,
+      kind: st.exists ? "encrypted" : files ? "returning" : "new",
+      files, folders, encrypted, capped: files >= CAP,
+      patternSlot: st.patternSlot, unlocked: st.unlocked,
+      keyProblem: st.error || null,
+    });
+  } catch (e) { return vaultHttpError(res, e); }
+});
 // Session probe for pattern logins (no stored password to replay).
 app.get("/api/auth/session", (_req, res) => res.json({ ok: true }));
 // Settings → Password & pattern (plan 040 v2).
@@ -1863,9 +2139,19 @@ app.post("/api/security/password", async (req, res) => {
     const next = String(req.body?.newPassword ?? "");
     let current = null;
     if (isPanelProtected()) current = await patternAuth.check("password", String(req.body?.currentPassword ?? ""), req.ip);
+    else if (mediaVault.exists() && !mediaVault.status().unlocked) {
+      // Fresh install on an encrypted drive: the first password has to be
+      // the one the drive was encrypted with — it opens the files and becomes
+      // the panel password. (Unlocked with the pattern first: any new password.)
+      if (!next) return res.status(400).json({ ok: false, error: "Enter the password this drive was encrypted with", code: "NEEDS_PASSWORD" });
+      await patternAuth.checkWith(req.ip, "That's not the password this drive was encrypted with", () => mediaVault.unlock("password", next));
+      console.log("[vault] restored on a fresh install with the drive's password");
+    }
     if (!next) {
       if (mediaVault.exists()) return res.status(400).json({ ok: false, error: "Encrypted media exists — the panel password cannot be removed" });
       await patternAuth.setPassword("");
+      setupKeys.password = null;
+      setupKeys.pattern = null;
       patternAuth.endAllSessions();
       return res.json({ ok: true, ...patternAuth.publicSettings() });
     }
@@ -1875,13 +2161,20 @@ app.post("/api/security/password", async (req, res) => {
       // crash in between can't leave files unopenable.
       await mediaVault.setSlot("password", next, { currentPassword: current, keepPrevious: true });
     }
-    const settings = await patternAuth.setPassword(next);
+    let settings = await patternAuth.setPassword(next);
+    if (!mediaVault.exists()) prepareSetupKey("password", next);
+    if (restoredPattern && !current) {
+      // Restored with the pattern: it becomes a login method again.
+      await patternAuth.setPattern(restoredPattern).catch(() => {});
+      settings = patternAuth.publicSettings();
+    }
+    restoredPattern = null;
     if (mediaVault.exists()) await mediaVault.dropPrevious().catch((e) => console.error(`[vault] could not drop the previous password slot: ${e.message}`));
     // A password change logs out every other session; this browser gets a
     // fresh token (also on the very first password).
     patternAuth.endAllSessions();
     const token = patternAuth.newSession();
-    res.cookie("xdl_session", token, { httpOnly: true, sameSite: "lax", path: "/" });
+    res.cookie(sessionCookieName(req), token, { httpOnly: true, sameSite: "lax", path: "/" });
     res.json({ ok: true, ...settings, token });
   } catch (e) { return vaultHttpError(res, e); }
 });
@@ -1890,11 +2183,12 @@ app.post("/api/security/pattern", async (req, res) => {
   try {
     const pw = await patternAuth.check("password", String(req.body?.password ?? ""), req.ip);
     const canonical = await patternAuth.setPattern(req.body?.pattern ?? null);
+    if (!mediaVault.exists()) prepareSetupKey("pattern", canonical);
     if (mediaVault.exists()) await mediaVault.setSlot("pattern", canonical, { currentPassword: pw });
     // A pattern change logs out every other session too.
     patternAuth.endAllSessions();
     const token = patternAuth.newSession();
-    res.cookie("xdl_session", token, { httpOnly: true, sameSite: "lax", path: "/" });
+    res.cookie(sessionCookieName(req), token, { httpOnly: true, sameSite: "lax", path: "/" });
     res.json({ ok: true, ...patternAuth.publicSettings(), vault: vaultStatusFull(), token });
   } catch (e) { return vaultHttpError(res, e); }
 });
@@ -1919,28 +2213,49 @@ app.get("/api/vault/status", async (_req, res) => {
   res.json({ ok: true, ...vaultStatusFull() });
 });
 // One-time setup: a random key pair is created and sealed with the panel
-// password (and later the pattern). The password must be ≥12 characters.
+// password (and later the pattern). No length rule — Settings shows how long
+// the password would take to crack.
+// Normally just a confirmation: the key derived from the password at login
+// is used. Without one (e.g. logged in before this server start), the
+// password can still be sent.
 app.post("/api/vault/setup", async (req, res) => {
   try {
-    const pw = await patternAuth.check("password", String(req.body?.password ?? ""), req.ip);
-    await mediaVault.setup(pw);
+    if (req.body?.password) {
+      const pw = await patternAuth.check("password", String(req.body.password), req.ip);
+      await mediaVault.setup(pw);
+    } else {
+      const passwordKey = setupKeys.password ? await setupKeys.password.catch(() => null) : null;
+      if (!passwordKey) return res.status(400).json({ ok: false, code: "NEEDS_PASSWORD", error: "Enter your password once to turn on encryption — log in with your password (not the pattern) to skip this" });
+      const patternKey = setupKeys.pattern && patternAuth.publicSettings().pattern ? await setupKeys.pattern.catch(() => null) : null;
+      await mediaVault.setup({ passwordKey, patternKey });
+    }
+    setupKeys.password = null;
+    setupKeys.pattern = null;
+    console.log("[vault] encryption turned on");
     res.json({ ok: true, ...vaultStatusFull() });
   } catch (e) { return vaultHttpError(res, e); }
 });
-// Upgrade an encryption key from the earlier separate-passphrase version:
-// same key pair (so already-locked files stay readable), sealed with the
-// panel password.
-app.post("/api/vault/upgrade", async (req, res) => {
-  try {
-    const pw = await patternAuth.check("password", String(req.body?.password ?? ""), req.ip);
-    await mediaVault.upgrade(String(req.body?.passphrase ?? ""), pw);
-    console.log("[vault] upgraded from the separate-passphrase format");
-    res.json({ ok: true, ...vaultStatusFull() });
-  } catch (e) { return vaultHttpError(res, e); }
-});
+// Pattern used to restore a fresh install (until the first password is set).
+let restoredPattern = null;
 // Unlock with the password or the pattern (rate-limited).
 app.post("/api/vault/unlock", async (req, res) => {
   try {
+    if (!isPanelProtected()) {
+      // Fresh install on an encrypted drive, restoring with the pattern: it is
+      // checked against the drive's key file. A password is set next.
+      if (!mediaVault.exists()) return res.status(404).json({ ok: false, error: "Encryption is not set up", code: "NO_VAULT" });
+      if (!req.body?.pattern) return res.status(400).json({ ok: false, error: "Set the drive's password in Settings to restore", code: "NEEDS_PASSWORD" });
+      if (!mediaVault.status().patternSlot) return res.status(400).json({ ok: false, error: "This drive can only be opened with its password", code: "NO_PATTERN_SLOT" });
+      let canonical;
+      try { canonical = normalizePattern(req.body.pattern); } catch (e) { return res.status(400).json({ ok: false, error: e.message, code: "BAD_PATTERN" }); }
+      await patternAuth.checkWith(req.ip, "That's not the pattern this drive was encrypted with", () => mediaVault.unlock("pattern", canonical));
+      // Kept (in memory only) until the password is set, then saved as the
+      // login pattern too — it already opens the drive.
+      restoredPattern = { size: Number(req.body.pattern.size), dots: req.body.pattern.dots.map(Number) };
+      console.log("[vault] restored on a fresh install with the drive's pattern");
+      lastPanelActivity = Date.now();
+      return res.json({ ok: true, ...vaultStatusFull() });
+    }
     if (req.body?.pattern) {
       const canonical = await patternAuth.check("pattern", req.body.pattern, req.ip);
       if (!mediaVault.status().patternSlot) return res.status(400).json({ ok: false, error: "Your pattern doesn't unlock files yet — use the password, then re-draw the pattern in Settings" });
@@ -2039,10 +2354,14 @@ app.post("/api/media/upload", async (req, res) => {
     await fs.mkdir(targetDir, { recursive: true });
     const encrypt = mediaVault.encryptNewEnabled();
     const key = encrypt ? await mediaVault.encryptKey() : null;
-    let name = await uniqueMediaName(targetDir, segs[segs.length - 1]);
+    const wanted = segs[segs.length - 1];
+    // Encrypted uploads get a random code name; the real one is stored
+    // inside the encrypted file (plan 041).
+    const nextName = (n) => (key ? mediaCrypto.codeName() : uniqueMediaName(targetDir, n));
+    let name = key ? mediaCrypto.codeName() : await uniqueMediaName(targetDir, wanted);
     tmp = mediaCrypto.tempSiblingPath(path.join(targetDir, name), "xupl");
     if (key) {
-      await mediaCrypto.encryptIterableToFile(req, tmp, key, { createdMs: Date.now() });
+      await mediaCrypto.encryptIterableToFile(req, tmp, key, { createdMs: Date.now(), name: wanted });
     } else {
       await require("stream/promises").pipeline(req, fsSync.createWriteStream(tmp, { flags: "wx" }));
     }
@@ -2057,15 +2376,15 @@ app.post("/api/media/upload", async (req, res) => {
         finalPath = candidate;
       } catch (e) {
         if (e.code !== "EEXIST") throw e;
-        name = await uniqueMediaName(targetDir, name);
+        name = await nextName(name);
       }
     }
     if (!finalPath) throw new Error("could not find a free file name");
     await fs.unlink(tmp).catch(() => {});
     tmp = null;
     const rel = mediaRelOf(finalPath, mediaDir);
-    res.json({ ok: true, name, rel, locked: !!key });
-    if (isVideoFileName(name)) {
+    res.json({ ok: true, name, rel, locked: !!key, displayName: key ? wanted : name });
+    if (isVideoFileName(key ? segs[segs.length - 1] : name)) {
       // Encrypted while the vault is locked: ffmpeg can't read it yet, so the
       // poster is made right after the next unlock.
       if (key && !(await mediaVault.decryptKey())) pendingPosters.add(finalPath);
@@ -2188,6 +2507,8 @@ app.get("/api/playlists/:id", async (req, res) => {
         entry.locked = true;
         entry.size = lockInfo.header.plainSize;
         if (lockInfo.header.createdMs > 0) entry.created = new Date(lockInfo.header.createdMs).toISOString();
+        const real = await mediaVault.fileName(fullPath, { size: stat.size, mtimeMs: stat.mtimeMs }).catch(() => null);
+        if (real) entry.displayName = real;
       }
       enriched.push(entry);
     }
@@ -2624,7 +2945,7 @@ app.post("/api/stacks/:id/move", async (req, res) => {
       // Poster companions travel with the file (same skip-on-collision
       // policy as POST /api/media/move).
       try {
-        const posters = findCompanionPosters(entries, item);
+        const posters = await companionPosterNames(dir, item, await realNameOrNull(dest));
         for (const poster of posters) {
           const pSrc = path.join(dir, poster);
           const pDest = path.join(targetDir, poster);
@@ -2661,7 +2982,7 @@ app.get("/api/gifvideo", async (req, res) => {
     }
     const folder = String(req.query?.folder || "");
     const name = String(req.query?.name || "");
-    if (!name || !/\.gif$/i.test(name)) {
+    if (!name || !(/\.gif$/i.test(name) || mediaCrypto.isCodeName(path.basename(name)))) {
       return res.status(400).json({ ok: false, error: "name must be a .gif file" });
     }
     const dir = resolveMediaOutputDir(folder);
@@ -2800,7 +3121,7 @@ app.get("/api/mediathumb", async (req, res) => {
     const stat = await fs.stat(srcPath).catch(() => null);
     if (!stat) return res.status(404).json({ ok: false, error: "not found" });
     if (!stat.isFile()) return res.status(400).json({ ok: false, error: "not a file" });
-    const ext = String(key.split(".").pop() || "").toLowerCase();
+    const ext = String((await realNameOf(srcPath, key)).split(".").pop() || "").toLowerCase();
     if (!THUMB_VIDEO_EXTS.has(ext)) {
       return res.status(404).json({ ok: false, error: "not a video file" });
     }
@@ -2974,15 +3295,10 @@ app.post("/api/posters/generate", async (req, res) => {
       for (const { key, full } of resolvedKeys) {
         const st = await fs.stat(full).catch(() => null);
         if (!st || !st.isFile()) { skippedCount += 1; continue; }
-        if (!isVideoFileName(path.basename(full))) { skippedCount += 1; continue; }
+        if (!isVideoFileName(await realNameOf(full))) { skippedCount += 1; continue; }
         let hasPoster = false;
         if (mode === "missing") {
-          const stem = posterStemOf(path.basename(full)).toLowerCase();
-          const siblings = await fs.readdir(path.dirname(full)).catch(() => []);
-          hasPoster = siblings.some((n) => {
-            const m = POSTER_SIBLING_RE.exec(n);
-            return m && m[1].toLowerCase() === stem;
-          });
+          hasPoster = (await companionPosterPaths(full)).length > 0;
           if (hasPoster) { skippedCount += 1; continue; }
         }
         planned.push({ key, full });
@@ -2991,6 +3307,14 @@ app.post("/api/posters/generate", async (req, res) => {
       const { targets, skipped } = selectPosterTargets(names, mode);
       skippedCount = skipped.length;
       for (const name of targets) planned.push({ key: name, full: path.join(dir, name) });
+      // Hidden-name videos (plan 041): no extension on disk, so check their
+      // real name (needs the vault unlocked).
+      for (const name of names) {
+        if (!mediaCrypto.isCodeName(name)) continue;
+        if (!isVideoFileName(await realNameOf(path.join(dir, name)))) continue;
+        if (mode === "missing" && (await companionPosterPaths(path.join(dir, name))).length) { skippedCount += 1; continue; }
+        planned.push({ key: name, full: path.join(dir, name) });
+      }
     }
     // Stream one NDJSON progress line per file, then a final done line, so the
     // popup can show live progress instead of an indeterminate wait.
@@ -4324,7 +4648,7 @@ wss = new WebSocketServer({
       }
       if (!isPanelProtected()) return done(true);
       const cookies = parseCookies(req.headers.cookie);
-      if (patternAuth.validSession(cookies.xdl_session) || patternAuth.validSession(req.headers["x-xdl-session"])) return done(true);
+      if (patternAuth.validSession(cookies[sessionCookieName(req)]) || patternAuth.validSession(req.headers["x-xdl-session"])) return done(true);
       return done(false, 401, "Unauthorized");
     } catch {
       return done(false, 401, "Unauthorized");
