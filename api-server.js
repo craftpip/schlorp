@@ -1394,7 +1394,22 @@ app.delete("/api/media", async (req, res) => {
     const stat = await fs.stat(fullPath).catch(() => null);
     if (!stat) return res.status(404).json({ ok: false, error: "not found" });
     if (stat.isDirectory()) return res.status(400).json({ ok: false, error: "use folder delete for dirs" });
+    // Its thumbnail goes too. Found before the file is gone: encrypted files
+    // pair with their poster through the real names stored inside.
+    const posters = await companionPosterPaths(fullPath).catch(() => []);
     await fs.unlink(fullPath);
+    mediaVault.forget(fullPath);
+    const postersDeleted = [];
+    for (const p of posters) {
+      try {
+        await fs.unlink(p);
+        mediaVault.forget(p);
+        postersDeleted.push(path.basename(p));
+        const pRel = mediaRelOf(p, mediaDir);
+        const dims = await loadMediadims().catch(() => null);
+        if (dims && dims[pRel]) { delete dims[pRel]; await saveMediadims().catch(() => {}); }
+      } catch {}
+    }
     // Prune from playlists (best-effort)
     try {
       const canonical = rel.split(path.sep).join("/");
@@ -1459,7 +1474,7 @@ app.delete("/api/media", async (req, res) => {
         }
       });
     } catch {}
-    return res.json({ ok: true });
+    return res.json({ ok: true, postersDeleted });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message });
   }

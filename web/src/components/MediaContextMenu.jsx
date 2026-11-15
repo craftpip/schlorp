@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-export default function MediaContextMenu({ menu, onClose, stacks, selCount, onStack, onOpen, onOpenStack, onMove, canMove, moveLabel, onCreateFolder, onDelete, onAddToStack, onRename, onUnstack, onRemoveFromStack, noStacks, onGotoFile, lock, preview, onRenameFolder, onDeleteFolder, download }) {
+export default function MediaContextMenu({ menu, onClose, stacks, selCount, deleteLabel, onStack, onOpen, onOpenStack, onMove, canMove, moveLabel, onCreateFolder, onDelete, onAddToStack, onRename, onUnstack, onRemoveFromStack, noStacks, onGotoFile, lock, preview, onRenameFolder, onDeleteFolder, download }) {
   // `download`: { label, onDownload } for the clicked file(s); never for folders.
   // `preview`: { label, onGenerate } — poster generation for the clicked videos (null hides it).
   // `lock` (plan 039): { available, files: { locked, unlocked }, folderLabel,
@@ -132,7 +132,7 @@ export default function MediaContextMenu({ menu, onClose, stacks, selCount, onSt
           {download && <MenuItem data-testid="media-ctx-download" label={download.label} icon="bi-download" onClick={() => { onClose(); download.onDownload(); }} />}
           {!isPlaylistFile && <MenuItem data-testid="media-ctx-create-folder" label="Create folder" icon="bi-folder-plus" onClick={() => { onClose(); onCreateFolder(); }} />}
           <MenuItem data-testid="media-ctx-move" label={moveLabel || (isPile ? "Move stack" : "Move files")} icon="bi-arrows-move" disabled={!canMove} onClick={() => { onClose(); onMove(); }} />
-          <MenuItem label="Delete" icon="bi-trash" danger onClick={() => { onClose(); onDelete(); }} />
+          <MenuItem data-testid="media-ctx-delete" label={deleteLabel || "Delete"} icon="bi-trash" danger onClick={() => { onClose(); onDelete(); }} />
           {preview && (
             <>
               <Divider />

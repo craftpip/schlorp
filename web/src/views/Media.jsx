@@ -4775,6 +4775,13 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         menu={ctxMenu}
         stacks={stackMenuEntries}
         selCount={selectedKeysForStack.size}
+        deleteLabel={(() => {
+          const e = ctxMenu && ctxMenu.entry;
+          const n = selectedKeysForStack.size;
+          if (!e || e.kind === "pile" || n < 2) return null;
+          if (e.kind === "file" && e.it && !selectedKeysForStack.has(rowKey(e.it))) return null;
+          return `Delete ${n} files`;
+        })()}
         noStacks={inPlaylistView}
         lock={ctxLock}
         preview={ctxPreview}
@@ -4836,8 +4843,13 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         onDelete={() => {
           const entry = ctxMenu && ctxMenu.entry;
           if (!entry) return;
-          if (entry.kind === "file" && entry.it) { setDeleteTarget(entry.it); return; }
           if (entry.kind === "pile") { confirmStackDelete(entry.stackId); return; }
+          // Right-click on a file that is part of a multi-selection: delete the
+          // whole selection (same as Move / Encrypt), not just that file.
+          if (entry.kind === "file" && entry.it) {
+            const sel = [...selectedKeysForStack];
+            if (!(sel.length > 1 && sel.includes(rowKey(entry.it)))) { setDeleteTarget(entry.it); return; }
+          }
           // Empty-area / selection: delete selected files
           const keys = [...selectedKeysForStack];
           const targets = keys.map((k) => filtered.find((it) => rowKey(it) === k)).filter(Boolean);
