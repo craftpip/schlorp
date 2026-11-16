@@ -13,6 +13,7 @@ import MediaContextMenu from "../components/MediaContextMenu.jsx";
 import MoveDialog from "../components/MoveDialog.jsx";
 import { useMediaTasks, MediaTasksPanel, UploadDropOverlay, VaultLockedBanner, filesFromDataTransfer, isOsFileDrag } from "../components/MediaTasksPanel.jsx";
 import { moveKeys, pileLandMember, planDetach, planJoin } from "../lib/stackDrag.js";
+import { roaming as wasdRoaming, leave as wasdLeave, covered as wasdCovered, enter as wasdEnter } from "../lib/wasdNav.js";
 
 const ROT_STORE_KEY = "xdl_viewer_rotations";
 function readMediaRotation(fp) {
@@ -1413,6 +1414,29 @@ const collapseSpreadUnlessMember = (fid) => {
       if (confirmState.open || promptState.open || alertState.open || !!deleteTarget || !!folderDel || !!multiDeleteTarget) return;
       if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable) return;
       const k = e.key;
+      // App-wide WASD navigation (lib/wasdNav.js). While its cursor is out on
+      // the toolbar or the menu these keys are its own, not the selection's.
+      const wasdKey = !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && /^[wasd]$/i.test(k);
+      // The same goes while a menu or dialog covers the page: the cursor works
+      // inside it, and the files underneath stay put.
+      if ((wasdKey || k === " " || k === "Enter") && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && !viewerOpen && (wasdRoaming() || wasdCovered())) return;
+      // And at the top or bottom of the files the selection has nowhere left
+      // to go, so the key carries on to the controls beyond them.
+      if (wasdKey && !viewerOpen && !showHelp && !menuOpen && !thumbGenOpen) {
+        const wdir = { w: "up", s: "down" }[k.toLowerCase()];
+        if (wdir) {
+          let edgeEl = null;
+          if (isGrid) {
+            const current = navSelectedEl();
+            const v = virtNavRef.current;
+            const more = v && v.on && v.win ? (wdir === "down" ? v.win.end < v.rowCount : v.win.start > 0) : false;
+            if (current && !more && !spatialBest(wdir, current, [...document.querySelectorAll(TILE_NAV_Q)])) edgeEl = current;
+          } else if (allSelectable.length && selectedIdx === (wdir === "up" ? 0 : allSelectable.length - 1)) {
+            edgeEl = document.querySelector('[data-testid="media-row"][data-selected="true"]');
+          }
+          if (edgeEl && wasdLeave(edgeEl, wdir)) { e.preventDefault(); return; }
+        }
+      }
       const isUp = k === "ArrowUp" || k === "w" || k === "W";
       const isDown = k === "ArrowDown" || k === "s" || k === "S";
       const isLeft = k === "ArrowLeft" || k === "a" || k === "A";
@@ -1433,6 +1457,20 @@ const collapseSpreadUnlessMember = (fid) => {
         setSelKeys(new Set(selKey ? [selKey] : []));
         setAnchorKey(selKey || null);
         if (hadSpread) return;
+      }
+      // E (or the keyboard's own menu key) opens the right-click menu for the
+      // selected file or folder, as a right-click on it would. Inside the menu
+      // the WASD cursor takes over (lib/wasdNav.js).
+      if ((lowK === "e" || k === "ContextMenu") && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && !wasdCovered() && !wasdRoaming()) {
+        const target = isGrid ? navSelectedEl() : document.querySelector('[data-testid="media-row"][data-selected="true"]');
+        if (target) {
+          e.preventDefault();
+          if (e.repeat) return;
+          const r = target.getBoundingClientRect();
+          target.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: Math.round(r.left + r.width / 2), clientY: Math.round(r.top + r.height / 2), button: 2 }));
+          requestAnimationFrame(() => requestAnimationFrame(wasdEnter));
+          return;
+        }
       }
       // 1 focuses the search / filter bar (opens the overflow menu first
       // on mobile, where the input is hidden while collapsed).
@@ -1628,6 +1666,9 @@ const collapseSpreadUnlessMember = (fid) => {
         else if (lowK === "d" || k === "ArrowRight") moveSelectionSpatial("right", glide);
         else goUp();
       }
+      // With Ctrl / Alt / Cmd held these are someone else's keys (Ctrl+A,
+      // the browser's Alt+arrow back): they must not move or leave the folder.
+      else if (e.ctrlKey || e.altKey || e.metaKey) return;
       else if (isLeft) { e.preventDefault(); goUp(); }
       else if (isUp) { e.preventDefault(); moveSelection(-1, !e.repeat); }
       else if (isDown) { e.preventDefault(); moveSelection(1, !e.repeat); }
@@ -1661,8 +1702,18 @@ const collapseSpreadUnlessMember = (fid) => {
         }
       }
     };
+    // The WASD cursor walked onto a file: it becomes the selection.
+    const onWasdMedia = (e) => {
+      const el = e.detail && e.detail.el;
+      if (!el || viewerOpen) return;
+      keyboardScrollRef.current = "smooth";
+      if (isGrid && el.matches(TILE_NAV_Q)) { landOn(el, e.detail.dir); return; }
+      const fid = el.getAttribute("data-filename");
+      if (fid) selectSingleKey(fid);
+    };
     document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
+    document.addEventListener("wasd:media", onWasdMedia);
+    return () => { document.removeEventListener("keydown", onKey); document.removeEventListener("wasd:media", onWasdMedia); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewerOpen, allSelectable, selectedIdx, searchParams, showHelp, menuOpen, thumbGenOpen, confirmState.open, promptState.open, alertState.open, deleteTarget, folderDel, multiDeleteTarget]);
 
@@ -4420,7 +4471,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
       </div>
 
       <div data-testid="media-breadcrumbs" style={{ display: "flex", gap: 6, flexWrap: "wrap", rowGap: 6, alignItems: "center", marginTop: 8 }}>
-        <div data-testid="media-breadcrumb-path" style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "nowrap", minWidth: 0, overflow: "hidden", flex: "1 1 auto" }}>
+        <div data-testid="media-breadcrumb-path" style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "nowrap", minWidth: 0, overflow: "hidden", flex: "1 1 auto", padding: 6, margin: -6 }}>
         <button data-testid="media-breadcrumb-root" className="btn btn-sm btn-outline-secondary" onClick={() => { setMenuOpen(false); const ns = new URLSearchParams(searchParams); ns.delete("f"); ns.delete("folder"); ns.delete("pl"); ns.delete("p"); ns.delete("flat"); setSearchParams(ns); }} disabled={!folder && !inPlaylistView}><i className="bi bi-house" /> Media</button>
         {!inPlaylistView && crumbs.map((c, i) => (
           <span key={i} data-testid={`media-breadcrumb-${c}`} style={{ display: "flex", alignItems: "center", gap: 6 }}>

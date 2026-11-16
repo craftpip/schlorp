@@ -11,9 +11,11 @@ import Profiles from "./views/Profiles.jsx";
 import Saved from "./views/Saved.jsx";
 import Settings from "./views/Settings.jsx";
 import { loadKbdHints } from "./lib/kbdHints.js";
+import { installWasdNav } from "./lib/wasdNav.js";
 import "./styles.css";
 
 loadKbdHints();
+installWasdNav();
 
 if (typeof window !== "undefined" && "scrollRestoration" in history) {
   history.scrollRestoration = "manual";

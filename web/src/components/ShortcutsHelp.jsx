@@ -1,4 +1,10 @@
 const LIBRARY_SECTIONS = [
+  { heading: "Anywhere in the app", rows: [
+    { keys: ["w", "a", "s", "d"], desc: "Move the outline to the next button, link or field (scrolls when there is none)" },
+    { keys: ["Space", "Enter"], desc: "Press the outlined button · put the caret in the outlined field" },
+    { keys: ["Esc", "Enter"], desc: "Leave a field and go back to moving around" },
+    { keys: ["w", "s"], desc: "From the first / last row of files: carry on to the toolbar and menu" },
+  ] },
   { heading: "Move around", rows: [
     { keys: ["↑", "w"], desc: "Move selection up (list view)" },
     { keys: ["↓", "s"], desc: "Move selection down (list view)" },
@@ -10,6 +16,7 @@ const LIBRARY_SECTIONS = [
     { keys: ["Space", "Enter"], desc: "Grid view: open selected item" },
     { keys: ["x"], desc: "Grid view: collapse / expand stack" },
     { keys: ["q"], desc: "Grid view: go up one folder" },
+    { keys: ["e", "Menu"], desc: "Open the right-click menu for the selected file / folder (then W / S and Space; Esc closes)" },
   ] },
   { heading: "Sort & filter", rows: [
     { keys: ["g"], desc: "Toggle grid / list view" },

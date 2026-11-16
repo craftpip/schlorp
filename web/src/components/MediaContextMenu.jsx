@@ -176,6 +176,9 @@ function MenuItem({ label, icon, danger, disabled, onClick, children, ...rest })
       {...rest}
       className={`media-ctx-item${rest.className ? ` ${rest.className}` : ""}`}
       data-disabled={disabled ? "true" : "false"}
+      data-wasd=""
+      role="button"
+      aria-disabled={disabled ? "true" : undefined}
       onClick={disabled ? (e) => e.stopPropagation() : onClick}
       onMouseEnter={(e) => { if (!disabled) e.currentTarget.style.background = "rgba(99,102,241,.12)"; }}
       onMouseLeave={(e) => { if (!disabled) { e.currentTarget.style.background = "transparent"; e.currentTarget.style.transform = ""; } }}
@@ -314,6 +317,9 @@ function StackCell({ s, member, disabled, onClick, onOpen, touchActive, noExpand
       data-stack-id={s.id}
       title={s.name}
       tabIndex={disabled ? -1 : 0}
+      data-wasd=""
+      role="button"
+      aria-disabled={disabled ? "true" : undefined}
       onClick={disabled ? (e) => e.stopPropagation() : onClick}
       onMouseEnter={startHover}
       onMouseLeave={stopHover}
