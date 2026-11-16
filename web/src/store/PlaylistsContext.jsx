@@ -99,6 +99,30 @@ export function PlaylistsProvider({ children }) {
     return j.removed;
   }, [refresh]);
 
+  // Several files at once (a multi-selection): they all follow the one that
+  // was acted on -- if it is not in the list they are all added, if it is they
+  // are all taken out. One reload at the end rather than one per file.
+  const toggleItems = useCallback(async (id, keys, primary) => {
+    const list = [...new Set((keys || []).filter(Boolean))];
+    if (!list.length) return;
+    const pl = playlists.find((p) => p.id === id);
+    const have = new Set((pl && pl.items) || []);
+    const remove = have.has(primary || list[0]);
+    let failed = "";
+    for (const key of list) {
+      if (remove ? !have.has(key) : have.has(key)) continue;
+      const r = await fetch(`/api/playlists/${encodeURIComponent(id)}/items`, {
+        method: remove ? "DELETE" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) failed = j.error || (remove ? "remove failed" : "add failed");
+    }
+    await refresh();
+    if (failed) throw new Error(failed);
+  }, [playlists, refresh]);
+
   const isMember = useCallback((playlistId, key) => {
     const pl = playlists.find((p) => p.id === playlistId);
     if (!pl) return false;
@@ -106,7 +130,7 @@ export function PlaylistsProvider({ children }) {
   }, [playlists]);
 
   return (
-    <PlaylistsContext.Provider value={{ playlists, loading, error, refresh, createPlaylist, renamePlaylist, deletePlaylist, toggleItem, addItem, removeItem, isMember }}>
+    <PlaylistsContext.Provider value={{ playlists, loading, error, refresh, createPlaylist, renamePlaylist, deletePlaylist, toggleItem, toggleItems, addItem, removeItem, isMember }}>
       {children}
     </PlaylistsContext.Provider>
   );

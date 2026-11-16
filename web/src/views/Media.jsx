@@ -342,7 +342,7 @@ export default function Media() {
     return false;
   };
   // Playlists (015)
-  const { playlists, createPlaylist, renamePlaylist, deletePlaylist, removeItem: removePlaylistItem, refresh: refreshPlaylists, toggleItem: togglePlaylistItem } = usePlaylists();
+  const { playlists, createPlaylist, renamePlaylist, deletePlaylist, removeItem: removePlaylistItem, refresh: refreshPlaylists, toggleItem: togglePlaylistItem, toggleItems: togglePlaylistItems } = usePlaylists();
   const activePlId = searchParams.get("pl") || searchParams.get("p") || "";
   const activePlaylist = activePlId ? playlists.find((p) => p.id === activePlId) : null;
   const [playlistDetail, setPlaylistDetail] = useState(null);
@@ -1704,7 +1704,7 @@ const collapseSpreadUnlessMember = (fid) => {
           if (!it) return;
           e.preventDefault();
           e.stopPropagation();
-          togglePlaylistItem(hit.id, playlistKey(it)).catch(() => {});
+          togglePlaylistItems(hit.id, playlistKeysFor(it), playlistKey(it)).catch(() => {});
         }
         return;
       }
@@ -1717,7 +1717,7 @@ const collapseSpreadUnlessMember = (fid) => {
           e.stopPropagation();
           const it = selectedFile();
           if (!it) return;
-          togglePlaylistItem(hit.id, playlistKey(it)).catch(() => {});
+          togglePlaylistItems(hit.id, playlistKeysFor(it), playlistKey(it)).catch(() => {});
           return;
         }
         // No list starts with this letter — fall through to normal navigation.
@@ -2228,7 +2228,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
             </button>
             {menuOpen && pk && (
               <div style={{ position: "absolute", top: 34, left: 0, zIndex: 90 }} onClick={(e) => e.stopPropagation()}>
-                <PlaylistHoverMenu mediaKey={pk} placement="left" showIndex={viaF} />
+                <PlaylistHoverMenu mediaKey={pk} mediaKeys={playlistKeysFor(it)} placement="left" showIndex={viaF} />
               </div>
             )}
           </div>
@@ -3529,6 +3529,16 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     else if (selKey) s.add(selKey);
     return s;
   }, [selKeys, selKey]);
+  // What a playlist action on this file applies to: the file itself, or the
+  // whole multi-selection when the file is part of one.
+  const playlistKeysFor = (it) => {
+    const pk = playlistKey(it);
+    if (it && selectedKeysForStack.size > 1 && selectedKeysForStack.has(rowKey(it))) {
+      const keys = filtered.filter((x) => !x.dir && !x._isPlaylist && selectedKeysForStack.has(rowKey(x))).map((x) => playlistKey(x)).filter(Boolean);
+      if (keys.includes(pk)) return keys;
+    }
+    return [pk];
+  };
   // Shift+G popup: which of the currently selected tiles are videos in the
   // current folder scope — the "Generate selected" target set.
   const thumbGenSelectedKeys = useMemo(() => {
@@ -4597,7 +4607,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                         <div key={ky} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={isSel} className="mrow" style={{ display: "grid", gridTemplateColumns: "subgrid", gridColumn: "1 / -1", gap: "0 10px", alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: isSel ? "rgba(99,102,241,0.14)" : "var(--surface)", cursor: "pointer", userSelect: "none", WebkitUserSelect: "none" }} onClick={(e) => { if (e.ctrlKey || e.metaKey) toggleSelection({ kind: "file", it, key: ky }); else tapItem(it); }} onContextMenu={(e) => { if (e.ctrlKey) { e.preventDefault(); toggleSelection({ kind: "file", it, key: ky }); } else { e.preventDefault(); openContextMenu(e, { kind: "file", it, key: ky }); } }} onDoubleClick={() => openItem(it)} title={displayName(it)}>
                           <div style={{ position: "relative", display: "grid", placeItems: "center" }} onMouseEnter={() => { if (isCoarsePointer()) return; if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); setOpenMenuKey(ky); }} onMouseLeave={() => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); playlistMenuCloseTimer.current = setTimeout(() => setOpenMenuKey((cur) => cur === ky ? null : cur), 120); }}>
                             <button data-testid="media-row-playlist-btn" className="media-row-playlist-btn" type="button" onClick={(e) => { e.stopPropagation(); const coarse = isCoarsePointer(); if (coarse) setOpenMenuKey((cur) => cur === ky ? null : ky); else setOpenMenuKey(ky); }} style={{ width: 28, height: 28, padding: 0, borderRadius: 999, border: isBookmarked ? "1px solid rgba(99,102,241,.35)" : "1px solid var(--border)", background: menuOpen ? "rgba(99,102,241,.15)" : isBookmarked ? "rgba(99,102,241,.12)" : "var(--surface-2)", color: isBookmarked ? "#6366f1" : "var(--muted)", display: "grid", placeItems: "center", cursor: "pointer", opacity: 1 }}><i className={`bi ${isBookmarked ? "bi-bookmark-fill" : "bi-bookmark"}`} /></button>
-                            {menuOpen && <div style={{ position: "absolute", top: 34, left: 0, zIndex: 90 }}><PlaylistHoverMenu mediaKey={pk} showIndex={viaF} /></div>}
+                            {menuOpen && <div style={{ position: "absolute", top: 34, left: 0, zIndex: 90 }}><PlaylistHoverMenu mediaKey={pk} mediaKeys={playlistKeysFor(it)} showIndex={viaF} /></div>}
                           </div>
                           <div data-testid="media-row-name" style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0, marginLeft: "5px" }}>
                             <i className={`bi ${catIcon[fileCategory(it.displayName || it.name)]}`} style={{ color: "var(--accent)", display: "grid", placeItems: "center", width: 18, height: 18, fontSize: 14, lineHeight: 1, flex: "0 0 auto", transform: "translateY(1px)" }} />{!it.dir && !it.locked && vaultOn && <i data-testid="media-row-lock" data-locked={it.locked ? "true" : "false"} className={`bi ${it.locked ? "bi-lock-fill" : "bi-unlock"}`} title={it.locked ? "Encrypted — opens only in this panel" : "Not encrypted"} style={{ color: it.locked ? "#10b981" : "var(--muted)", fontSize: 12, flex: "0 0 auto", marginLeft: -4, opacity: it.locked ? 1 : 0.7 }} />}
@@ -4653,7 +4663,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                         {!it.dir && (
                           <div style={{ position: "relative", display: "grid", placeItems: "center" }} onMouseEnter={() => { if (isCoarsePointer()) return; if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); setOpenMenuKey(ky); }} onMouseLeave={() => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); playlistMenuCloseTimer.current = setTimeout(() => setOpenMenuKey((cur) => cur === ky ? null : cur), 120); }}>
                             <button data-testid="media-row-playlist-btn" className="media-row-playlist-btn" type="button" onClick={(e) => { e.stopPropagation(); const coarse = isCoarsePointer(); if (coarse) setOpenMenuKey((cur) => cur === ky ? null : ky); else setOpenMenuKey(ky); }} style={{ width: 28, height: 28, padding: 0, borderRadius: 999, border: isBookmarked ? "1px solid rgba(99,102,241,.35)" : "1px solid var(--border)", background: menuOpen ? "rgba(99,102,241,.15)" : isBookmarked ? "rgba(99,102,241,.12)" : "var(--surface-2)", color: isBookmarked ? "#6366f1" : "var(--muted)", display: "grid", placeItems: "center", cursor: "pointer", opacity: 1 }}><i className={`bi ${isBookmarked ? "bi-bookmark-fill" : "bi-bookmark"}`} /></button>
-                            {menuOpen && pk && <div style={{ position: "absolute", top: 34, left: 0, zIndex: 90 }}><PlaylistHoverMenu mediaKey={pk} showIndex={viaF} /></div>}
+                            {menuOpen && pk && <div style={{ position: "absolute", top: 34, left: 0, zIndex: 90 }}><PlaylistHoverMenu mediaKey={pk} mediaKeys={playlistKeysFor(it)} showIndex={viaF} /></div>}
                           </div>
                         )}
                         <div data-testid="media-row-name" style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0, marginLeft: "5px", ...(it.dir ? { gridColumn: "1 / span 2" } : {}) }}>

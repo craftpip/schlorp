@@ -1,8 +1,11 @@
 import { useState } from "react";
 import { usePlaylists } from "../store/PlaylistsContext.jsx";
 
-export default function PlaylistHoverMenu({ mediaKey, placement = "right", onCreated, showIndex = false }) {
-  const { playlists, createPlaylist, toggleItem } = usePlaylists();
+export default function PlaylistHoverMenu({ mediaKey, mediaKeys, placement = "right", onCreated, showIndex = false }) {
+  const { playlists, createPlaylist, toggleItem, toggleItems } = usePlaylists();
+  // With several files selected the whole selection goes where this one goes.
+  const many = Array.isArray(mediaKeys) && mediaKeys.length > 1 && mediaKeys.includes(mediaKey);
+  const toggle = (id) => (many ? toggleItems(id, mediaKeys, mediaKey) : toggleItem(id, mediaKey));
   const [draft, setDraft] = useState("");
   const [creating, setCreating] = useState(false);
   const [err, setErr] = useState("");
@@ -20,7 +23,7 @@ export default function PlaylistHoverMenu({ mediaKey, placement = "right", onCre
     setToggling(pl.id);
     setErr("");
     try {
-      await toggleItem(pl.id, mediaKey);
+      await toggle(pl.id);
     } catch (e) {
       setErr(e.message || String(e));
     } finally {
@@ -38,7 +41,7 @@ export default function PlaylistHoverMenu({ mediaKey, placement = "right", onCre
       setDraft("");
       if (pl && mediaKey) {
         // auto-add to new playlist
-        try { await toggleItem(pl.id, mediaKey); } catch {}
+        try { await toggle(pl.id); } catch {}
       }
       if (onCreated) onCreated(pl);
     } catch (e) {

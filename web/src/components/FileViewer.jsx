@@ -501,40 +501,41 @@ function globalMotion(st, lum) {
   prevL.set(lum);
   return { dx: fd, dy: fe };
 }
-// Point tracking: FG mode follows one spot of the picture, the one under the
-// dot. The dot starts in the middle of the video and can be dragged anywhere;
-// whatever is under it when it is let go is what gets followed, and the view
-// is moved so that spot stays on the screen where the dot was put.
+// Feature tracking: FG mode follows the spot under the dot by following the
+// small corners of detail around it.
 //
-// The spot is compared as a small patch of brightness with the patch mean taken
-// out and scaled by how much detail the patch has, so the score means the same
-// thing on a bright wall and a dark face: about 0 for the same patch, about 1
-// and up for something unrelated.
+// A single patch under the dot is not enough on real footage. Skin and cloth
+// are smooth: a patch of them looks like the patch next to it, so the best
+// match slides along the surface and takes the point with it. What does hold
+// still on a surface is its detail -- a seam, an edge of hair, a fold, the
+// corner of an eye -- and there is always some of it near the dot even when
+// there is none under it. So a few dozen of those corners are picked around
+// the dot, each is followed from one frame to the next, and the dot is moved
+// the way they agree the surface moved, turning and resizing with them.
 //
-// What is under the dot does not stay the same picture: it turns, it comes
-// closer, it changes shape. Three things are kept to cope with that, tried in
-// this order, most trustworthy first.
+// Each corner is followed forwards and then back again; one that does not
+// land where it started is not believed. Corners that keep disagreeing with
+// the rest -- a hand passing in front, the background behind an edge -- are
+// dropped, and new ones are taken as old ones are lost. A hand over the spot
+// therefore does not take the dot with it: the corners around the hand still
+// say where the surface is.
 //
-// The original: a wide cut of the frame as it was when the dot was put down,
-// never touched afterwards, plus the angle and size the spot has reached since.
-// Each frame the cut is redrawn at that angle and size and matched, and then
-// the angle and size are nudged to whatever fits better. A spot that spins all
-// the way round or doubles in size is still the original, just redrawn, so it
-// is followed without the point sliding off it at all.
+// Corners are smooth and hard to shake off, but they have one weakness: near
+// an outline most of them can belong to what is behind the spot, and they
+// agree with each other perfectly about the wrong thing, so the dot slides off
+// with the background. The patch under the dot does not have that weakness --
+// it is the spot -- but on its own it shivers. So both run. The corners move
+// the dot from frame to frame; the patch tracker below says where the spot
+// itself is, and the dot is eased towards that whenever the two part company.
+// Corners that stop keeping their place around the dot are let go.
 //
-// The learner: a patch that moves a little towards what was found every frame.
-// It covers what turning and resizing cannot describe -- a shape that bends, a
-// face that turns away -- because it only needs the change to be gradual.
-//
-// The last frame: the patch as it was a frame ago. Two frames next to each
-// other are nearly the same picture whatever is happening in it, so this holds
-// on through a change too quick for the learner, and the learner is hurried
-// along while it does. It is only trusted for a short run, because a patch
-// that only ever has to look like itself a frame ago will follow anything.
-//
-// When the original has not fitted for a while but the others have kept hold,
-// the spot has become something the original no longer describes, and the cut
-// is taken again from where the point is now.
+// The patch tracker: the spot is remembered as a small patch of brightness,
+// compared with the mean taken out and scaled by how much detail it has, so
+// the score means the same on a bright wall and a dark face -- about 0 for the
+// same patch, about 1 and up for something unrelated. It keeps the original
+// (a wide cut of the frame from when the dot was put down, redrawn each frame
+// at the angle and size the spot has reached), a learner that moves a little
+// towards what was found every frame, and the patch from the last frame.
 const PT_TPL = 40;        // side of the remembered patch, in capture pixels
 const PT_STEP = 2;        // pixels between the samples taken inside it
 const PT_SIDE = PT_TPL / PT_STEP;
@@ -549,45 +550,8 @@ const PT_MISS = 12;       // frames without the spot before it is reported lost
 const PT_SRC = 96;        // side of the cut kept of the original
 const PT_COAST = 15;      // frames in a row the last-frame patch may carry the point alone
 const PT_REPLANT = 20;    // frames without the original fitting before it is taken again
-const PT_TURNS = [-8, -4, -2, 2, 4, 8].map((d) => d * Math.PI / 180);
+const PT_TURNS = [-12, -6, -3, -1.5, 1.5, 3, 6, 12].map((d) => d * Math.PI / 180);
 const PT_SIZES = [0.94, 0.97, 1.03, 1.06];
-function fgReduce(lum, rw, rh, lo, lw, lh) {
-  for (let y = 0; y < lh; y++) {
-    const y0 = Math.min(rh - 1, (y * rh / lh) | 0), y1 = Math.min(rh, y0 + Math.max(1, (rh / lh) | 0));
-    for (let x = 0; x < lw; x++) {
-      const x0 = Math.min(rw - 1, (x * rw / lw) | 0), x1 = Math.min(rw, x0 + Math.max(1, (rw / lw) | 0));
-      let s = 0, c = 0;
-      for (let yy = y0; yy < y1; yy++) { const row = yy * rw; for (let xx = x0; xx < x1; xx++) { s += lum[row + xx]; c++; } }
-      lo[y * lw + x] = c ? s / c : 0;
-    }
-  }
-}
-// Mean absolute difference between a and b with b slid by (dx, dy), over the
-// part the two still share. Content at x in a is looked for at x - dx in b.
-function fgSad(a, b, w, h, dx, dy, step, m) {
-  const xa = Math.max(m, m + dx), xb = Math.min(w - m, w - m + dx);
-  const ya = Math.max(m, m + dy), yb = Math.min(h - m, h - m + dy);
-  let s = 0, c = 0;
-  for (let y = ya; y < yb; y += step) {
-    const ar = y * w, br = (y - dy) * w - dx;
-    for (let x = xa; x < xb; x += step) { const d = a[ar + x] - b[br + x]; s += d < 0 ? -d : d; c++; }
-  }
-  return c > 16 ? s / c : Infinity;
-}
-// How far the whole picture moved between ref and cur: the camera. Coarse on
-// the reduced copies to get close from anywhere, then the last few pixels at
-// full size. `edge` means the answer sat on the limit of the search and is not
-// to be trusted.
-function fgShift(cur, ref, rw, rh, lw, lh) {
-  let bd = 0, be = 0, bv = Infinity;
-  for (let dy = -12; dy <= 12; dy += 2) for (let dx = -12; dx <= 12; dx += 2) { const s = fgSad(cur.lo, ref.lo, lw, lh, dx, dy, 2, 1); if (s < bv) { bv = s; bd = dx; be = dy; } }
-  const cd = bd, ce = be;
-  for (let dy = ce - 1; dy <= ce + 1; dy++) for (let dx = cd - 1; dx <= cd + 1; dx++) { const s = fgSad(cur.lo, ref.lo, lw, lh, dx, dy, 1, 1); if (s < bv) { bv = s; bd = dx; be = dy; } }
-  const fx = Math.round(bd * rw / lw), fy = Math.round(be * rh / lh);
-  let fd = fx, fe = fy, fv = Infinity;
-  for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) { const s = fgSad(cur.lum, ref.lum, rw, rh, fx + dx, fy + dy, 4, 2); if (s < fv) { fv = s; fd = fx + dx; fe = fy + dy; } }
-  return { dx: fd, dy: fe, edge: Math.abs(cd) >= 12 || Math.abs(ce) >= 12 };
-}
 function ptCapture(lum, rw, rh, cx, cy) {
   const x0 = clamp(Math.round(cx) - PT_HALF, 0, Math.max(0, rw - PT_TPL)), y0 = clamp(Math.round(cy) - PT_HALF, 0, Math.max(0, rh - PT_TPL));
   const t = new Float32Array(PT_SIDE * PT_SIDE);
@@ -724,7 +688,17 @@ function ptPose(st, lum, x, y) {
   const rw = st.rw, rh = st.rh;
   let best = ptFit(lum, rw, rh, st.ptTa, x, y, 1);
   if (best === Infinity) return best;
-  for (let pass = 0; pass < 2; pass++) {
+  const th0 = st.ptTh, sc0 = st.ptSc;
+  // A spot that is turning keeps turning, so the angle it is expected at --
+  // where it was plus how fast it has been going round -- is tried first. The
+  // nudges below then only have to correct that guess, instead of chasing a
+  // spin that turns further every frame than they can step.
+  if (st.ptW || st.ptG !== 1) {
+    const sc = clamp(st.ptSc * (st.ptG || 1), 0.35, 3.5), th = st.ptTh + (st.ptW || 0);
+    const T = ptSynth(st.ptSrc, th, sc), r = ptFit(lum, rw, rh, T, x, y, 1);
+    if (r < best) { best = r; st.ptTa = T; st.ptTh = th; st.ptSc = sc; }
+  }
+  for (let pass = 0; pass < 3; pass++) {
     let moved = false;
     for (const d of PT_TURNS) {
       const T = ptSynth(st.ptSrc, st.ptTh + d, st.ptSc), r = ptFit(lum, rw, rh, T, x, y, 1);
@@ -737,40 +711,29 @@ function ptPose(st, lum, x, y) {
     }
     if (!moved) break;
   }
+  st.ptW = clamp((st.ptW || 0) * 0.6 + (st.ptTh - th0) * 0.4, -0.3, 0.3);
+  st.ptG = clamp((st.ptG || 1) * 0.6 + (st.ptSc / sc0) * 0.4, 0.9, 1.1);
   return best;
 }
 // Take what is under the point right now as the spot to follow.
-function ptPlant(st, lum) {
+function tpPlant(st, lum) {
   st.fx = clamp(Math.round(st.fx), PT_HALF, Math.max(PT_HALF, st.rw - PT_HALF));
   st.fy = clamp(Math.round(st.fy), PT_HALF, Math.max(PT_HALF, st.rh - PT_HALF));
   st.ptSrc = ptSource(lum, st.rw, st.rh, st.fx, st.fy);
-  st.ptTh = 0; st.ptSc = 1;
+  st.ptTh = 0; st.ptSc = 1; st.ptW = 0; st.ptG = 1;
   st.ptTa = ptSynth(st.ptSrc, 0, 1);
   st.ptT1 = { t: st.ptTa.t.slice(), mad: st.ptTa.mad };
   st.ptTp = null; st.ptRun = 0; st.ptOff = 0; st.ptCov = 0;
   st.vx = 0; st.vy = 0; st.misses = 0; st.ptSeek = false;
-  if (st.lost) { st.lost = false; reportTrackLost(false); }
+  if (st.lost) { st.lost = false; (st.lost = false); }
 }
-function trackPoint(st, lum) {
+function tpTrack(st, lum) {
   const rw = st.rw, rh = st.rh, len = rw * rh;
   if (rw < PT_TPL || rh < PT_TPL) return;
-  const lw = Math.max(16, Math.round(rw / 4)), lh = Math.max(16, Math.round(rh / 4));
-  if (!st.ptCur || st.ptLen !== len) {
-    st.ptLen = len; st.ptHave = false;
-    st.ptCur = { lum: new Int16Array(len), lo: new Float32Array(lw * lh) };
-    st.ptPrev = { lum: new Int16Array(len), lo: new Float32Array(lw * lh) };
-  }
-  // The frame before this one is kept so the camera's own movement can be
-  // measured when the spot is not found, and the point carried along with it.
-  const cur = st.ptPrev; st.ptPrev = st.ptCur; st.ptCur = cur;
-  for (let i = 0; i < len; i++) cur.lum[i] = lum[i];
-  fgReduce(lum, rw, rh, cur.lo, lw, lh);
-  let havePrev = st.ptHave;
-  st.ptHave = true;
-  if (!st.ptSrc) { ptPlant(st, lum); return; }
+  if (!st.ptSrc) { tpPlant(st, lum); return; }
   const seek = st.ptSeek;
   st.ptSeek = false;
-  if (seek) { st.vx = 0; st.vy = 0; havePrev = false; st.ptTp = null; }
+  if (seek) { st.vx = 0; st.vy = 0; st.ptTp = null; }
   const px = clamp(Math.round(st.fx + st.vx), PT_HALF, rw - PT_HALF), py = clamp(Math.round(st.fy + st.vy), PT_HALF, rh - PT_HALF);
   let hit = null, T = null, kind = "";
   if (!st.lost) {
@@ -814,7 +777,7 @@ function trackPoint(st, lum) {
   if (!hit && seek) {
     // A seek landed on a picture the spot is not in. The dot is still where it
     // is on the screen, so what is under it now is what it marks.
-    ptPlant(st, lum);
+    tpPlant(st, lum);
     return;
   }
   if (hit) {
@@ -832,7 +795,7 @@ function trackPoint(st, lum) {
     else { st.vx = st.vx * 0.5 + (nx - st.fx) * 0.5; st.vy = st.vy * 0.5 + (ny - st.fy) * 0.5; }
     st.fx = nx; st.fy = ny;
     st.misses = 0;
-    st.ptRun = kind === "p" ? st.ptRun + 1 : 0;
+    st.ptRun = kind === "p" ? st.ptRun + 1 : 0; st.ptKind = kind; st.ptR = hit.r;
     st.ptOff = kind === "a" ? 0 : st.ptOff + 1;
     if (!covered) {
       const p = ptCapture(lum, rw, rh, hit.x, hit.y);
@@ -845,23 +808,297 @@ function trackPoint(st, lum) {
       st.ptT1.mad = Math.max(3, mad / t.length);
       if (st.ptOff >= PT_REPLANT && kind === "l" && hit.r < PT_GOOD) {
         st.ptSrc = ptSource(lum, rw, rh, hit.x, hit.y);
-        st.ptTh = 0; st.ptSc = 1; st.ptTa = ptSynth(st.ptSrc, 0, 1); st.ptOff = 0;
+        st.ptTh = 0; st.ptSc = 1; st.ptW = 0; st.ptG = 1; st.ptTa = ptSynth(st.ptSrc, 0, 1); st.ptOff = 0;
       }
     }
-    if (st.lost) { st.lost = false; reportTrackLost(false); }
+    if (st.lost) { st.lost = false; (st.lost = false); }
     return;
   }
   // Not found: something is in front of it, or it has changed too much to
-  // recognise. The point rides with the camera in the meantime, so it stays on
-  // the same place in the scene and is next to the spot when it shows again.
+  // recognise. The caller carries the point with the corners in the meantime.
   st.misses++;
   st.vx *= 0.8; st.vy *= 0.8;
-  if (havePrev) {
-    const c = fgShift(cur, st.ptPrev, rw, rh, lw, lh);
-    if (!c.edge) { st.fx = clamp(st.fx + c.dx, PT_HALF, rw - PT_HALF); st.fy = clamp(st.fy + c.dy, PT_HALF, rh - PT_HALF); }
+  if (!st.lost && st.misses >= PT_MISS) { st.lost = true; st.vx = 0; st.vy = 0; (st.lost = true); }
+  else if (st.lost) (st.lost = true);
+}
+const KL_LEVELS = 3;      // sizes of picture the corners are followed through, coarse to fine
+const KL_WIN = 5;         // half the side of the window compared around a corner
+const KL_ITERS = 8;       // refinements per size
+const KL_MAX = 36;        // corners kept at once
+const KL_RAD = 64;        // how far from the dot corners are taken, in capture pixels
+const KL_CELL = 8;        // at most one corner per cell this size
+const KL_FB = 0.8;        // forwards-then-back may miss its start by this many pixels
+const KL_RES = 22;        // mean brightness difference above which a corner did not match
+const KL_OUT = 2.5;       // pixels a corner may disagree with the rest before it is doubted
+const KL_MIN = 6;         // corners that must agree for the frame to count
+function klPyr(lum, rw, rh, P) {
+  if (!P || P.w[0] !== rw || P.h[0] !== rh) {
+    P = { L: [], w: [], h: [] };
+    let w = rw, h = rh;
+    for (let l = 0; l < KL_LEVELS; l++) { P.L.push(new Float32Array(w * h)); P.w.push(w); P.h.push(h); w = Math.max(8, w >> 1); h = Math.max(8, h >> 1); }
   }
-  if (!st.lost && st.misses >= PT_MISS) { st.lost = true; st.vx = 0; st.vy = 0; reportTrackLost(true); }
-  else if (st.lost) reportTrackLost(true);
+  const a = P.L[0];
+  for (let i = 0, n = rw * rh; i < n; i++) a[i] = lum[i];
+  for (let l = 1; l < KL_LEVELS; l++) {
+    const s = P.L[l - 1], sw = P.w[l - 1], sh = P.h[l - 1], d = P.L[l], dw = P.w[l], dh = P.h[l];
+    for (let y = 0; y < dh; y++) {
+      const y0 = Math.min(sh - 1, y * 2) * sw, y1 = Math.min(sh - 1, y * 2 + 1) * sw;
+      for (let x = 0; x < dw; x++) { const x0 = Math.min(sw - 1, x * 2), x1 = Math.min(sw - 1, x * 2 + 1); d[y * dw + x] = (s[y0 + x0] + s[y0 + x1] + s[y1 + x0] + s[y1 + x1]) * 0.25; }
+    }
+  }
+  return P;
+}
+function klAt(img, w, h, x, y) {
+  if (x < 0) x = 0; else if (x > w - 1.001) x = w - 1.001;
+  if (y < 0) y = 0; else if (y > h - 1.001) y = h - 1.001;
+  const ix = x | 0, iy = y | 0, fx = x - ix, fy = y - iy, k = iy * w + ix;
+  return img[k] * (1 - fx) * (1 - fy) + img[k + 1] * fx * (1 - fy) + img[k + w] * (1 - fx) * fy + img[k + w + 1] * fx * fy;
+}
+const KL_N = (2 * KL_WIN + 1) * (2 * KL_WIN + 1);
+const klT = new Float32Array(KL_N), klIx = new Float32Array(KL_N), klIy = new Float32Array(KL_N);
+// Where the corner at (x, y) in A is in B. Solved at the smallest size first,
+// where a large move is a small one, and carried down.
+function klTrack(A, B, x, y) {
+  let gx = 0, gy = 0, res = 0;
+  for (let l = KL_LEVELS - 1; l >= 0; l--) {
+    const a = A.L[l], b = B.L[l], w = A.w[l], h = A.h[l], sc = 1 / (1 << l);
+    const px = x * sc, py = y * sc;
+    let a11 = 0, a12 = 0, a22 = 0, n = 0;
+    for (let j = -KL_WIN; j <= KL_WIN; j++) for (let i = -KL_WIN; i <= KL_WIN; i++, n++) {
+      const sx = px + i, sy = py + j;
+      const ix = (klAt(a, w, h, sx + 1, sy) - klAt(a, w, h, sx - 1, sy)) * 0.5, iy = (klAt(a, w, h, sx, sy + 1) - klAt(a, w, h, sx, sy - 1)) * 0.5;
+      klT[n] = klAt(a, w, h, sx, sy); klIx[n] = ix; klIy[n] = iy;
+      a11 += ix * ix; a12 += ix * iy; a22 += iy * iy;
+    }
+    const det = a11 * a22 - a12 * a12;
+    if (det < 1e-3 * KL_N * KL_N) { if (l === 0) return null; gx *= 2; gy *= 2; continue; }
+    let vx = 0, vy = 0;
+    for (let it = 0; it < KL_ITERS; it++) {
+      let b1 = 0, b2 = 0; n = 0; res = 0;
+      for (let j = -KL_WIN; j <= KL_WIN; j++) for (let i = -KL_WIN; i <= KL_WIN; i++, n++) {
+        const d = klT[n] - klAt(b, w, h, px + i + gx + vx, py + j + gy + vy);
+        b1 += d * klIx[n]; b2 += d * klIy[n]; res += d < 0 ? -d : d;
+      }
+      const dx = (a22 * b1 - a12 * b2) / det, dy = (a11 * b2 - a12 * b1) / det;
+      vx += dx; vy += dy;
+      if (dx * dx + dy * dy < 0.0009) break;
+    }
+    gx += vx; gy += vy;
+    if (l > 0) { gx *= 2; gy *= 2; }
+  }
+  if (!(gx === gx) || !(gy === gy)) return null;
+  return { x: x + gx, y: y + gy, res: res / KL_N };
+}
+// Pick new corners around (cx, cy): places where the picture changes in both
+// directions at once, which is what can be found again. Cells that already
+// hold a corner are left alone.
+function klDetect(P, cx, cy, rad, have, want) {
+  const img = P.L[0], w = P.w[0], h = P.h[0], m = KL_WIN + 3;
+  const x0 = Math.max(m, Math.round(cx - rad)), x1 = Math.min(w - m, Math.round(cx + rad));
+  const y0 = Math.max(m, Math.round(cy - rad)), y1 = Math.min(h - m, Math.round(cy + rad));
+  if (x1 - x0 < 8 || y1 - y0 < 8) return [];
+  const cw = Math.ceil(w / KL_CELL), taken = new Uint8Array(cw * Math.ceil(h / KL_CELL));
+  for (const f of have) { const k = ((f.y / KL_CELL) | 0) * cw + ((f.x / KL_CELL) | 0); if (k >= 0 && k < taken.length) taken[k] = 1; }
+  const best = new Map();
+  let top = 0;
+  for (let y = y0; y < y1; y += 2) for (let x = x0; x < x1; x += 2) {
+    if ((x - cx) * (x - cx) + (y - cy) * (y - cy) > rad * rad) continue;
+    const cell = ((y / KL_CELL) | 0) * cw + ((x / KL_CELL) | 0);
+    if (taken[cell]) continue;
+    let a = 0, b = 0, c = 0;
+    for (let j = -2; j <= 2; j++) { const r = (y + j) * w + x; for (let i = -2; i <= 2; i++) { const k = r + i, ix = img[k + 1] - img[k - 1], iy = img[k + w] - img[k - w]; a += ix * ix; b += ix * iy; c += iy * iy; } }
+    const e = (a + c - Math.sqrt((a - c) * (a - c) + 4 * b * b)) * 0.5;
+    if (e > top) top = e;
+    const q = best.get(cell);
+    if (!q || e > q.e) best.set(cell, { x, y, e });
+  }
+  const floor = Math.max(top * 0.02, 60);
+  return [...best.values()].filter((q) => q.e >= floor).sort((p, q) => q.e - p.e).slice(0, want).map((q) => ({ x: q.x, y: q.y, ox: q.x - cx, oy: q.y - cy, age: 0, bad: 0 }));
+}
+const PT_JUMP = 8;        // pixels apart before a returning patch overrules the corners outright
+const PT_EASE = 0.15;     // share of each frame's gap that goes into the running average
+const PT_PULL = 1.5;      // pixels the dot may sit off where the patch says before it is eased back
+const PT_BLIND = 6;       // frames the patch must have been unsighted for its return to overrule the corners
+const PT_APART = 30;      // further apart than this and the patch has found something else
+// Take what is under the point right now as the spot to follow. `keep` leaves
+// the patch tracker alone: it has just found the spot, so it still knows it.
+function ptPlant(st, lum, keep) {
+  st.fx = clamp(st.fx, 4, Math.max(4, st.rw - 5)); st.fy = clamp(st.fy, 4, Math.max(4, st.rh - 5));
+  st.klPrev = klPyr(lum, st.rw, st.rh, st.klPrev);
+  if (st.klCur && (st.klCur.w[0] !== st.rw || st.klCur.h[0] !== st.rh)) st.klCur = null;
+  st.kf = klDetect(st.klPrev, st.fx, st.fy, KL_RAD, [], KL_MAX);
+  // Fewer than a handful this close: plain surface. Look further out for it.
+  if (st.kf.length < 12) st.kf = klDetect(st.klPrev, st.fx, st.fy, KL_RAD * 1.6, [], KL_MAX);
+  for (const f of st.kf) f.age = 3;
+  if (!keep || !st.tp) {
+    st.tp = { rw: st.rw, rh: st.rh, fx: st.fx, fy: st.fy, vx: 0, vy: 0, lost: false, misses: 0 };
+    tpPlant(st.tp, lum);
+    // The patch needs room around it, so near the edge of the frame it is
+    // planted a little inside the dot. That gap is not a disagreement and is
+    // carried along rather than corrected.
+    st.tpDx = st.fx - st.tp.fx; st.tpDy = st.fy - st.tp.fy;
+  }
+  st.ptFar = 0; st.ptBlind = 0; st.ptRed = false; st.ptEx = 0; st.ptEy = 0;
+  st.vx = 0; st.vy = 0; st.misses = 0; st.ptSeek = false;
+  if (st.lost) { st.lost = false; reportTrackLost(false); }
+}
+function trackPoint(st, lum) {
+  const rw = st.rw, rh = st.rh;
+  if (rw < PT_TPL || rh < PT_TPL) return;
+  if (!st.kf || !st.tp || !st.klPrev || st.klPrev.w[0] !== rw || st.klPrev.h[0] !== rh) { ptPlant(st, lum); return; }
+  const tp = st.tp;
+  tp.rw = rw; tp.rh = rh;
+  if (st.ptSeek) {
+    // A seek replaced the picture. The patch tracker looks for the spot near
+    // where it was and then anywhere; if it is not in this picture it takes
+    // what is under the dot now. Either way the corners start again there.
+    tp.ptSeek = true;
+    tpTrack(tp, lum);
+    st.tpDx = 0; st.tpDy = 0;
+    st.fx = tp.fx; st.fy = tp.fy;
+    ptPlant(st, lum, true);
+    return;
+  }
+  if (st.lost) {
+    // Out of sight. Only the patch tracker can find the spot again -- it sweeps
+    // the frame every few frames -- and the corners are taken again where it
+    // turns up.
+    st.misses++;
+    tpTrack(tp, lum);
+    if (!tp.lost && tp.misses === 0) { st.fx = tp.fx + st.tpDx; st.fy = tp.fy + st.tpDy; ptPlant(st, lum, true); return; }
+    st.klPrev = klPyr(lum, rw, rh, st.klPrev);
+    reportTrackLost(true);
+    return;
+  }
+  const A = st.klPrev, B = klPyr(lum, rw, rh, st.klCur);
+  st.klPrev = B; st.klCur = A;
+  const ok = [];
+  for (const f of st.kf) {
+    const t = klTrack(A, B, f.x, f.y);
+    if (!t || t.res > KL_RES || t.x < 3 || t.y < 3 || t.x > rw - 4 || t.y > rh - 4) continue;
+    const r = klTrack(B, A, t.x, t.y);
+    if (!r || Math.hypot(r.x - f.x, r.y - f.y) > KL_FB) continue;
+    f.nx = t.x; f.ny = t.y;
+    ok.push(f);
+  }
+  // How the surface moved: a shift, a turn and a change of size, fitted to the
+  // corners with the near ones counting for more and the ones that disagree
+  // counting for less each time round. The first round is the middle shift
+  // alone, which nothing that is a minority can pull on.
+  const px = st.fx, py = st.fy;
+  let nx = px, ny = py, agree = 0, ca = 1, sa = 0;
+  // A corner picked up while the patch could not see the spot may well be on
+  // whatever is covering it, so it gets no say until the spot is in sight
+  // again. If that leaves nobody, the dot stays where it is.
+  const unsighted = (st.ptBlind || 0) > 0;
+  const voters = ok.filter((f) => f.age >= 2 && !(unsighted && f.late));
+  const V = voters.length >= KL_MIN || unsighted ? voters : ok;
+  if (V.length >= 3) {
+    const dxs = V.map((f) => f.nx - f.x).sort((a, b) => a - b), dys = V.map((f) => f.ny - f.y).sort((a, b) => a - b);
+    let tx = dxs[dxs.length >> 1], ty = dys[dys.length >> 1], cxp = px, cyp = py;
+    const wt = new Float64Array(V.length);
+    for (let it = 0; it < 4; it++) {
+      let sw = 0, mx = 0, my = 0, qx = 0, qy = 0;
+      for (let i = 0; i < V.length; i++) {
+        const f = V[i], ux = f.x - cxp, uy = f.y - cyp;
+        const ex = f.nx - (cxp + tx + ca * ux - sa * uy), ey = f.ny - (cyp + ty + sa * ux + ca * uy);
+        const d2 = (f.x - px) * (f.x - px) + (f.y - py) * (f.y - py);
+        const w = Math.exp(-d2 / (2 * (KL_RAD * 0.6) * (KL_RAD * 0.6))) / (1 + (ex * ex + ey * ey) / 1.5);
+        wt[i] = w; sw += w; mx += w * f.x; my += w * f.y; qx += w * f.nx; qy += w * f.ny;
+      }
+      if (sw < 1e-9) break;
+      mx /= sw; my /= sw; qx /= sw; qy /= sw;
+      let a = 0, b = 0, n = 0;
+      for (let i = 0; i < V.length; i++) { const f = V[i], ux = f.x - mx, uy = f.y - my, vx = f.nx - qx, vy = f.ny - qy; a += wt[i] * (ux * vx + uy * vy); b += wt[i] * (ux * vy - uy * vx); n += wt[i] * (ux * ux + uy * uy); }
+      // Corners bunched in one place say nothing about turning or size, and
+      // neither may change by much in one frame whatever they say.
+      if (n > sw * 64 && V.length >= 6) {
+        const ang = clamp(Math.atan2(b, a), -0.2, 0.2), sc = clamp(Math.hypot(a, b) / n, 0.93, 1.07);
+        ca = Math.cos(ang) * sc; sa = Math.sin(ang) * sc;
+      } else { ca = 1; sa = 0; }
+      cxp = mx; cyp = my; tx = qx - mx; ty = qy - my;
+    }
+    nx = cxp + tx + ca * (px - cxp) - sa * (py - cyp);
+    ny = cyp + ty + sa * (px - cxp) + ca * (py - cyp);
+    for (const f of ok) {
+      const ux = f.x - cxp, uy = f.y - cyp;
+      const e = Math.hypot(f.nx - (cxp + tx + ca * ux - sa * uy), f.ny - (cyp + ty + sa * ux + ca * uy));
+      if (e > KL_OUT) f.bad++; else { f.bad = 0; if (f.age >= 2 || V === ok) agree++; }
+    }
+  }
+  let good = agree >= KL_MIN || (agree >= 3 && V.length <= KL_MIN + 2);
+  // The patch tracker's turn. While it cannot see the spot it is carried along
+  // by the corners, so it is looking in the right place when the spot shows
+  // again -- a hand over the spot does not move the surface it is on.
+  if (good && tp.misses > 0 && !tp.lost) { tp.fx = clamp(tp.fx + nx - px, PT_HALF, rw - PT_HALF); tp.fy = clamp(tp.fy + ny - py, PT_HALF, rh - PT_HALF); }
+  tpTrack(tp, lum);
+  const sees = !tp.lost && tp.misses === 0;
+  const blind = st.ptBlind || 0;
+  st.ptBlind = sees ? 0 : blind + 1;
+  if (good && sees) {
+    const ex = tp.fx + st.tpDx - nx, ey = tp.fy + st.tpDy - ny, e = Math.hypot(ex, ey);
+    if (e > PT_JUMP && blind >= PT_BLIND) {
+      // The patch has just found the spot again after not seeing it for a
+      // while. Whatever the corners were on in the meantime was what was in
+      // front of it or around it, not the spot, so the patch is believed
+      // outright and the corners are taken again from there.
+      st.fx = tp.fx + st.tpDx; st.fy = tp.fy + st.tpDy;
+      st.klPrev = B; st.klCur = A;
+      ptPlant(st, lum, true);
+      return;
+    }
+    if (e > PT_APART) {
+      // The two are far apart: the patch has found a lookalike, or the spot has
+      // changed past what it remembers. The corners are the ones that have been
+      // on it without a break, so they are believed, and if it goes on the
+      // patch is taken again from where they are.
+      if (++st.ptFar > 20) { tp.fx = nx; tp.fy = ny; tpPlant(tp, lum); st.tpDx = nx - tp.fx; st.tpDy = ny - tp.fy; st.ptFar = 0; }
+    } else {
+      st.ptFar = 0;
+      if (unsighted) for (const f of ok) f.late = false;
+      // The patch's answer shivers by a pixel or more from frame to frame on
+      // real footage, and the corners' does not. So the gap between them is
+      // averaged over several frames before anything is done about it: a
+      // shiver averages away, a slide does not, and only the slide is
+      // corrected.
+      st.ptEx = (st.ptEx || 0) * (1 - PT_EASE) + ex * PT_EASE; st.ptEy = (st.ptEy || 0) * (1 - PT_EASE) + ey * PT_EASE;
+      const m = Math.hypot(st.ptEx, st.ptEy);
+      if (m > PT_PULL) { const g = 0.5 * (1 - PT_PULL / m), cx = st.ptEx * g, cy = st.ptEy * g; nx += cx; ny += cy; st.ptEx -= cx; st.ptEy -= cy; }
+    }
+  } else if (!good && sees) { nx = tp.fx + st.tpDx; ny = tp.fy + st.tpDy; good = true; }
+  const keep = [];
+  if (good) {
+    // Each corner has a place around the dot. One that does not keep it is on
+    // something else -- the background behind an outline, a hand passing -- and
+    // is let go. The place turns and resizes with the surface, and is allowed
+    // more slack the further out it is.
+    for (const f of ok) {
+      if (f.bad >= 3) continue;
+      f.x = f.nx; f.y = f.ny; f.age++;
+      const ox = ca * f.ox - sa * f.oy, oy = sa * f.ox + ca * f.oy;
+      f.ox = ox; f.oy = oy;
+      const off = Math.hypot(f.x - nx - ox, f.y - ny - oy), far = Math.hypot(ox, oy);
+      if (off > 4 + far * 0.12 || far > KL_RAD * 1.7) continue;
+      keep.push(f);
+    }
+    st.vx = st.vx * 0.5 + (nx - px) * 0.5; st.vy = st.vy * 0.5 + (ny - py) * 0.5;
+    st.fx = clamp(nx, 2, rw - 3); st.fy = clamp(ny, 2, rh - 3);
+    st.misses = 0;
+    // The corners can go on carrying the dot with the spot itself out of
+    // sight. That is still worth doing -- they hold the surface around it --
+    // but it is not the same as seeing it, and the dot says so.
+    if (!!st.ptRed !== tp.lost) { st.ptRed = tp.lost; reportTrackLost(tp.lost); }
+  } else {
+    for (const f of ok) { if (f.bad >= 3) continue; f.x = f.nx; f.y = f.ny; f.age++; keep.push(f); }
+    st.misses++;
+    st.vx *= 0.8; st.vy *= 0.8;
+    if (st.misses >= PT_MISS) { st.lost = true; reportTrackLost(true); }
+  }
+  st.kf = keep;
+  if (keep.length < KL_MAX * 0.75) {
+    const add = klDetect(B, st.fx, st.fy, keep.length < 12 ? KL_RAD * 1.6 : KL_RAD, keep, KL_MAX - keep.length);
+    for (const f of add) { f.late = (st.ptBlind || 0) > 0; keep.push(f); }
+  }
 }
 function buildLum(img, st) {
   const len = st.rw * st.rh;
@@ -1135,6 +1372,7 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
   const imgRef = useRef(null);
   const containerRef = useRef(null);
   const trackDotRef = useRef(null);
+  const trackCanvasRef = useRef(null);
   const viewerRef = useRef(null);
   const [rate, setRate] = useState(() => { try { const v = parseFloat(localStorage.getItem("xdl_viewer_rate")); if (!Number.isNaN(v) && v >= 0.1 && v <= 1) return v; } catch {} return 1; });
   const [isPlaying, setIsPlaying] = useState(false);
@@ -1579,12 +1817,48 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
     const fit = Math.min(dimW / vw, dimH / vh);
     return { cw: vw * fit, ch: vh * fit };
   };
+  // FG mode paints the video itself, onto a canvas over the stage. The <video>
+  // element cannot be kept steady by moving it: its frames reach the screen on
+  // the browser's schedule and a transform set from script lands a refresh
+  // later, so for that one refresh the new frame sits at the old offset and the
+  // picture judders by a frame's worth of movement, every frame. Drawing the
+  // frame and its offset in the same call puts them on screen together, and
+  // the offset can be a fraction of a pixel without the rounding the element
+  // needed.
+  const drawTrackFrame = () => {
+    const c = trackCanvasRef.current, st = trackStateRef.current, v = videoRef.current;
+    if (!c || !st || !v) return;
+    const rect = containerRef.current && containerRef.current.getBoundingClientRect();
+    const rot = rotateRef.current;
+    const g = trackGeom(rect, rot);
+    if (!g) return;
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const W = Math.max(1, Math.round(rect.width * dpr)), H = Math.max(1, Math.round(rect.height * dpr));
+    if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
+    const ctx = c.getContext("2d");
+    const tv = trackViewRef.current, z = tv.zoom || 1;
+    // BG mode keeps its pan in fractions already; FG keeps the fraction aside.
+    const f = st.mode === "fg" && st.panF && Math.round(st.panF.x) === tv.pan.x && Math.round(st.panF.y) === tv.pan.y ? st.panF : tv.pan;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = "#080a14";
+    ctx.fillRect(0, 0, W, H);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.translate(rect.width / 2 + f.x, rect.height / 2 + f.y);
+    if (rot) ctx.rotate(rot * Math.PI / 180);
+    ctx.scale(z, z);
+    try { ctx.drawImage(v, -g.cw / 2, -g.ch / 2, g.cw, g.ch); } catch {}
+  };
   // Put the dot over the followed spot as it is on screen right now. Written
   // straight to the element: this runs every frame and on every gesture, and
   // none of it is anything React needs to hear about.
   const syncTrackDot = () => {
     const el = trackDotRef.current, st = trackStateRef.current;
-    if (!el || !st || st.mode !== "fg" || st.dotDrag) return;
+    // BG mode has no dot, only the picture to repaint at its new place.
+    if (st && st.mode === "bg") { drawTrackFrame(); return; }
+    if (!el || !st || st.mode !== "fg") return;
+    // The dot is in the user's hand: it is left where the pointer has it, but
+    // the picture still has to be painted.
+    if (st.dotDrag) { drawTrackFrame(); return; }
     const rect = containerRef.current && containerRef.current.getBoundingClientRect();
     const rot = rotateRef.current;
     const g = trackGeom(rect, rot);
@@ -1593,6 +1867,7 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
     // the picture is what moves, to keep the spot under it. Where it was put
     // is the dot's own offset plus whatever the user has panned the view by.
     el.style.transform = `translate(${Math.round(st.dotX || 0)}px, ${Math.round(st.dotY || 0)}px)`;
+    drawTrackFrame();
   };
   // The dot was let go at this place on the screen: what is under it now is
   // what gets followed, and it is kept right there. The picture does not move
@@ -1624,7 +1899,7 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
   };
   // The dot is only in the page once tracking is on, so it is placed as soon
   // as it appears rather than on the next frame -- there is none while paused.
-  useEffect(() => { syncTrackDot(); }, [tracking, trackBg]);
+  useEffect(() => { syncTrackDot(); }, [tracking, trackBg, stageSize.w, stageSize.h]);
   // The pan the user can actually see. While tracking that is the tracking
   // view's pan, not the pan state: the render reads the former, and the tracking
   // tick moves it every frame without ever touching the state.
@@ -1811,6 +2086,7 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
     trackViewRef.current.pan = pan;
     trackViewRef.current.transform = `translate(${pan.x}px, ${pan.y}px) rotate(${rot}deg) scale(${z})`;
     v.style.transform = trackViewRef.current.transform;
+    syncTrackDot();
     setPan(pan);
   }, [rotate]);
 
@@ -1950,10 +2226,14 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
     setPan(pan0);
     setOrigin("50% 50%");
     setTracking(true);
+    // The frame and its compensation are painted together on the canvas, in
+    // the same callback the frame arrived in. Moving the <video> element put
+    // the compensation on screen a refresh after the frame it was measured on.
     st.step = () => {
       if (trackGenRef.current !== st.gen || !trackingRef.current) return;
       if (st.rvfc) { v.requestVideoFrameCallback(st.step); trackingTick(); }
       else { st.raf = requestAnimationFrame(st.step); trackingTick(); }
+      drawTrackFrame();
     };
     st.step();
     return true;
@@ -1998,8 +2278,9 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
   };
   const cycleTracking = () => {
     const st = trackStateRef.current;
-    if (!st) { setTrackPref("fg"); if (startFgRef.current) startFgRef.current(); return; }
-    if (st.mode === "fg") { setTrackPref("bg"); startBgTracking(); return; }
+    // Off -> BG -> FG -> off.
+    if (!st) { setTrackPref("bg"); startBgTracking(); return; }
+    if (st.mode === "bg") { setTrackPref("fg"); if (startFgRef.current) startFgRef.current(); return; }
     setTrackPref("none");
     stopTracking();
   };
@@ -2020,12 +2301,14 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
     // not the one left here last tick, a gesture moved it and it starts over.
     let f = st.panF;
     if (!f || Math.round(f.x) !== cur.x || Math.round(f.y) !== cur.y) f = { x: cur.x, y: cur.y };
-    // The spot is held where the dot is, so this follows hard: most of the gap
-    // every tick. That is a frame or two behind at worst, which is not seen,
-    // and it still takes the tracker's own sub-pixel flutter out. A long gap --
-    // the spot found again across the frame -- closes over a few frames the
-    // same way instead of in one jump.
-    if (!noPoint) f = { x: f.x + (target.x - f.x) * 0.65, y: f.y + (target.y - f.y) * 0.65 };
+    // The spot is held exactly where the dot is: no easing, the pan is simply
+    // what puts it there. Any easing is the spot visibly sliding out from under
+    // the dot and back. Only a long gap -- the spot found again across the
+    // frame -- is closed over a few frames instead of in one jump.
+    if (!noPoint) {
+      const gx = target.x - f.x, gy = target.y - f.y;
+      f = Math.hypot(gx, gy) > 24 ? { x: f.x + gx * 0.5, y: f.y + gy * 0.5 } : { x: target.x, y: target.y };
+    }
     st.panF = f;
     let pan = f;
     // Whole pixels only. A translate of a fraction of a pixel makes the browser
@@ -2224,11 +2507,11 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
       // is rescaled and the patch taken again where it now is.
       if (st.rw !== st.fgRW || st.rh !== st.fgRH) {
         if (st.fgRW > 0 && st.fgRH > 0) { st.fx *= st.rw / st.fgRW; st.fy *= st.rh / st.fgRH; }
-        st.fgRW = st.rw; st.fgRH = st.rh; st.ptSrc = null;
+        st.fgRW = st.rw; st.fgRH = st.rh; st.kf = null;
       }
       // The dot is in the user's hand: nothing is followed and the picture is
       // left alone until it is put down.
-      if (st.dotDrag) return;
+      if (st.dotDrag) { drawTrackFrame(); return; }
       const lum = buildLum(img, st);
       st.frames++;
       trackPoint(st, lum);
@@ -2531,6 +2814,7 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
       tv.transform = `translate(${tv.pan.x}px, ${tv.pan.y}px) rotate(${rot}deg) scale(${tv.zoom})`;
       const v = videoRef.current;
       if (v) v.style.transform = tv.transform;
+      drawTrackFrame();
       setPan({ x: tv.pan.x, y: tv.pan.y });
       return;
     }
@@ -3078,6 +3362,7 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
   .fv-header > div:nth-child(2){ display: none !important; }
 }`}</style>
         <div ref={containerRef} onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp} onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd} style={{ position: "relative", flex: "1 1 auto", minHeight: 0, overflow: "hidden", background: "#080a14", display: "flex", alignItems: "center", justifyContent: "center", padding: 0, cursor: tracking ? "grab" : "default", touchAction: "none" }}>
+          {tracking && <canvas ref={trackCanvasRef} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", zIndex: 1, pointerEvents: "none" }} />}
           {tracking && !trackBg && (
             <div ref={trackDotRef} title="Drag onto what to follow"
               onPointerDown={(e) => { e.stopPropagation(); e.preventDefault(); const st = trackStateRef.current; if (!st || st.mode !== "fg") return; st.dotDrag = true; try { e.currentTarget.setPointerCapture(e.pointerId); } catch {} e.currentTarget.style.cursor = "grabbing"; }}
@@ -3203,7 +3488,7 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
             </div>
             <span style={{ flex: 1 }} />
             {(isVideo || gifAsVideoEff) && (
-              <button type="button" tabIndex={-1} className={`btn btn-sm ${tracking ? "btn-primary" : "btn-outline-secondary"}`} onClick={() => cycleTracking()} title={tracking ? `${trackBg ? "BG tracking" : "FG tracking"} on (⇧T switches mode) — click to stop and reset` : `Stabilization off — click to start ${trackPrefRef.current === "bg" ? "BG tracking" : "FG tracking"}`} style={{ position: "relative", padding: "4px 8px", fontSize: 11 }}><span className="btn-kbd-hint">⇧T</span><i className="bi bi-camera-video" /> {tracking ? (trackBg ? "BG tracking" : "FG tracking") : "Track"}</button>
+              <button type="button" tabIndex={-1} className={`btn btn-sm ${tracking ? "btn-primary" : "btn-outline-secondary"}`} onClick={() => cycleTracking()} title={tracking ? (trackBg ? "BG tracking on — click or ⇧T for FG tracking" : "FG tracking on — click or ⇧T to turn stabilization off") : "Stabilization off — click or ⇧T to start BG tracking"} style={{ position: "relative", padding: "4px 8px", fontSize: 11 }}><span className="btn-kbd-hint">⇧T</span><i className="bi bi-camera-video" /> {tracking ? (trackBg ? "BG tracking" : "FG tracking") : "Track"}</button>
             )}
             {(isImage || isVideo || gifAsVideoEff) && (
               <button type="button" tabIndex={-1} className="btn btn-sm btn-outline-secondary" onClick={rotateFile} title={`Rotate 90° (⇧R)` + (rotate ? ` · now ${rotate}°` : "")} style={{ position: "relative", padding: "4px 8px", fontSize: 11 }}><span className="btn-kbd-hint">⇧R</span><i className="bi bi-arrow-clockwise" /> Rotate</button>

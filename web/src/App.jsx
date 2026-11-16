@@ -2,6 +2,7 @@ import { NavLink, Outlet } from "react-router-dom";
 import { useEffect, useState } from "react";
 import PatternPad from "./components/PatternPad.jsx";
 import SetupWizard, { setupSkipped } from "./components/SetupWizard.jsx";
+import { usePlaylists } from "./store/PlaylistsContext.jsx";
 
 
 if (typeof window !== "undefined" && !window._xdlFetchPatched) {
@@ -223,6 +224,14 @@ export default function App() {
     const t = setInterval(check, 5000);
     return () => clearInterval(t);
   }, [auth.protected, auth.authed]);
+  // The playlist store sits above the login screen and loads once when the
+  // page opens -- before login that request is refused and the list stays
+  // empty. Load it again as soon as the session exists.
+  const { refresh: refreshPlaylists } = usePlaylists();
+  useEffect(() => {
+    if (auth.checking || !auth.authed) return;
+    refreshPlaylists();
+  }, [auth.checking, auth.authed, refreshPlaylists]);
   if (auth.checking) {
     return (
       <div style={{ minHeight: "100vh", background: "var(--bg)" }} />
