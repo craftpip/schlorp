@@ -1843,9 +1843,16 @@ async function commitTempAs(tmp, dir, wanted, next) {
       return candidate;
     } catch (e) {
       if (e.code === "EEXIST") { name = await next(name); continue; }
-      if (e.code !== "EPERM" && e.code !== "ENOTSUP" && e.code !== "EOPNOTSUPP" && e.code !== "ENOSYS") throw e;
-      if (await fs.lstat(candidate).catch(() => null)) { name = await next(name); continue; }
-      await fs.rename(tmp, candidate);
+      // No hard links on this drive (exFAT, FAT32, some NTFS/network mounts
+      // refuse them, each with its own error code). Claim the name with an
+      // exclusive create instead -- that fails with EEXIST just like link()
+      // when the name is taken -- and move the finished file onto the claim.
+      let fh;
+      try { fh = await fs.open(candidate, "wx"); }
+      catch (e2) { if (e2.code === "EEXIST") { name = await next(name); continue; } throw e2; }
+      await fh.close();
+      try { await fs.rename(tmp, candidate); }
+      catch (e3) { await fs.unlink(candidate).catch(() => {}); throw e3; }
       return candidate;
     }
   }
@@ -2383,23 +2390,13 @@ app.post("/api/media/upload", async (req, res) => {
     } else {
       await require("stream/promises").pipeline(req, fsSync.createWriteStream(tmp, { flags: "wx" }));
     }
-    // Commit without ever overwriting: link() fails with EEXIST if another
-    // upload/download took the name meanwhile -> try the next free name.
+    // Commit without ever overwriting (another upload/download may take the
+    // name meanwhile). commitTempAs also covers drives with no hard links
+    // (exFAT): link() is refused there, and every upload failed at the end.
     if (key) await mediaVault.ensureCopyFor(path.join(targetDir, name));
-    let finalPath = null;
-    for (let attempt = 0; attempt < 50 && !finalPath; attempt++) {
-      const candidate = path.join(targetDir, name);
-      try {
-        await fs.link(tmp, candidate);
-        finalPath = candidate;
-      } catch (e) {
-        if (e.code !== "EEXIST") throw e;
-        name = await nextName(name);
-      }
-    }
-    if (!finalPath) throw new Error("could not find a free file name");
-    await fs.unlink(tmp).catch(() => {});
+    const finalPath = await commitTempAs(tmp, targetDir, name, nextName);
     tmp = null;
+    name = path.basename(finalPath);
     const rel = mediaRelOf(finalPath, mediaDir);
     res.json({ ok: true, name, rel, locked: !!key, displayName: key ? wanted : name });
     if (isVideoFileName(key ? segs[segs.length - 1] : name)) {
@@ -2410,7 +2407,10 @@ app.post("/api/media/upload", async (req, res) => {
     }
   } catch (e) {
     if (tmp) await fs.unlink(tmp).catch(() => {});
-    if (!res.headersSent && !req.destroyed) return vaultHttpError(res, e);
+    // Not req.destroyed: a request whose body was read to the end counts as
+    // destroyed, so a failure after the upload finished went unanswered and
+    // the browser sat at 100% forever. Only a dropped connection is skipped.
+    if (!res.headersSent && !res.writableEnded && !(req.socket && req.socket.destroyed)) return vaultHttpError(res, e);
   } finally {
     activeUploads -= 1;
   }
