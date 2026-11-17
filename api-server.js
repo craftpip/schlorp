@@ -866,11 +866,16 @@ app.use((req, res, next) => {
   if (cookies[sessionCookieName(req)] && !cookieOk) res.clearCookie(sessionCookieName(req), { path: "/" });
   if (authed) {
     // Idle auto-lock clock: background polls don't count as activity.
-    if (req.path !== "/api/vault/status" && req.path !== "/api/media/lock/job") lastPanelActivity = Date.now();
+    if (req.path !== "/api/vault/status" && req.path !== "/api/media/lock/job" && req.path !== "/api/auth/session") lastPanelActivity = Date.now();
     return next();
   }
-  // Unauthenticated browser GET → serve login page (index.html). API/POST → JSON 401.
-  if (req.method === "GET") {
+  // Unauthenticated page GET → serve login page (index.html). API, media and
+  // POST → JSON 401 marked X-Xdl-Auth, so the page notices its session ended
+  // (idle logout on the server, restart) and shows the login instead of
+  // quietly failing to load videos.
+  res.setHeader("X-Xdl-Auth", "required");
+  if (req.method === "GET" && !req.path.startsWith("/api/") && !req.path.startsWith("/media/")) {
+    res.removeHeader("X-Xdl-Auth");
     const distIndex = path.join(webDistDir, "index.html");
     return fsSync.existsSync(distIndex) ? res.sendFile(distIndex) : res.status(503).send("web/dist not built");
   }

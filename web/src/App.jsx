@@ -15,7 +15,14 @@ if (typeof window !== "undefined" && !window._xdlFetchPatched) {
       const st = localStorage.getItem("xdl_session_token") || "";
       if (st) opts = { ...opts, headers: { ...(opts.headers || {}), "x-xdl-session": st } };
     } catch {}
-    return _origFetch(url, opts);
+    return _origFetch(url, opts).then((r) => {
+      // The server ended this session (idle logout, restart): show the login
+      // rather than a panel whose videos silently fail to load.
+      if (r.status === 401 && r.headers.get("X-Xdl-Auth") === "required") {
+        try { window.dispatchEvent(new Event("xdl-session-ended")); } catch {}
+      }
+      return r;
+    });
   };
 }
 
@@ -91,7 +98,10 @@ export default function App() {
         const tok = localStorage.getItem("xdl_session_token") || "";
         if (tok) {
           fetch("/api/auth/session").then((r) => r.json().catch(() => ({})).then((j2) => {
-            if (r.ok && j2.ok) setAuth({ checking: false, protected: true, authed: true });
+            if (r.ok && j2.ok) {
+              try { if (!localStorage.getItem("xdl_last_activity")) localStorage.setItem("xdl_last_activity", String(Date.now())); } catch {}
+              setAuth({ checking: false, protected: true, authed: true });
+            }
             else { localStorage.removeItem("xdl_session_token"); setAuth({ checking: false, protected: true, authed: false }); }
           })).catch(() => setAuth({ checking: false, protected: true, authed: false }));
         }
@@ -146,19 +156,41 @@ export default function App() {
   }, [auth.protected, auth.authed]);
   useEffect(() => {
     if (!auth.protected || !auth.authed || !idleMins) return;
-    const touch = () => { try { localStorage.setItem("xdl_last_activity", String(Date.now())); } catch {} };
-    const events = ["keydown", "click", "mousedown", "touchstart", "scroll"];
-    events.forEach((ev) => document.addEventListener(ev, touch, { passive: true }));
-    const check = () => {
+    const expired = () => {
       try {
         const last = Number(localStorage.getItem("xdl_last_activity") || 0);
-        if (last && Date.now() - last > idleMins * 60000) doLogout();
-      } catch {}
+        return !!last && Date.now() - last > idleMins * 60000;
+      } catch { return false; }
     };
+    // Coming back to a tab after the idle limit: the first click/key must log
+    // out, not count as fresh activity (background tabs run the timer late).
+    const touch = () => {
+      if (expired()) { doLogout(); return; }
+      try { localStorage.setItem("xdl_last_activity", String(Date.now())); } catch {}
+    };
+    const events = ["keydown", "click", "mousedown", "touchstart", "scroll"];
+    events.forEach((ev) => document.addEventListener(ev, touch, { passive: true, capture: true }));
+    const check = () => { if (expired()) doLogout(); };
     const t = setInterval(check, 30000);
     check();
-    return () => { events.forEach((ev) => document.removeEventListener(ev, touch)); clearInterval(t); };
+    return () => { events.forEach((ev) => document.removeEventListener(ev, touch, { capture: true })); clearInterval(t); };
   }, [auth.protected, auth.authed, idleMins]);
+  // Session ended on the server (idle logout, restart, logged out elsewhere):
+  // any API call answers 401 → back to the login. Re-check whenever the tab
+  // becomes visible again, before the user starts clicking around.
+  useEffect(() => {
+    if (!auth.protected || !auth.authed) return;
+    const ended = () => doLogout();
+    const probe = () => { if (document.visibilityState === "visible") fetch("/api/auth/session").catch(() => {}); };
+    window.addEventListener("xdl-session-ended", ended);
+    document.addEventListener("visibilitychange", probe);
+    window.addEventListener("focus", probe);
+    return () => {
+      window.removeEventListener("xdl-session-ended", ended);
+      document.removeEventListener("visibilitychange", probe);
+      window.removeEventListener("focus", probe);
+    };
+  }, [auth.protected, auth.authed]);
 
   // Hidden login hotkey when logged out: Ctrl+Shift+L -> open login modal, Esc -> close
   useEffect(() => {
