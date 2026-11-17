@@ -795,10 +795,12 @@ export default function Media() {
   const uploadInputRef = useRef(null);
   const osDragDepth = useRef(0);
   const [osDropActive, setOsDropActive] = useState(false);
+  // Folder under the pointer during a drag: { key, path, label } or null.
+  const [folderDrop, setFolderDrop] = useState(null);
   // Safety net: a drop or drag-end anywhere always clears the upload overlay
   // (a child that swallows the drop event would otherwise leave it stuck).
   useEffect(() => {
-    const clear = () => { osDragDepth.current = 0; setOsDropActive(false); };
+    const clear = () => { osDragDepth.current = 0; setOsDropActive(false); setFolderDrop(null); };
     window.addEventListener("drop", clear);
     window.addEventListener("dragend", clear);
     return () => { window.removeEventListener("drop", clear); window.removeEventListener("dragend", clear); };
@@ -2043,6 +2045,47 @@ const collapseSpreadUnlessMember = (fid) => {
   };
   // Google-Drive-style folder chip (grid view only): compact fixed-size row
   // item, not a tall preview box — folders have no thumbnails.
+  // Folder drop targets (folder chips, folder rows, breadcrumbs): files from
+  // the computer upload into that folder; files/piles dragged from the grid
+  // or list move there (same path as Move…, via MoveDialog autoTarget).
+  // Dropping anywhere else keeps the old behavior (upload to this folder).
+  const folderPathOf = (it) => { const sub = isFlat ? (it.rel || it.name) : it.name; return folder ? `${folder}/${sub}` : sub; };
+  const isInternalDrag = (e) => { const t = e && e.dataTransfer && e.dataTransfer.types; if (!t) return false; const a = Array.from(t); return a.includes("application/x-xdl-stack") || a.includes("application/x-xdl-move"); };
+  const folderDropProps = (dropKey, targetPath, label) => {
+    if (inPlaylistView) return {};
+    return {
+      "data-drop-target": folderDrop && folderDrop.key === dropKey ? "true" : undefined,
+      onDragOver: (e) => {
+        const os = isOsFileDrag(e);
+        if (!os && !isInternalDrag(e)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = os ? "copy" : "move";
+        if (!folderDrop || folderDrop.key !== dropKey) setFolderDrop({ key: dropKey, path: targetPath, label });
+      },
+      onDragLeave: (e) => { if (e.currentTarget.contains(e.relatedTarget)) return; setFolderDrop((cur) => (cur && cur.key === dropKey ? null : cur)); },
+      onDrop: (e) => {
+        const os = isOsFileDrag(e);
+        if (!os && !isInternalDrag(e)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        setFolderDrop(null);
+        osDragDepth.current = 0;
+        setOsDropActive(false);
+        if (os) {
+          filesFromDataTransfer(e.dataTransfer).then((picked) => tasks.enqueueUploads(picked, targetPath)).catch(() => {});
+          return;
+        }
+        let keys = [];
+        try { keys = JSON.parse(e.dataTransfer.getData("application/x-xdl-move") || e.dataTransfer.getData("application/x-xdl-stack") || "[]"); } catch {}
+        dragKeyRef.current = null;
+        dragKeysRef.current = null;
+        setDropInfo(null);
+        keys = (Array.isArray(keys) ? keys : []).filter(Boolean);
+        if (keys.length && targetPath !== folder) setMoveCtx({ files: keys, autoTarget: targetPath });
+      },
+    };
+  };
+  const dropRing = (dropKey) => (folderDrop && folderDrop.key === dropKey ? { outline: "3px solid var(--accent)", outlineOffset: 2 } : null);
   const FOLDER_CHIP_W = 220;
   const FOLDER_CHIP_H = 56;
   const renderFolderChip = (it) => {
@@ -2062,8 +2105,9 @@ const collapseSpreadUnlessMember = (fid) => {
         onContextMenu={(e) => { if (e.ctrlKey) return; openContextMenu(e, { kind: "folder", it, key: rk }); }}
         onMouseEnter={() => setHoveredFolderKey(rowKey(it))}
         onMouseLeave={() => setHoveredFolderKey((cur) => (cur === rowKey(it) ? null : cur))}
-        title={`${displayName(it)} — click to select, double-click to open`}
-        style={{ width: FOLDER_CHIP_W, height: FOLDER_CHIP_H, flex: "0 0 auto", display: "flex", alignItems: "center", gap: 10, padding: "0 12px", overflow: "hidden", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)", outline: selected ? "4px solid #fff" : "none", cursor: "pointer", position: "relative", userSelect: "none", WebkitUserSelect: "none", touchAction: "manipulation", WebkitTapHighlightColor: "rgba(99,102,241,.25)" }}
+        {...folderDropProps(`dir:${rk}`, folderPathOf(it), displayName(it))}
+        title={`${displayName(it)} — click to select, double-click to open; drop files here to upload or move them in`}
+        style={{ width: FOLDER_CHIP_W, height: FOLDER_CHIP_H, flex: "0 0 auto", display: "flex", alignItems: "center", gap: 10, padding: "0 12px", overflow: "hidden", borderRadius: 10, background: folderDrop && folderDrop.key === `dir:${rk}` ? "rgba(99,102,241,.18)" : "var(--surface-2)", border: "1px solid var(--border)", outline: selected ? "4px solid #fff" : "none", cursor: "pointer", position: "relative", userSelect: "none", WebkitUserSelect: "none", touchAction: "manipulation", WebkitTapHighlightColor: "rgba(99,102,241,.25)", ...dropRing(`dir:${rk}`) }}
       >
         <i className="bi bi-folder-fill" style={{ fontSize: 24, color: "#f59e0b", flex: "0 0 auto" }} />
         <span style={{ flex: 1, fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{displayName(it)}</span>
@@ -3453,12 +3497,16 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
             setSelKeys(new Set([rowKey(members[0])]));
           }
         }}
-        draggable={isCoarsePointer() ? false : isCustomReorder}
+        draggable={isCoarsePointer() ? false : !inPlaylistView}
         onDragStart={(e) => {
           if (isCoarsePointer()) return;
-          if (!isCustomReorder) return;
           const mem = pileMemberKeys(stackId);
           if (!mem.length) return;
+          // Folder drop targets move the whole pile (its stack travels along).
+          // Own type, so dropping a pile on another pile never merges them.
+          try { e.dataTransfer.setData("application/x-xdl-move", JSON.stringify(mem)); } catch {}
+          e.dataTransfer.effectAllowed = "move";
+          if (!isCustomReorder) return;
           dragKeysRef.current = mem;
           dragKeyRef.current = null;
           e.dataTransfer.effectAllowed = "move";
@@ -4430,7 +4478,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         filesFromDataTransfer(e.dataTransfer).then((picked) => tasks.enqueueUploads(picked, target)).catch(() => {});
       }}
     >
-      <UploadDropOverlay visible={osDropActive} folder={folder} encrypt={!!(tasks.vault && tasks.vault.encryptNew)} />
+      <UploadDropOverlay visible={osDropActive} folder={folderDrop ? folderDrop.path : folder} onFolder={!!folderDrop} encrypt={!!(tasks.vault && tasks.vault.encryptNew)} />
       <MediaTasksPanel
         tasks={tasks}
         thumbGen={!thumbGenOpen && !thumbToastDismissed ? {
@@ -4472,11 +4520,11 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
 
       <div data-testid="media-breadcrumbs" style={{ display: "flex", gap: 6, flexWrap: "wrap", rowGap: 6, alignItems: "center", marginTop: 8 }}>
         <div data-testid="media-breadcrumb-path" style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "nowrap", minWidth: 0, overflow: "hidden", flex: "1 1 auto", padding: 6, margin: -6 }}>
-        <button data-testid="media-breadcrumb-root" className="btn btn-sm btn-outline-secondary" onClick={() => { setMenuOpen(false); const ns = new URLSearchParams(searchParams); ns.delete("f"); ns.delete("folder"); ns.delete("pl"); ns.delete("p"); ns.delete("flat"); setSearchParams(ns); }} disabled={!folder && !inPlaylistView}><i className="bi bi-house" /> Media</button>
+        <button data-testid="media-breadcrumb-root" className="btn btn-sm btn-outline-secondary" {...(folder ? folderDropProps("crumb:", "", "Media") : {})} style={dropRing("crumb:") || undefined} onClick={() => { setMenuOpen(false); const ns = new URLSearchParams(searchParams); ns.delete("f"); ns.delete("folder"); ns.delete("pl"); ns.delete("p"); ns.delete("flat"); setSearchParams(ns); }} disabled={!folder && !inPlaylistView}><i className="bi bi-house" /> Media</button>
         {!inPlaylistView && crumbs.map((c, i) => (
           <span key={i} data-testid={`media-breadcrumb-${c}`} style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ color: "var(--muted)" }}>/</span>
-            <button className="btn btn-sm btn-outline-secondary" onClick={() => goCrumb(i)}>{c}</button>
+            <button className="btn btn-sm btn-outline-secondary" {...(i < crumbs.length - 1 ? folderDropProps(`crumb:${i}`, crumbs.slice(0, i + 1).join("/"), c) : {})} style={dropRing(`crumb:${i}`) || undefined} onClick={() => goCrumb(i)}>{c}</button>
           </span>
         ))}
         {inPlaylistView && activePlaylist && (
@@ -4710,7 +4758,16 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                     const isSel = selKey === ky || selKeys.has(ky);
                     const isBookmarked = pk ? bookmarkedKeys.has(pk) : false;
                     return (
-                      <div key={isFlat ? it.rel || it.name : it.name} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={isSel} className={it.dir ? "mrow mrow-dir" : "mrow mrow-file"} style={{ display: "grid", gridTemplateColumns: "subgrid", gridColumn: "1 / -1", gap: "0 10px", alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: isSel ? "rgba(99,102,241,0.14)" : it.dir ? "var(--surface-2)" : "var(--surface)", cursor: "pointer", userSelect: "none", WebkitUserSelect: "none" }} onClick={(e) => { if (e.ctrlKey || e.metaKey) toggleSelection({ kind: "file", it, key: ky }); else tapItem(it); }} onContextMenu={(e) => { if (e.ctrlKey) { e.preventDefault(); toggleSelection({ kind: "file", it, key: ky }); } else { openContextMenu(e, { kind: it.dir ? "folder" : "file", it, key: ky }); } }} onDoubleClick={() => openItem(it)} title="Click to select, double-click to open">
+                      <div key={isFlat ? it.rel || it.name : it.name} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={isSel} className={it.dir ? "mrow mrow-dir" : "mrow mrow-file"} style={{ display: "grid", gridTemplateColumns: "subgrid", gridColumn: "1 / -1", gap: "0 10px", alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: it.dir && folderDrop && folderDrop.key === `dir:${ky}` ? "rgba(99,102,241,0.22)" : isSel ? "rgba(99,102,241,0.14)" : it.dir ? "var(--surface-2)" : "var(--surface)", cursor: "pointer", userSelect: "none", WebkitUserSelect: "none", ...(it.dir ? dropRing(`dir:${ky}`) : null) }}
+                        {...(it.dir ? folderDropProps(`dir:${ky}`, folderPathOf(it), displayName(it)) : {})}
+                        draggable={!it.dir && !isCoarsePointer() && !inPlaylistView}
+                        onDragStart={it.dir ? undefined : (e) => {
+                          // Drag a file (or the selection it belongs to) onto a folder to move it.
+                          let carry = [...selectedKeysForStack];
+                          if (!carry.includes(ky)) { carry = [ky]; setSelKeys(new Set([ky])); setAnchorKey(ky); setSelectedKey(ky); }
+                          e.dataTransfer.effectAllowed = "move";
+                          try { e.dataTransfer.setData("application/x-xdl-stack", JSON.stringify(carry)); } catch {}
+                        }} onClick={(e) => { if (e.ctrlKey || e.metaKey) toggleSelection({ kind: "file", it, key: ky }); else tapItem(it); }} onContextMenu={(e) => { if (e.ctrlKey) { e.preventDefault(); toggleSelection({ kind: "file", it, key: ky }); } else { openContextMenu(e, { kind: it.dir ? "folder" : "file", it, key: ky }); } }} onDoubleClick={() => openItem(it)} title="Click to select, double-click to open">
                         {!it.dir && (
                           <div style={{ position: "relative", display: "grid", placeItems: "center" }} onMouseEnter={() => { if (isCoarsePointer()) return; if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); setOpenMenuKey(ky); }} onMouseLeave={() => { if (playlistMenuCloseTimer.current) clearTimeout(playlistMenuCloseTimer.current); playlistMenuCloseTimer.current = setTimeout(() => setOpenMenuKey((cur) => cur === ky ? null : cur), 120); }}>
                             <button data-testid="media-row-playlist-btn" className="media-row-playlist-btn" type="button" onClick={(e) => { e.stopPropagation(); const coarse = isCoarsePointer(); if (coarse) setOpenMenuKey((cur) => cur === ky ? null : ky); else setOpenMenuKey(ky); }} style={{ width: 28, height: 28, padding: 0, borderRadius: 999, border: isBookmarked ? "1px solid rgba(99,102,241,.35)" : "1px solid var(--border)", background: menuOpen ? "rgba(99,102,241,.15)" : isBookmarked ? "rgba(99,102,241,.12)" : "var(--surface-2)", color: isBookmarked ? "#6366f1" : "var(--muted)", display: "grid", placeItems: "center", cursor: "pointer", opacity: 1 }}><i className={`bi ${isBookmarked ? "bi-bookmark-fill" : "bi-bookmark"}`} /></button>
@@ -4971,8 +5028,9 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         }}
       />
       <MoveDialog
-        key={moveCtx ? `${folder}::${moveCtx.stackId || ""}::${moveCtx.files.join("\n")}` : "move-closed"}
+        key={moveCtx ? `${folder}::${moveCtx.stackId || ""}::${moveCtx.autoTarget ?? ""}::${moveCtx.files.join("\n")}` : "move-closed"}
         open={!!moveCtx}
+        autoTarget={moveCtx ? moveCtx.autoTarget : undefined}
         items={moveNames}
         sourceFolder={folder}
         heading={moveCtx && moveCtx.stackId ? `Move stack "${moveCtx.stackName || moveCtx.stackId}"` : moveStackImpact.fullStacks.length ? "Move stack & files" : undefined}

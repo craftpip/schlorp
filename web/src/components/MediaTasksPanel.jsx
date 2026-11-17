@@ -356,14 +356,17 @@ export function MediaTasksPanel({ tasks, thumbGen }) {
   );
 }
 
-export function UploadDropOverlay({ visible, folder, encrypt }) {
+// Light frame + label while files from the computer are dragged over the
+// page (no blur, so the folders stay visible as drop targets). Over a folder
+// the label names that folder; elsewhere uploads go to the open folder.
+export function UploadDropOverlay({ visible, folder, onFolder, encrypt }) {
   if (!visible) return null;
   return (
-    <div data-testid="media-drop-overlay" style={{ position: "fixed", inset: 0, zIndex: 140, pointerEvents: "none", display: "grid", placeItems: "center", background: "rgba(6,8,18,0.55)", backdropFilter: "blur(4px)", WebkitBackdropFilter: "blur(4px)" }}>
-      <div style={{ border: "2px dashed rgba(255,255,255,.7)", borderRadius: 16, padding: "28px 36px", color: "#fff", textAlign: "center", background: "rgba(99,102,241,.25)" }}>
-        <i className="bi bi-cloud-arrow-up" style={{ fontSize: 40 }} />
-        <div style={{ fontWeight: 700, fontSize: 16, marginTop: 6 }}>Drop to upload</div>
-        <div style={{ fontSize: 12, opacity: 0.85, marginTop: 2 }}>into {folder ? `“${folder}”` : "Media (root)"}{encrypt ? " · encrypted" : ""}</div>
+    <div data-testid="media-drop-overlay" style={{ position: "fixed", inset: 0, zIndex: 140, pointerEvents: "none", border: "3px dashed rgba(99,102,241,.8)", borderRadius: 12, background: "rgba(99,102,241,.06)" }}>
+      <div style={{ position: "absolute", left: "50%", bottom: 24, transform: "translateX(-50%)", display: "flex", alignItems: "center", gap: 10, padding: "10px 18px", borderRadius: 999, color: "#fff", background: "rgba(30,32,60,.92)", boxShadow: "0 8px 24px rgba(0,0,0,.3)", whiteSpace: "nowrap", maxWidth: "calc(100vw - 32px)", overflow: "hidden", textOverflow: "ellipsis" }}>
+        <i className={`bi ${onFolder ? "bi-folder-symlink" : "bi-cloud-arrow-up"}`} style={{ fontSize: 20 }} />
+        <span style={{ fontWeight: 700, fontSize: 14 }}>Drop to upload into {folder ? `“${folder}”` : "Media (root)"}</span>
+        <span style={{ fontSize: 12, opacity: 0.8 }}>{encrypt ? "encrypted · " : ""}{onFolder ? "" : "or drop on a folder"}</span>
       </div>
     </div>
   );

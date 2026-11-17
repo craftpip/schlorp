@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 // Folder-explorer dialog for "Move files" (plan 026). Starts at the current
 // folder, lists subfolders only; folder names enter, Up climbs, breadcrumb
@@ -10,7 +10,9 @@ import { useEffect, useState } from "react";
 // stacks: each moves as a unit first (the .xdlstack travels with its members,
 // no notice), then the remaining files move one request per file so the bar
 // tracks real current/total.
-export default function MoveDialog({ open, items, sourceFolder, heading, stackNotice, stackMoves, onMoveTarget, onClose, onDone }) {
+// `autoTarget` (drag onto a folder): starts moving into that folder right
+// away — the dialog only shows the progress.
+export default function MoveDialog({ open, items, sourceFolder, heading, stackNotice, stackMoves, onMoveTarget, onClose, onDone, autoTarget }) {
   const names = Array.isArray(items) ? items : [];
   // Browsed location. The parent remounts the dialog (via `key`) on every
   // open, so the initial state is always the menu-click sourceFolder.
@@ -56,6 +58,15 @@ export default function MoveDialog({ open, items, sourceFolder, heading, stackNo
     })();
     return () => { cancelled = true; };
   }, [open, cwd]);
+
+  // Drag-and-drop move: run once on open (the parent remounts per drop).
+  const autoStarted = useRef(false);
+  const moveIntoRef = useRef(null);
+  useEffect(() => {
+    if (!open || autoTarget == null || autoStarted.current) return;
+    autoStarted.current = true;
+    if (moveIntoRef.current) moveIntoRef.current(autoTarget);
+  }, [open, autoTarget]);
 
   if (!open) return null;
 
@@ -157,6 +168,8 @@ export default function MoveDialog({ open, items, sourceFolder, heading, stackNo
       setMoving(false);
     }
   };
+
+  moveIntoRef.current = moveInto;
 
   return (
     <div
