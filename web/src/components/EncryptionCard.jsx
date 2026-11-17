@@ -90,7 +90,7 @@ export default function EncryptionCard() {
     body = (
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         <div style={{ color: "var(--muted)" }}>
-          Your files get locked with the password (and pattern) you log in with. Logging in opens them; new downloads are encrypted even while locked.
+          Turns the feature on — your existing library stays exactly as it is. {vault.encryptNew ? "From then on, new downloads and uploads are saved encrypted" : "New files stay unencrypted (\"Encrypt new files automatically\" is off)"}; you can also encrypt chosen files later from the Media page. Logging in opens encrypted files.
         </div>
         {needPw ? (
           <form onSubmit={(e) => { e.preventDefault(); if (pw) turnOn(pw); }} style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
@@ -103,7 +103,7 @@ export default function EncryptionCard() {
         <ConfirmModal
           open={confirmOn}
           title="Turn on encryption?"
-          message="Locked files open only with your password or pattern. There is no recovery — if you forget both, locked files are gone for good."
+          message={`Nothing in your library is touched — existing files stay as they are. ${vault.encryptNew ? "From now on, new downloads and uploads are saved encrypted (you can switch that off in Settings)." : "New files stay unencrypted until you switch on \"Encrypt new files automatically\" in Settings."} Encrypted files open with your password or pattern, so keep at least one of them safe.`}
           confirmLabel="Turn on"
           onCancel={() => setConfirmOn(false)}
           onConfirm={() => { setConfirmOn(false); turnOn(""); }}
