@@ -50,9 +50,38 @@ test("encrypted files without a key file block setup (drive not mounted)", async
     const media = path.join(root, "media");
     await fs.mkdir(path.join(media, "a"), { recursive: true });
     const other = await mc.createVault("some old password", FAST);
-    await fs.writeFile(path.join(media, "a", "f.bin"), "secret");
-    await mc.encryptFileInPlace(path.join(media, "a", "f.bin"), other.publicKey);
+    // Encrypted files always sit under a 16-char code name.
+    await fs.writeFile(path.join(media, "a", "k7q2m9x4c8v2b3n6"), "secret");
+    await mc.encryptFileInPlace(path.join(media, "a", "k7q2m9x4c8v2b3n6"), other.publicKey);
     await assert.rejects(mk(root).setup("a long enough password"), { code: "ORPHAN_FILES" });
+  });
+});
+
+test("setup check opens only code-named files and walks a looped folder once", async () => {
+  await withTempDir(async (root) => {
+    const media = path.join(root, "media");
+    await fs.mkdir(path.join(media, "a"), { recursive: true });
+    for (let i = 0; i < 5; i++) await fs.writeFile(path.join(media, "a", `clip${i}.mp4`), "plain");
+    // A folder that loops back into media/ (like a bind mount of the parent).
+    await fs.symlink(media, path.join(media, "a", "loop")).catch(() => {});
+    const v = mk(root);
+    const seen = [];
+    const orig = mc.readFileHeader;
+    mc.readFileHeader = async (f) => { seen.push(f); return orig(f); };
+    try { await v.setup("a long enough password"); } finally { mc.readFileHeader = orig; }
+    assert.deepEqual(seen, []);
+    assert.equal(v.status().exists, true);
+    assert.equal(v.status().setupCheck, null);
+  });
+});
+
+test("clicking turn on twice runs one setup", async () => {
+  await withTempDir(async (root) => {
+    const v = mk(root);
+    const [a, b] = await Promise.allSettled([v.setup("a long enough password"), v.setup("a long enough password")]);
+    assert.equal(a.status, "fulfilled");
+    assert.equal(b.status, "fulfilled");
+    assert.equal(v.status().exists, true);
   });
 });
 

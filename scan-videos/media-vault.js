@@ -27,6 +27,8 @@ function createMediaVault({ mediaDir, rootDir, isProtected, scryptParams = null 
   const createdFile = path.join(rootDir, ".xdl-created.json");
   let vault = null;
   let publicKey = null;
+  // Turn-on check in progress: { files, dirs, startedAt } or null.
+  let setupCheck = null;
   let privateKey = null;
   let error = null;
   let initPromise = null;
@@ -158,21 +160,36 @@ function createMediaVault({ mediaDir, rootDir, isProtected, scryptParams = null 
 
   // Any already-encrypted media file? (Setup must not create a new key while
   // files locked with an existing key are present — e.g. drive not mounted.)
-  async function anyEncryptedFile() {
+  // Setup guard: is any file already encrypted (with a key we can't see)?
+  // Encrypted files always carry a 16-char code name with no extension, so
+  // only those are opened — everything else is just a directory listing.
+  // Folders reached twice (a bind mount that loops back into media/) are
+  // walked once. Progress is reported through status().setupCheck.
+  async function anyEncryptedFile(onProgress = () => {}) {
     const stack = [mediaDir];
-    let seen = 0;
-    while (stack.length && seen < 200000) {
+    const seenDirs = new Set();
+    let files = 0;
+    let dirs = 0;
+    while (stack.length && files < 2000000) {
       const dir = stack.pop();
+      const st = await fs.stat(dir).catch(() => null);
+      if (!st) continue;
+      const id = `${st.dev}:${st.ino}`;
+      if (seenDirs.has(id)) continue;
+      seenDirs.add(id);
+      dirs += 1;
       const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
       for (const en of entries) {
         if (en.name.startsWith(".") || en.isSymbolicLink()) continue;
         const full = path.join(dir, en.name);
         if (en.isDirectory()) { stack.push(full); continue; }
         if (!en.isFile()) continue;
-        seen += 1;
+        files += 1;
+        if (!mc.isCodeName(en.name)) continue;
         const h = await mc.readFileHeader(full).catch(() => null);
         if (h) return path.relative(mediaDir, full);
       }
+      onProgress({ files, dirs });
     }
     return null;
   }
@@ -229,6 +246,7 @@ function createMediaVault({ mediaDir, rootDir, isProtected, scryptParams = null 
       createdAt: vault ? vault.createdAt || null : null,
       copies: [...copies].map((d) => path.relative(mediaDir, d) || "."),
       minPassword: mc.MIN_PASSWORD,
+      setupCheck,
     };
   }
 
@@ -240,14 +258,26 @@ function createMediaVault({ mediaDir, rootDir, isProtected, scryptParams = null 
 
   // `secret` = the panel password (already verified against the login hash)
   // or { passwordKey, patternKey } derived from it at login.
-  async function setup(secret) {
+  // Clicking "Turn on" again while a setup runs joins it instead of starting
+  // a second sweep of the library.
+  let setupRun = null;
+  function setup(secret) {
+    if (setupRun) return setupRun;
+    setupRun = setupNow(secret).finally(() => { setupRun = null; });
+    return setupRun;
+  }
+  async function setupNow(secret) {
     await init();
     if (!isProtected()) throw httpError(400, "Set a panel password first", "NO_PASSWORD");
     await load(); // a drive may have been mounted since startup
     if (vault) throw httpError(409, "Encryption is already set up", "VAULT_EXISTS");
     // Never create a new key over an old one: files locked with it would be lost.
     if (unreadable.length) throw httpError(409, "A key file exists but can't be read — fix or restore it first; a new key would make existing locked files unreadable", "VAULT_UNREADABLE");
-    const already = await anyEncryptedFile();
+    setupCheck = { files: 0, dirs: 0, startedAt: Date.now() };
+    let already;
+    try {
+      already = await anyEncryptedFile((p) => { setupCheck = { ...setupCheck, ...p }; });
+    } finally { setupCheck = null; }
     if (already) throw httpError(409, `Encrypted files already exist (e.g. ${already}) but their key file wasn't found — is the right drive mounted? Setup is blocked so they aren't stranded.`, "ORPHAN_FILES");
     let made;
     try {

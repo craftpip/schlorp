@@ -41,17 +41,47 @@ export default function EncryptionCard() {
   const inputStyle = { maxWidth: 280, height: 30, fontSize: 12 };
   // Turn on encryption: just a confirmation — the server uses the key it
   // derived from your password when you logged in (plan 042).
+  // While it runs, the server's status shows how far the library check got;
+  // if the request itself drops (timeout, closed tab), keep following the
+  // status until the key exists or the check stops.
+  const [check, setCheck] = useState(null);
+  const followSetup = useCallback(async () => {
+    for (;;) {
+      let j = null;
+      try { j = await (await fetch("/api/vault/status", { cache: "no-store" })).json(); } catch {}
+      if (j && j.ok) {
+        setCheck(j.setupCheck || null);
+        if (j.exists || !j.setupCheck) return j;
+      }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }, []);
   const turnOn = async (password) => {
     setBusy(true); setErr(""); setMsg("");
+    let stop = false;
+    const poll = (async () => { while (!stop) { await new Promise((r) => setTimeout(r, 1000)); if (stop) break; try { const j = await (await fetch("/api/vault/status", { cache: "no-store" })).json(); if (!stop && j && j.ok) setCheck(j.setupCheck || null); } catch {} } })();
     try {
       const j = await vaultCall("/api/vault/setup", password ? { password } : {});
       setVault(j); setPw(""); setNeedPw(false);
       setMsg("Encryption is on ✓");
     } catch (e) {
       if (e.code === "NEEDS_PASSWORD") setNeedPw(true);
+      else if (!e.code) {
+        // No answer from the server (dropped request): it may still be working.
+        stop = true;
+        const j = await followSetup();
+        if (j && j.exists) { setVault(j); setMsg("Encryption is on ✓"); setCheck(null); setBusy(false); return; }
+      }
       setErr(e.message || String(e));
-    } finally { setBusy(false); }
+    } finally { stop = true; await poll; setCheck(null); setBusy(false); }
   };
+  // Opened Settings while a setup is still running (another tab, a reload).
+  useEffect(() => {
+    if (!vault || vault.exists || !vault.setupCheck || busy) return;
+    setBusy(true);
+    followSetup().then((j) => { if (j) setVault(j); if (j && j.exists) setMsg("Encryption is on ✓"); }).finally(() => { setCheck(null); setBusy(false); });
+  }, [vault && vault.setupCheck && !vault.exists]); // eslint-disable-line react-hooks/exhaustive-deps
+  const checkLine = check ? `Checking your library for already-encrypted files… ${check.files.toLocaleString()} files in ${check.dirs.toLocaleString()} folders` : "";
   let body;
   if (!vault) {
     body = <div style={{ color: "var(--muted)" }}>Loading…</div>;
@@ -100,6 +130,7 @@ export default function EncryptionCard() {
         ) : (
           <div><button data-testid="enc-setup" type="button" className="btn btn-sm btn-primary" disabled={busy} onClick={() => setConfirmOn(true)}><i className="bi bi-shield-lock" /> {busy ? "Turning on…" : "Turn on encryption"}</button></div>
         )}
+        {busy && <div data-testid="enc-setup-progress" style={{ color: "var(--muted)" }}><span className="spinner-border spinner-border-sm" style={{ width: 10, height: 10, marginRight: 6 }} />{checkLine || "Turning on…"}</div>}
         <ConfirmModal
           open={confirmOn}
           title="Turn on encryption?"
