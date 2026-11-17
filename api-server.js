@@ -874,7 +874,12 @@ app.use((req, res, next) => {
   // (idle logout on the server, restart) and shows the login instead of
   // quietly failing to load videos.
   res.setHeader("X-Xdl-Auth", "required");
-  if (req.method === "GET" && !req.path.startsWith("/api/") && !req.path.startsWith("/media/")) {
+  // Opening a page in the browser (address bar, link, reload — even
+  // /media/?f=… which looks like a file path) always gets the page, so the
+  // logged-out view shows instead of a JSON error.
+  const navigation = req.headers["sec-fetch-mode"] === "navigate" || req.headers["sec-fetch-dest"] === "document";
+  const fileOrApi = req.path.startsWith("/api/") || /^\/media\/./.test(req.path);
+  if (req.method === "GET" && (navigation || !fileOrApi)) {
     res.removeHeader("X-Xdl-Auth");
     const distIndex = path.join(webDistDir, "index.html");
     return fsSync.existsSync(distIndex) ? res.sendFile(distIndex) : res.status(503).send("web/dist not built");
