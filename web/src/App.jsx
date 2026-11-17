@@ -1,6 +1,7 @@
 import { NavLink, Outlet } from "react-router-dom";
 import { useEffect, useState } from "react";
 import PatternPad from "./components/PatternPad.jsx";
+import SameNamePrompt from "./components/SameNamePrompt.jsx";
 import SetupWizard, { setupSkipped } from "./components/SetupWizard.jsx";
 import { usePlaylists } from "./store/PlaylistsContext.jsx";
 
@@ -586,6 +587,7 @@ export default function App() {
           <NavLink to="/settings" title="Settings" className={({ isActive }) => `btn btn-sm ${isActive ? "btn-primary" : "btn-outline-secondary"}`}><i className="bi bi-gear" /> <span className="app-nav-label">Settings</span></NavLink>
         </nav>
         <Outlet />
+        <SameNamePrompt />
       </div>
     </div>
   );

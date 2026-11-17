@@ -1,3 +1,4 @@
+import { askSameName, endSameNameBatch } from "./SameNamePrompt.jsx";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import PatternPad from "./PatternPad.jsx";
 
@@ -20,15 +21,55 @@ function setUploadList(next) {
 function patchUpload(id, p) { setUploadList(uploadStore.list.map((u) => (u.id === id ? { ...u, ...p } : u))); }
 // Warn before closing the tab while files are still uploading.
 function beforeUnloadGuard(e) {
-  if (uploadStore.list.some((u) => u.status === "queued" || u.status === "uploading")) { e.preventDefault(); e.returnValue = ""; }
+  if (uploadStore.list.some((u) => u.status === "queued" || u.status === "uploading" || u.status === "waiting")) { e.preventDefault(); e.returnValue = ""; }
 }
 if (typeof window !== "undefined") window.addEventListener("beforeunload", beforeUnloadGuard);
+
+// Same-name check before uploading: queued files whose name is already taken
+// in their folder wait for the popup ("waiting") while the rest keep going.
+async function checkSameNames() {
+  const todo = uploadStore.list.filter((u) => u.status === "queued" && !u.checked);
+  if (!todo.length) return;
+  setUploadList(uploadStore.list.map((u) => (todo.includes(u) ? { ...u, checked: true } : u)));
+  const byFolder = new Map();
+  for (const u of todo) { if (!byFolder.has(u.folder)) byFolder.set(u.folder, []); byFolder.get(u.folder).push(u); }
+  for (const [folder, list] of byFolder) {
+    let existing = {};
+    try {
+      const r = await fetch("/api/media/upload/check", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ folder, paths: list.map((u) => u.relPath) }) });
+      const j = await r.json().catch(() => ({}));
+      if (r.ok && j.ok && j.existing) existing = j.existing;
+    } catch { /* can't check: the server keeps both (never overwrites) */ }
+    for (const u of list) {
+      const hit = existing[u.relPath];
+      if (!hit) continue;
+      const cur = uploadStore.list.find((x) => x.id === u.id);
+      if (!cur || cur.status !== "queued") continue;
+      patchUpload(u.id, { status: "waiting" });
+      const relDir = u.relPath.includes("/") ? u.relPath.slice(0, u.relPath.lastIndexOf("/")) : "";
+      askSameName({
+        kind: "upload",
+        name: hit.name,
+        folder: [folder, relDir].filter(Boolean).join("/"),
+        existing: { size: hit.size, mtime: hit.mtime },
+        incoming: { size: u.size, mtime: u.file && u.file.lastModified },
+      }).then((choice) => {
+        const now = uploadStore.list.find((x) => x.id === u.id);
+        if (!now || now.status !== "waiting") return;
+        if (choice === "skip") patchUpload(u.id, { status: "skipped" });
+        else patchUpload(u.id, { status: "queued", conflict: choice });
+        pumpUploads();
+      });
+    }
+  }
+}
 
 async function pumpUploads() {
   if (uploadStore.running) return;
   uploadStore.running = true;
   try {
     for (;;) {
+      await checkSameNames();
       const next = uploadStore.list.find((u) => u.status === "queued");
       if (!next) break;
       patchUpload(next.id, { status: "uploading", loaded: 0 });
@@ -38,6 +79,7 @@ async function pumpUploads() {
         const qs = new URLSearchParams();
         if (next.folder) qs.set("folder", next.folder);
         qs.set("path", next.relPath);
+        if (next.conflict === "replace") qs.set("conflict", "replace");
         xhr.open("POST", `/api/media/upload?${qs.toString()}`);
         xhr.setRequestHeader("Content-Type", "application/octet-stream");
         // Actions need the session header (cookie alone is refused: CSRF).
@@ -65,6 +107,8 @@ async function pumpUploads() {
     }
   } finally {
     uploadStore.running = false;
+    // Queue drained and nothing waiting: "do the same for the rest" resets.
+    if (!uploadStore.list.some((u) => u.status === "queued" || u.status === "uploading" || u.status === "waiting")) endSameNameBatch("upload");
   }
 }
 function enqueueUploadEntries(entries, folder) {
@@ -85,14 +129,14 @@ function enqueueUploadEntries(entries, folder) {
 function cancelUploadById(id) {
   const x = uploadStore.xhrs.get(id);
   if (x) { try { x.abort(); } catch {} return; }
-  setUploadList(uploadStore.list.map((u) => (u.id === id && u.status === "queued" ? { ...u, status: "cancelled" } : u)));
+  setUploadList(uploadStore.list.map((u) => (u.id === id && (u.status === "queued" || u.status === "waiting") ? { ...u, status: "cancelled" } : u)));
 }
 function cancelAllUploadEntries() {
-  setUploadList(uploadStore.list.map((u) => (u.status === "queued" ? { ...u, status: "cancelled" } : u)));
+  setUploadList(uploadStore.list.map((u) => (u.status === "queued" || u.status === "waiting" ? { ...u, status: "cancelled" } : u)));
   for (const x of uploadStore.xhrs.values()) { try { x.abort(); } catch {} }
 }
 function clearFinishedUploads() {
-  setUploadList(uploadStore.list.filter((u) => u.status === "queued" || u.status === "uploading"));
+  setUploadList(uploadStore.list.filter((u) => u.status === "queued" || u.status === "uploading" || u.status === "waiting"));
 }
 
 // POST to a vault route; throws the server's message on failure.
@@ -270,10 +314,10 @@ export function MediaTasksPanel({ tasks, thumbGen }) {
   const tgRunning = !!(tg && tg.busy);
   const tgP = tg && tg.progress;
   const tgPct = tgRunning ? (tgP && tgP.total ? (tgP.index / tgP.total) * 100 : 0) : 100;
-  const active = uploads.filter((u) => u.status === "queued" || u.status === "uploading");
+  const active = uploads.filter((u) => u.status === "queued" || u.status === "uploading" || u.status === "waiting");
   const done = uploads.filter((u) => u.status === "done").length;
   const failed = uploads.filter((u) => u.status === "error").length;
-  const totalBytes = uploads.reduce((s, u) => s + (u.status === "cancelled" ? 0 : u.size), 0);
+  const totalBytes = uploads.reduce((s, u) => s + (u.status === "cancelled" || u.status === "skipped" ? 0 : u.size), 0);
   const sentBytes = uploads.reduce((s, u) => s + (u.status === "done" ? u.size : u.status === "uploading" ? u.loaded : 0), 0);
   const lockRunning = lockJob && lockJob.status === "running";
   const lockPct = lockJob && lockJob.total ? ((lockJob.done + lockJob.skipped + lockJob.failed) / lockJob.total) * 100 : lockRunning ? 0 : 100;
@@ -339,10 +383,10 @@ export function MediaTasksPanel({ tasks, thumbGen }) {
               {uploads.slice(-200).map((u) => (
                 <div key={u.id} data-testid="media-upload-row" data-status={u.status} style={{ display: "flex", flexDirection: "column", gap: 3 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                    <i className={`bi ${u.status === "done" ? (u.locked ? "bi-lock-fill" : "bi-check-circle") : u.status === "error" ? "bi-exclamation-circle" : u.status === "cancelled" ? "bi-slash-circle" : "bi-arrow-up-circle"}`} style={{ color: u.status === "error" ? "#f87171" : u.status === "done" ? "#10b981" : "var(--muted)" }} />
+                    <i className={`bi ${u.status === "done" ? (u.locked ? "bi-lock-fill" : "bi-check-circle") : u.status === "error" ? "bi-exclamation-circle" : u.status === "cancelled" || u.status === "skipped" ? "bi-slash-circle" : u.status === "waiting" ? "bi-question-circle" : "bi-arrow-up-circle"}`} style={{ color: u.status === "error" ? "#f87171" : u.status === "done" ? "#10b981" : "var(--muted)" }} />
                     <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={u.error || u.savedAs || u.relPath}>{u.relPath}</span>
-                    <span style={{ color: "var(--muted)", whiteSpace: "nowrap" }}>{u.status === "uploading" ? `${Math.round((u.loaded / Math.max(1, u.size)) * 100)}%` : u.status === "error" ? "failed" : u.status === "queued" ? fmtBytes(u.size) : u.status}</span>
-                    {(u.status === "queued" || u.status === "uploading") && <button type="button" className="btn btn-sm btn-link" style={{ padding: "0 2px", color: "var(--muted)" }} onClick={() => tasks.cancelUpload(u.id)} title="Cancel"><i className="bi bi-x" /></button>}
+                    <span style={{ color: "var(--muted)", whiteSpace: "nowrap" }}>{u.status === "uploading" ? `${Math.round((u.loaded / Math.max(1, u.size)) * 100)}%` : u.status === "error" ? "failed" : u.status === "queued" ? fmtBytes(u.size) : u.status === "waiting" ? "name taken — waiting for you" : u.status}</span>
+                    {(u.status === "queued" || u.status === "uploading" || u.status === "waiting") && <button type="button" className="btn btn-sm btn-link" style={{ padding: "0 2px", color: "var(--muted)" }} onClick={() => tasks.cancelUpload(u.id)} title="Cancel"><i className="bi bi-x" /></button>}
                   </div>
                   {u.status === "uploading" && <Bar pct={(u.loaded / Math.max(1, u.size)) * 100} />}
                   {u.status === "error" && <div style={{ color: "#f87171", paddingLeft: 20 }}>{u.error}</div>}

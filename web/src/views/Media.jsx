@@ -4334,7 +4334,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
     setSelectedKey("");
     refresh();
     try { await refreshStacksAndAnnotate(); } catch {}
-    const failed = j && Array.isArray(j.results) ? j.results.filter((r) => !r.moved) : [];
+    const failed = j && Array.isArray(j.results) ? j.results.filter((r) => !r.moved && !r.skipped) : [];
     const posterSkipped = [];
     for (const r of (j && Array.isArray(j.results) ? j.results : [])) {
       for (const p of (r.posters || [])) {

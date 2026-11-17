@@ -1386,6 +1386,94 @@ app.put("/api/mediaorder", async (req, res) => {
     return res.status(500).json({ ok: false, error: error.message });
   }
 });
+// Delete a media file and everything that points at it: its poster, its
+// playlist entries, size cache, custom order and stack membership. Used by
+// delete and by upload/move "Replace".
+async function deleteMediaFileFully(fullPath) {
+  const rel = path.relative(mediaDir, fullPath);
+  const name = path.basename(fullPath);
+  // Its thumbnail goes too. Found before the file is gone: encrypted files
+  // pair with their poster through the real names stored inside.
+  const posters = await companionPosterPaths(fullPath).catch(() => []);
+  await fs.unlink(fullPath);
+  mediaVault.forget(fullPath);
+  const postersDeleted = [];
+  for (const p of posters) {
+    try {
+      await fs.unlink(p);
+      mediaVault.forget(p);
+      postersDeleted.push(path.basename(p));
+      const pRel = mediaRelOf(p, mediaDir);
+      const dims = await loadMediadims().catch(() => null);
+      if (dims && dims[pRel]) { delete dims[pRel]; await saveMediadims().catch(() => {}); }
+    } catch {}
+  }
+  // Prune from playlists (best-effort)
+  try {
+    const canonical = rel.split(path.sep).join("/");
+    await withPlaylistFile(async () => {
+      const data = await loadPlaylistsRaw();
+      let mutated = false;
+      for (const pl of data.playlists) {
+        const before = pl.items.length;
+        pl.items = pl.items.filter((it) => it.key !== canonical);
+        if (pl.items.length !== before) {
+          mutated = true;
+          pl.updatedAt = new Date().toISOString();
+        }
+      }
+      if (mutated) await savePlaylistsRaw(data);
+    });
+  } catch {}
+  // Prune dims cache entry (best-effort)
+  try {
+    const canonical = rel.split(path.sep).join("/");
+    const dims = await loadMediadims();
+    if (dims[canonical]) {
+      delete dims[canonical];
+      await saveMediadims();
+    }
+  } catch {}
+  // Prune custom-order scopes (best-effort): the parent folder's scope
+  // loses the basename, flat scopes lose the media-relative key.
+  try {
+    const canonical = rel.split(path.sep).join("/");
+    const parent = path.posix.dirname(canonical);
+    const parentFolder = parent === "." ? "" : parent;
+    const scopes = await loadMediaorder();
+    let mutated = false;
+    const folderScope = mediaorderScope(parentFolder, false);
+    if (Array.isArray(scopes[folderScope]) && scopes[folderScope].includes(name)) {
+      scopes[folderScope] = scopes[folderScope].filter((k) => k !== name);
+      mutated = true;
+    }
+    for (const [scope, arr] of Object.entries(scopes)) {
+      if (!scope.startsWith("flat:") || !Array.isArray(arr) || !arr.includes(canonical)) continue;
+      scopes[scope] = arr.filter((k) => k !== canonical);
+      mutated = true;
+    }
+    if (mutated) await saveMediaorder();
+  } catch {}
+  // Prune from sibling stacks (best-effort): strip the deleted filename
+  // from any .xdlstack file in the same folder. A lone file is not a
+  // stack: release it and drop the stack file.
+  try {
+    const dir = path.dirname(fullPath);
+    const deletedBase = path.basename(fullPath);
+    const stackFiles = await readStacksInFolder(dir);
+    await withStacksFile(dir, async () => {
+      for (const s of stackFiles) {
+        if (!s.items.includes(deletedBase)) continue;
+        const full = path.join(dir, s.id);
+        const data = parseStackFile(await fs.readFile(full, "utf8"));
+        data.items = data.items.filter((x) => x !== deletedBase);
+        if (data.items.length <= 1) await fs.unlink(full).catch(() => {});
+        else await fs.writeFile(full, JSON.stringify(data, null, 2), "utf8");
+      }
+    });
+  } catch {}
+  return postersDeleted;
+}
 app.delete("/api/media", async (req, res) => {
   try {
     const folder = String(req.query?.folder || req.body?.folder || "").trim();
@@ -1399,86 +1487,7 @@ app.delete("/api/media", async (req, res) => {
     const stat = await fs.stat(fullPath).catch(() => null);
     if (!stat) return res.status(404).json({ ok: false, error: "not found" });
     if (stat.isDirectory()) return res.status(400).json({ ok: false, error: "use folder delete for dirs" });
-    // Its thumbnail goes too. Found before the file is gone: encrypted files
-    // pair with their poster through the real names stored inside.
-    const posters = await companionPosterPaths(fullPath).catch(() => []);
-    await fs.unlink(fullPath);
-    mediaVault.forget(fullPath);
-    const postersDeleted = [];
-    for (const p of posters) {
-      try {
-        await fs.unlink(p);
-        mediaVault.forget(p);
-        postersDeleted.push(path.basename(p));
-        const pRel = mediaRelOf(p, mediaDir);
-        const dims = await loadMediadims().catch(() => null);
-        if (dims && dims[pRel]) { delete dims[pRel]; await saveMediadims().catch(() => {}); }
-      } catch {}
-    }
-    // Prune from playlists (best-effort)
-    try {
-      const canonical = rel.split(path.sep).join("/");
-      await withPlaylistFile(async () => {
-        const data = await loadPlaylistsRaw();
-        let mutated = false;
-        for (const pl of data.playlists) {
-          const before = pl.items.length;
-          pl.items = pl.items.filter((it) => it.key !== canonical);
-          if (pl.items.length !== before) {
-            mutated = true;
-            pl.updatedAt = new Date().toISOString();
-          }
-        }
-        if (mutated) await savePlaylistsRaw(data);
-      });
-    } catch {}
-    // Prune dims cache entry (best-effort)
-    try {
-      const canonical = rel.split(path.sep).join("/");
-      const dims = await loadMediadims();
-      if (dims[canonical]) {
-        delete dims[canonical];
-        await saveMediadims();
-      }
-    } catch {}
-    // Prune custom-order scopes (best-effort): the parent folder's scope
-    // loses the basename, flat scopes lose the media-relative key.
-    try {
-      const canonical = rel.split(path.sep).join("/");
-      const parent = path.posix.dirname(canonical);
-      const parentFolder = parent === "." ? "" : parent;
-      const scopes = await loadMediaorder();
-      let mutated = false;
-      const folderScope = mediaorderScope(parentFolder, false);
-      if (Array.isArray(scopes[folderScope]) && scopes[folderScope].includes(name)) {
-        scopes[folderScope] = scopes[folderScope].filter((k) => k !== name);
-        mutated = true;
-      }
-      for (const [scope, arr] of Object.entries(scopes)) {
-        if (!scope.startsWith("flat:") || !Array.isArray(arr) || !arr.includes(canonical)) continue;
-        scopes[scope] = arr.filter((k) => k !== canonical);
-        mutated = true;
-      }
-      if (mutated) await saveMediaorder();
-    } catch {}
-    // Prune from sibling stacks (best-effort): strip the deleted filename
-    // from any .xdlstack file in the same folder. A lone file is not a
-    // stack: release it and drop the stack file.
-    try {
-      const dir = path.dirname(fullPath);
-      const deletedBase = path.basename(fullPath);
-      const stackFiles = await readStacksInFolder(dir);
-      await withStacksFile(dir, async () => {
-        for (const s of stackFiles) {
-          if (!s.items.includes(deletedBase)) continue;
-          const full = path.join(dir, s.id);
-          const data = parseStackFile(await fs.readFile(full, "utf8"));
-          data.items = data.items.filter((x) => x !== deletedBase);
-          if (data.items.length <= 1) await fs.unlink(full).catch(() => {});
-          else await fs.writeFile(full, JSON.stringify(data, null, 2), "utf8");
-        }
-      });
-    } catch {}
+    const postersDeleted = await deleteMediaFileFully(fullPath);
     return res.json({ ok: true, postersDeleted });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message });
@@ -1661,6 +1670,10 @@ app.post("/api/media/move", async (req, res) => {
     const target = String(req.body?.target || "").trim();
     const names = Array.isArray(req.body?.names) ? req.body.names.map((n) => String(n).trim()).filter(Boolean) : [];
     if (!names.length) return res.status(400).json({ ok: false, error: "names required" });
+    // Same name in the target: "ask" reports it (conflict: true + both files'
+    // size/time) so the page can ask; "replace" deletes the existing file
+    // first; "keep" moves under a free name; unset = skip as before.
+    const conflict = ["ask", "replace", "keep"].includes(String(req.body?.conflict || "")) ? String(req.body.conflict) : "";
     let targetDir;
     try {
       targetDir = resolveMediaOutputDir(target);
@@ -1725,15 +1738,30 @@ app.post("/api/media/move", async (req, res) => {
       const stat = await fs.stat(src).catch(() => null);
       if (!stat || stat.isDirectory()) { results.push({ name: path.posix.basename(key), from: key, moved: false, error: "not found" }); continue; }
       const base = path.basename(src);
-      const dest = path.join(targetDir, base);
+      let dest = path.join(targetDir, base);
       if (src === dest) { results.push({ name: base, from: key, to: target, moved: false, error: "same folder" }); continue; }
-      if (await fs.stat(dest).catch(() => null)) { results.push({ name: base, from: key, to: target, moved: false, error: "target exists" }); continue; }
+      const realBase = await realNameOf(src, base).catch(() => base);
+      const destStat = await fs.stat(dest).catch(() => null);
+      const same = (await findSameName(targetDir, realBase, { exclude: src })) || (destStat ? { path: dest, name: base, size: destStat.size, mtime: destStat.mtimeMs } : null);
+      if (same) {
+        if (conflict === "replace") {
+          await deleteMediaFileFully(same.path);
+        } else if (conflict === "keep") {
+          if (await fs.stat(dest).catch(() => null)) dest = path.join(targetDir, await uniqueMediaName(targetDir, base));
+        } else {
+          const r = { name: realBase, from: key, to: target, moved: false, error: "target exists" };
+          if (conflict === "ask") Object.assign(r, { conflict: true, existing: { name: same.name, size: same.size, mtime: same.mtime }, size: stat.size, mtime: stat.mtimeMs });
+          results.push(r);
+          continue;
+        }
+      }
       await fs.mkdir(targetDir, { recursive: true });
       await fs.rename(src, dest);
       moved++;
       const newRel = mediaRelOf(dest, mediaDir);
       const targetRel = target.replace(/\\/g, "/").replace(/^\/+/, "");
       const entry = { name: base, from: key, to: target, moved: true };
+      if (path.basename(dest) !== base) entry.savedAs = path.basename(dest);
       // Companion poster/thumbnail (<stem>-poster.<img>) travels with the
       // file: same skip-on-collision policy, sidecar cleanup per poster.
       try {
@@ -1741,14 +1769,18 @@ app.post("/api/media/move", async (req, res) => {
         if (posters.length) entry.posters = [];
         for (const poster of posters) {
           const pSrc = path.join(path.dirname(src), poster);
-          const pDest = path.join(targetDir, poster);
+          // Kept as "name (1).ext": its poster follows the new stem.
+          const oldStem = path.basename(base, path.extname(base));
+          const newStem = path.basename(dest, path.extname(dest));
+          const pName = oldStem !== newStem && poster.startsWith(oldStem) ? newStem + poster.slice(oldStem.length) : poster;
+          const pDest = path.join(targetDir, pName);
           const pStat = await fs.stat(pSrc).catch(() => null);
           if (!pStat || pStat.isDirectory()) { entry.posters.push({ name: poster, moved: false, error: "not found" }); continue; }
           if (await fs.stat(pDest).catch(() => null)) { entry.posters.push({ name: poster, moved: false, error: "target exists" }); continue; }
           await fs.rename(pSrc, pDest);
           entry.posters.push({ name: poster, moved: true });
           const oldPRel = path.posix.join(path.posix.dirname(key), poster);
-          const newPRel = targetRel ? `${targetRel}/${poster}` : poster;
+          const newPRel = targetRel ? `${targetRel}/${pName}` : pName;
           try { await cleanupMoveSidecar(oldPRel, newPRel); } catch {}
         }
       } catch {}
@@ -2356,6 +2388,50 @@ function sanitizeUploadSegments(raw) {
   }
   return segs;
 }
+// Same-name check for uploads and moves: the file in `dir` whose real name
+// is `wanted` (plain files by their name; encrypted ones by the name stored
+// inside, so only while unlocked). `listing` caches one folder's names.
+async function sameNameListing(dir) {
+  const map = new Map();
+  const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+  for (const en of entries) {
+    if (!en.isFile() || en.name.startsWith(".")) continue;
+    const full = path.join(dir, en.name);
+    const real = await realNameOf(full, en.name).catch(() => en.name);
+    if (!map.has(real)) map.set(real, full);
+  }
+  return map;
+}
+async function findSameName(dir, wanted, { exclude = null, listing = null } = {}) {
+  const map = listing || (await sameNameListing(dir));
+  const full = map.get(wanted);
+  if (!full || full === exclude) return null;
+  const st = await fs.stat(full).catch(() => null);
+  if (!st || !st.isFile()) return null;
+  return { path: full, name: wanted, size: st.size, mtime: st.mtimeMs };
+}
+// Which of these uploads would land on an existing name?
+// POST { folder, paths: ["a.mp4", "trip/b.jpg"] } → { existing: { path: { name, size, mtime } } }
+app.post("/api/media/upload/check", async (req, res) => {
+  try {
+    const folder = String(req.body?.folder || "").trim();
+    const paths = Array.isArray(req.body?.paths) ? req.body.paths.slice(0, 5000) : [];
+    const baseDir = resolveMediaOutputDir(folder);
+    const listings = new Map();
+    const existing = {};
+    for (const raw of paths) {
+      const segs = sanitizeUploadSegments(raw);
+      if (!segs) continue;
+      const dir = path.join(baseDir, ...segs.slice(0, -1));
+      const relDir = path.relative(mediaDir, dir);
+      if (relDir.startsWith("..") || path.isAbsolute(relDir)) continue;
+      if (!listings.has(dir)) listings.set(dir, await sameNameListing(dir));
+      const hit = await findSameName(dir, segs[segs.length - 1], { listing: listings.get(dir) });
+      if (hit) existing[raw] = { name: hit.name, size: hit.size, mtime: hit.mtime };
+    }
+    res.json({ ok: true, existing });
+  } catch (e) { return vaultHttpError(res, e); }
+});
 async function uniqueMediaName(dir, base) {
   const ext = path.extname(base);
   const stem = ext ? base.slice(0, -ext.length) : base;
@@ -2385,6 +2461,9 @@ app.post("/api/media/upload", async (req, res) => {
     const encrypt = mediaVault.encryptNewEnabled();
     const key = encrypt ? await mediaVault.encryptKey() : null;
     const wanted = segs[segs.length - 1];
+    // conflict=replace (the user chose it in the same-name popup): the file
+    // already called `wanted` goes once the new one is safely on disk.
+    const replace = String(req.query?.conflict || "") === "replace";
     // Encrypted uploads get a random code name; the real one is stored
     // inside the encrypted file (plan 041).
     const nextName = (n) => (key ? mediaCrypto.codeName() : uniqueMediaName(targetDir, n));
@@ -2399,8 +2478,19 @@ app.post("/api/media/upload", async (req, res) => {
     // name meanwhile). commitTempAs also covers drives with no hard links
     // (exFAT): link() is refused there, and every upload failed at the end.
     if (key) await mediaVault.ensureCopyFor(path.join(targetDir, name));
-    const finalPath = await commitTempAs(tmp, targetDir, name, nextName);
+    let finalPath = await commitTempAs(tmp, targetDir, name, nextName);
     tmp = null;
+    if (replace) {
+      const old = await findSameName(targetDir, wanted, { exclude: finalPath });
+      if (old) {
+        await deleteMediaFileFully(old.path);
+        // Plain upload saved as "name (1).ext" meanwhile: take the name back.
+        if (!key && path.basename(finalPath) !== wanted && !(await fs.stat(path.join(targetDir, wanted)).catch(() => null))) {
+          await fs.rename(finalPath, path.join(targetDir, wanted));
+          finalPath = path.join(targetDir, wanted);
+        }
+      }
+    }
     name = path.basename(finalPath);
     const rel = mediaRelOf(finalPath, mediaDir);
     res.json({ ok: true, name, rel, locked: !!key, displayName: key ? wanted : name });

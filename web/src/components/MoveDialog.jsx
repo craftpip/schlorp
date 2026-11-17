@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { askSameName, endSameNameBatch } from "./SameNamePrompt.jsx";
 
 // Folder-explorer dialog for "Move files" (plan 026). Starts at the current
 // folder, lists subfolders only; folder names enter, Up climbs, breadcrumb
@@ -84,11 +85,11 @@ export default function MoveDialog({ open, items, sourceFolder, heading, stackNo
     setCwd(i === -1 ? "" : cwd.slice(0, i));
   };
 
-  const moveOneFile = async (target, name) => {
+  const moveOneFile = async (target, name, conflict = "ask") => {
     const r = await fetch("/api/media/move", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ folder: sourceFolder || "", target, names: [name] }),
+      body: JSON.stringify({ folder: sourceFolder || "", target, names: [name], conflict }),
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) throw new Error((j && j.error) || "move failed");
@@ -146,10 +147,34 @@ export default function MoveDialog({ open, items, sourceFolder, heading, stackNo
         setProgress({ index: done, total: names.length, current: `Moving stack "${st.name || st.id}"…` });
       }
       const rest = names.filter((n) => !handled.has(n));
+      // Name already taken in the target: ask (popup) without stopping —
+      // the other files keep moving; answered ones move at the end.
+      const asked = [];
+      const take = (j) => {
+        moved += Number(j.moved) || 0;
+        for (const sm of (Array.isArray(j.stacksMoved) ? j.stacksMoved : [])) stacksMoved.push(sm);
+        for (const ss of (Array.isArray(j.stacksSkipped) ? j.stacksSkipped : [])) stacksSkipped.push(ss);
+      };
       for (let i = 0; i < rest.length; i++) {
         setProgress({ index: done + i, total: names.length, current: String(rest[i]).split("/").pop() });
         try {
           const j = await moveOneFile(target, rest[i]);
+          const clash = (Array.isArray(j.results) ? j.results : []).find((x) => x && x.conflict);
+          if (clash) {
+            const name = rest[i];
+            asked.push(askSameName({
+              kind: "move", name: clash.name, folder: target,
+              existing: clash.existing || {}, incoming: { size: clash.size, mtime: clash.mtime },
+            }).then(async (choice) => {
+              if (choice === "skip") { results.push({ name: clash.name, moved: false, skipped: true, error: "skipped (name taken)" }); return; }
+              try {
+                const j2 = await moveOneFile(target, name, choice);
+                take(j2);
+                for (const res of (Array.isArray(j2.results) ? j2.results : [])) results.push(res);
+              } catch (e) { results.push({ name: clash.name, moved: false, error: e.message || String(e) }); }
+            }));
+            continue;
+          }
           moved += Number(j.moved) || 0;
           for (const res of (Array.isArray(j.results) ? j.results : [])) results.push(res);
           // A leftover full-stack candidate the dialog didn't know about
@@ -160,6 +185,11 @@ export default function MoveDialog({ open, items, sourceFolder, heading, stackNo
           results.push({ name: String(rest[i]).split("/").pop(), moved: false, error: e.message || String(e) });
         }
       }
+      if (asked.length) {
+        setProgress({ index: names.length - asked.length, total: names.length, current: `${asked.length} file${asked.length === 1 ? "" : "s"} with a taken name — waiting for your answer` });
+        await Promise.all(asked);
+      }
+      endSameNameBatch("move");
       setProgress({ index: names.length, total: names.length, current: "" });
       onDone({ ok: true, moved, results, stacksMoved, stacksSkipped });
     } catch (e) {
