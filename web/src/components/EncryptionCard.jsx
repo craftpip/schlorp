@@ -124,10 +124,8 @@ export default function EncryptionCard() {
       </div>
     );
   } else {
-    // Set up and unlocked: nothing to do here — no status card (plan 043).
-    const warn = vault.error || (vault.hasPattern && !vault.patternSlot);
-    if (!warn && !err && !msg) return null;
-    body = null;
+    // Set up and unlocked: show the key's status in place of the button.
+    body = <KeyStatus vault={vault} />;
   }
 
   return (
@@ -146,6 +144,33 @@ export default function EncryptionCard() {
         {err && <div style={{ color: "#f87171" }}>{err}</div>}
         {msg && <div style={{ color: "#10b981" }}>{msg}</div>}
       </div>
+    </div>
+  );
+}
+
+// Key status once encryption is on: where the key file lives, what opens it,
+// whether it's open right now and what happens to new files.
+function KeyStatus({ vault }) {
+  const row = (label, value, testid) => (
+    <div style={{ display: "flex", gap: 8 }} data-testid={testid}>
+      <span style={{ minWidth: 130, color: "var(--muted)" }}>{label}</span>
+      <span>{value}</span>
+    </div>
+  );
+  const created = vault.createdAt ? new Date(vault.createdAt) : null;
+  const copies = vault.copies || [];
+  const opens = ["password", vault.patternSlot ? "pattern" : null].filter(Boolean).join(" or ");
+  const mins = Number(vault.autoLockMinutes) || 0;
+  return (
+    <div data-testid="enc-status" style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+      <div style={{ color: "#10b981", fontWeight: 600 }}><i className="bi bi-unlock" /> Encryption is on — key unlocked</div>
+      {row("Key", <code>{vault.keyId}</code>, "enc-status-key")}
+      {created && !Number.isNaN(created.getTime()) && row("Created", created.toLocaleString())}
+      {row("Opens with", opens)}
+      {row("Key file", copies.length ? copies.map((c) => (c === "." ? "media root" : c)).join(", ") : "—", "enc-status-copies")}
+      {row("New files", vault.encryptNew ? "encrypted automatically" : "saved unencrypted (ENCRYPT_NEW_MEDIA=0)", "enc-status-new")}
+      {row("Locks", mins ? `after ${mins} min idle (logs out everywhere)` : "only when the server restarts")}
+      <div style={{ color: "var(--muted)" }}>Existing files stay as they are — encrypt them from the Media page (right-click → Encrypt).</div>
     </div>
   );
 }
