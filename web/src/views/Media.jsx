@@ -1986,11 +1986,23 @@ const collapseSpreadUnlessMember = (fid) => {
       const mainIt = itemsRef.current.find((x) => !x.dir && rowKey(x) === k);
       if (mainIt) bindCompareRef.current(d.key, mainIt);
     };
-    const onCancel = () => { if (shiftDragRef.current) clear(); };
+    // A native drag took over (Firefox, or Chrome when it does start one):
+    // stop the pointer tracking only. compareDragRef belongs to the native
+    // path now — the tile's onDragStart has just set it (React's root
+    // listener runs before this window listener), so it must not be reset.
+    const onCancel = () => {
+      const d = shiftDragRef.current;
+      if (!d) return;
+      shiftDragRef.current = null;
+      if (ghost) { ghost.remove(); ghost = null; }
+      document.body.style.cursor = "";
+      // Even when the pointer tracking had already activated (its first
+      // move comes before dragstart), compareDragRef is left alone.
+    };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
     window.addEventListener("pointercancel", onCancel);
-    window.addEventListener("dragstart", onCancel); // a native drag took over
+    window.addEventListener("dragstart", onCancel);
     return () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
