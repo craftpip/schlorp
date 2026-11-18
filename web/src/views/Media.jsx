@@ -1904,7 +1904,10 @@ const collapseSpreadUnlessMember = (fid) => {
       onDragOver: (e) => {
         if (!active(e)) { if (compareDropKey === k) setCompareDropKey(null); return; }
         e.preventDefault(); e.stopPropagation();
-        e.dataTransfer.dropEffect = "link";
+        // Must be an effect the drag source allows: tiles/rows set
+        // effectAllowed "move" (or leave it open), and a dropEffect outside
+        // it makes the browser cancel the drop before onDrop fires.
+        e.dataTransfer.dropEffect = "move";
         if (dropInfo) setDropInfo(null);
         if (compareDropKey !== k) setCompareDropKey(k);
       },
@@ -1922,6 +1925,81 @@ const collapseSpreadUnlessMember = (fid) => {
   };
   const startCompareDrag = (e, k) => { compareDragRef.current = { key: k, shift: !!e.shiftKey }; };
   const endCompareDrag = () => { compareDragRef.current = { key: null, shift: false }; setCompareDropKey(null); };
+  // Chrome never starts a native drag when Shift is held at mouse-down (it
+  // means "extend selection"), so Shift+press → move → release is tracked
+  // with pointer events instead. The HTML5 path above still covers pressing
+  // Shift after a drag has started.
+  const shiftDragRef = useRef(null); // { key, x, y, active }
+  const bindCompareRef = useRef(bindCompare);
+  bindCompareRef.current = bindCompare;
+  const compareShiftDown = (e, k) => {
+    if (!e.shiftKey || e.button !== 0 || e.pointerType !== "mouse") return;
+    shiftDragRef.current = { key: k, x: e.clientX, y: e.clientY, active: false };
+  };
+  useEffect(() => {
+    const fileKeyAt = (x, y) => {
+      const el = document.elementFromPoint(x, y);
+      const hit = el && el.closest && el.closest('[data-testid="media-tile-file"], [data-testid="media-row"].mrow-file');
+      return hit ? hit.getAttribute("data-filename") : null;
+    };
+    let ghost = null;
+    const clear = () => {
+      shiftDragRef.current = null;
+      compareDragRef.current = { key: null, shift: false };
+      setCompareDropKey(null);
+      if (ghost) { ghost.remove(); ghost = null; }
+      document.body.style.cursor = "";
+    };
+    const onMove = (e) => {
+      const d = shiftDragRef.current;
+      if (!d) return;
+      if (!d.active) {
+        if (Math.hypot(e.clientX - d.x, e.clientY - d.y) < 6) return;
+        d.active = true;
+        compareDragRef.current = { key: d.key, shift: true };
+        const it = itemsRef.current.find((x) => !x.dir && rowKey(x) === d.key);
+        ghost = document.createElement("div");
+        ghost.setAttribute("data-testid", "media-compare-ghost");
+        ghost.textContent = `⇆ ${it ? (it.displayName || it.name) : d.key}`;
+        Object.assign(ghost.style, { position: "fixed", zIndex: 9999, pointerEvents: "none", padding: "4px 10px", borderRadius: "999px", background: "rgba(99,102,241,.92)", color: "#fff", font: "600 12px system-ui, sans-serif", whiteSpace: "nowrap", maxWidth: "260px", overflow: "hidden", textOverflow: "ellipsis", boxShadow: "0 4px 14px rgba(0,0,0,.35)" });
+        document.body.appendChild(ghost);
+        document.body.style.cursor = "copy";
+        try { window.getSelection().removeAllRanges(); } catch {}
+      }
+      e.preventDefault();
+      if (ghost) { ghost.style.left = `${e.clientX + 14}px`; ghost.style.top = `${e.clientY + 14}px`; }
+      const k = fileKeyAt(e.clientX, e.clientY);
+      setCompareDropKey(k && k !== d.key ? k : null);
+    };
+    const onUp = (e) => {
+      const d = shiftDragRef.current;
+      if (!d) return;
+      const wasActive = d.active;
+      const k = wasActive ? fileKeyAt(e.clientX, e.clientY) : null;
+      clear();
+      if (!wasActive) return;
+      // The release must not also count as a Shift+click (range select).
+      const eat = (ev) => { ev.stopPropagation(); ev.preventDefault(); };
+      window.addEventListener("click", eat, { capture: true, once: true });
+      setTimeout(() => window.removeEventListener("click", eat, { capture: true }), 0);
+      if (!k || k === d.key) return;
+      const mainIt = itemsRef.current.find((x) => !x.dir && rowKey(x) === k);
+      if (mainIt) bindCompareRef.current(d.key, mainIt);
+    };
+    const onCancel = () => { if (shiftDragRef.current) clear(); };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
+    window.addEventListener("dragstart", onCancel); // a native drag took over
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      window.removeEventListener("dragstart", onCancel);
+      if (ghost) ghost.remove();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isFlat]);
 
   const delFile = (it) => {
     setDeleteTarget(it);
@@ -2311,6 +2389,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         title={dragEnabled ? `${displayName(it)} — drag to reorder` : `${displayName(it)} — click to select, double-click to open`}
         draggable={isCoarse ? false : (dragEnabled || (gridMulti && !isDir))}
         {...(!isDir ? compareDropProps(it) : {})}
+        onPointerDown={!isDir ? (e) => compareShiftDown(e, rk) : undefined}
         onDragStart={(e) => {
           if (isCoarse) return;
           if (!(dragEnabled || (gridMulti && !isDir))) return;
@@ -4843,6 +4922,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                         {...(it.dir ? folderDropProps(`dir:${ky}`, folderPathOf(it), displayName(it)) : {})}
                         draggable={!it.dir && !isCoarsePointer() && !inPlaylistView}
                         {...(!it.dir ? compareDropProps(it) : {})}
+                        onPointerDown={it.dir ? undefined : (e) => compareShiftDown(e, ky)}
                         onDragEnd={it.dir ? undefined : endCompareDrag}
                         onDragStart={it.dir ? undefined : (e) => {
                           startCompareDrag(e, ky);

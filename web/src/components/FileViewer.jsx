@@ -1561,7 +1561,8 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
   // its bound source. The source is drawn over the main image with the same
   // box and transform (so zoom/pan keep lining up) and clipped at a split:
   // left of the split = source, right = this file. Desktop: the split follows
-  // the mouse (hidden when the mouse leaves). Touch: a draggable slider.
+  // the mouse and returns to the middle when it leaves. Touch: a draggable
+  // slider. Every file opens split in half.
   // The split is written straight to the DOM — no re-render per mouse move.
   const [compareOn, setCompareOn] = useState(true);
   const compareTouch = useMemo(() => { try { return !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches); } catch { return false; } }, []);
@@ -3079,16 +3080,17 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
     }
   };
   const compareActive = !!compareSrc && showImage && compareOn && !tracking && !loading;
-  // Desktop: the split follows the mouse over the stage; leaving shows the
-  // main file whole again. Touch: start centred, the slider moves it.
+  // Opens at half: left = compare source, right = this file. Desktop: the
+  // split follows the mouse and goes back to half when it leaves the stage.
+  // Touch: the slider moves it.
   useEffect(() => {
     if (!compareActive) return undefined;
-    applyCompareSplit(compareTouch ? (cmpPosRef.current ?? 0.5) : null);
+    applyCompareSplit(0.5);
     if (compareTouch) return undefined;
     const el = containerRef.current;
     if (!el) return undefined;
     const move = (e) => compareSplitAt(e.clientX);
-    const leave = () => applyCompareSplit(null);
+    const leave = () => applyCompareSplit(0.5);
     el.addEventListener("mousemove", move);
     el.addEventListener("mouseleave", leave);
     return () => { el.removeEventListener("mousemove", move); el.removeEventListener("mouseleave", leave); };
@@ -3497,7 +3499,7 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
             <>
               <img key={`cmp|${compareSrc}`} ref={cmpImgRef} data-testid="viewer-compare-source" src={compareSrc} alt={compareLabel || "compare source"} draggable={false} onContextMenu={(e) => e.preventDefault()}
                 onLoad={() => applyCompareSplit(cmpPosRef.current)}
-                style={{ position: "absolute", inset: 0, margin: "auto", zIndex: 1, width: mediaW, height: mediaH, objectFit: "contain", background: "#000", pointerEvents: "none", clipPath: "inset(0 100% 0 0)", opacity: mediaReady ? 1 : 0, transition: zoom === 1 ? "opacity .45s ease, transform 0.15s" : "opacity .45s ease", transform: `translate(${pan.x}px, ${pan.y}px) rotate(${rotate}deg) scale(${zoom})`, transformOrigin: origin, WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none" }} />
+                style={{ position: "absolute", inset: 0, margin: "auto", zIndex: 1, width: mediaW, height: mediaH, objectFit: "contain", background: "#000", pointerEvents: "none", clipPath: "inset(0 50% 0 0)", opacity: mediaReady ? 1 : 0, transition: zoom === 1 ? "opacity .45s ease, transform 0.15s" : "opacity .45s ease", transform: `translate(${pan.x}px, ${pan.y}px) rotate(${rotate}deg) scale(${zoom})`, transformOrigin: origin, WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none" }} />
               <div ref={cmpLineRef} data-testid="viewer-compare-line"
                 onPointerDown={compareTouch ? (e) => { e.stopPropagation(); e.preventDefault(); try { e.currentTarget.setPointerCapture(e.pointerId); } catch {} compareSplitAt(e.clientX); } : undefined}
                 onPointerMove={compareTouch ? (e) => { if (e.buttons || e.pointerType === "touch") { e.stopPropagation(); compareSplitAt(e.clientX); } } : undefined}
