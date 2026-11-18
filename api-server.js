@@ -98,6 +98,7 @@ function isPanelProtected() {
 // --- Media encryption (plan 039) ---
 const mediaCrypto = require("./scan-videos/media-crypto");
 const { createMediaVault, safeStoredName } = require("./scan-videos/media-vault");
+const { createCompareStore, normRel: normCompareRel } = require("./scan-videos/media-compare");
 const mediaVault = createMediaVault({ mediaDir, rootDir, isProtected: isPanelProtected });
 let lastPanelActivity = Date.now();
 function vaultStatusFull() {
@@ -1140,6 +1141,19 @@ async function listMediaDir(resolved, flat) {
       }
     }
   } catch {}
+  // Compare links: a main file carries its source's media-relative path.
+  try {
+    const links = await mediaCompare.all();
+    if (Object.keys(links).length) {
+      const base = path.relative(mediaDir, resolved).split(path.sep).join("/");
+      for (const it of items) {
+        if (it.dir) continue;
+        const key = it.rel || it.name;
+        const src = links[base && base !== "." ? `${base}/${key}` : key];
+        if (src) it.compareWith = src;
+      }
+    }
+  } catch {}
   return items;
 }
 
@@ -1149,6 +1163,8 @@ async function listMediaDir(resolved, flat) {
 // by mtimeMs+size. Probes never block listings: requests serve cached
 // ratios inline, misses warm in the background for the next visit.
 const mediadimsFile = path.join(rootDir, ".mediadims.json");
+// Image compare links main → source (ComfyUI-style slider in the viewer).
+const mediaCompare = createCompareStore({ file: path.join(rootDir, ".mediacompare.json") });
 let mediadimsChain = Promise.resolve();
 async function withMediadimsFile(fn) {
   let result, error;
@@ -1430,6 +1446,7 @@ async function deleteMediaFileFully(fullPath) {
       if (mutated) await savePlaylistsRaw(data);
     });
   } catch {}
+  try { await mediaCompare.forget(rel.split(path.sep).join("/")); } catch {}
   // Prune dims cache entry (best-effort)
   try {
     const canonical = rel.split(path.sep).join("/");
@@ -1521,7 +1538,39 @@ app.post("/api/media/rename", async (req, res) => {
     const exists = await fs.stat(newPath).catch(() => null);
     if (exists) return res.status(400).json({ ok: false, error: "a folder with that name already exists" });
     await fs.rename(fullPath, newPath);
+    try { await mediaCompare.renamePrefix(rel.split(path.sep).join("/"), rel2.split(path.sep).join("/")); } catch {}
     return res.json({ ok: true });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+// Image compare links. Shift+drag file1 onto file2 in the library binds
+// main=file2 → source=file1; viewing file2 slides between the two.
+app.get("/api/compare", async (_req, res) => {
+  try { return res.json({ ok: true, links: await mediaCompare.all() }); }
+  catch (error) { return res.status(500).json({ ok: false, error: error.message }); }
+});
+app.post("/api/compare", async (req, res) => {
+  try {
+    const main = normCompareRel(req.body?.main), source = normCompareRel(req.body?.source);
+    if (!main || !source) return res.status(400).json({ ok: false, error: "main and source required" });
+    if (main === source) return res.status(400).json({ ok: false, error: "a file can't be compared with itself" });
+    for (const rel of [main, source]) {
+      const st = await fs.stat(path.join(mediaDir, ...rel.split("/"))).catch(() => null);
+      if (!st || !st.isFile()) return res.status(404).json({ ok: false, error: `not found: ${rel}` });
+    }
+    await mediaCompare.bind(main, source);
+    return res.json({ ok: true, main, source });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+app.delete("/api/compare", async (req, res) => {
+  try {
+    const main = normCompareRel(req.body?.main || req.query?.main);
+    if (!main) return res.status(400).json({ ok: false, error: "main required" });
+    const removed = await mediaCompare.unbind(main);
+    return res.json({ ok: true, removed });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message });
   }
@@ -1541,6 +1590,7 @@ app.post("/api/media/folder/delete", async (req, res) => {
     if (!stat) return res.status(404).json({ ok: false, error: "not found" });
     if (!stat.isDirectory()) return res.status(400).json({ ok: false, error: "not a folder" });
     await fs.rm(fullPath, { recursive: true, force: true });
+    try { await mediaCompare.forget(rel.split(path.sep).join("/"), { prefix: true }); } catch {}
     return res.json({ ok: true });
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message });
@@ -1575,6 +1625,7 @@ app.post("/api/media/folder", async (req, res) => {
 // File move (media grid "Move files", plan 026): moves files within media.
 // Best-effort sidecar cleanup mirrors DELETE /api/media above.
 async function cleanupMoveSidecar(oldRel, newRel) {
+  try { await mediaCompare.rename(oldRel, newRel); } catch {}
   // Playlists — rewrite item keys oldRel -> newRel
   try {
     await withPlaylistFile(async () => {
@@ -1817,6 +1868,7 @@ async function purgePlainCachesFor(fullPath, beforeStat) {
 // Playlists, the size cache, custom order and stacks follow it in place.
 async function renameMediaKeyInPlace(oldRel, newRel) {
   if (!oldRel || !newRel || oldRel === newRel) return;
+  try { await mediaCompare.rename(oldRel, newRel); } catch {}
   const oldBase = path.posix.basename(oldRel);
   const newBase = path.posix.basename(newRel);
   const parent = path.posix.dirname(oldRel);

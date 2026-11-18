@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import ShortcutsHelp from "./ShortcutsHelp";
 import PlaylistHoverMenu from "./PlaylistHoverMenu.jsx";
 import { usePlaylists } from "../store/PlaylistsContext.jsx";
@@ -1386,7 +1386,7 @@ function deriveTitleLocal(url, filePath) {
     return u.hostname.replace(/^www\./, "") + u.pathname.slice(0, 40);
   } catch { return url; }
 }
-export default function FileViewer({ src, title, name, filePath, url, file, viewable, idx, onPrev, onNext, onGoto, onClose, onDeleted }) {
+export default function FileViewer({ src, title, name, filePath, url, file, viewable, idx, onPrev, onNext, onGoto, onClose, onDeleted, compareSrc, compareLabel }) {
   const effFilePath = filePath || file?.filePath || "";
   const effUrl = url || file?.url || "";
   const effSrc = src || (effFilePath ? toMediaUrlLocal(effFilePath) : "");
@@ -1557,6 +1557,35 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
   const mediaH = transposed && stageSize.w && stageSize.h ? stageSize.w : "100%";
   const videoishRef = useRef(false);
   videoishRef.current = isVideo || gifAsVideoEff;
+  // --- Image compare (ComfyUI-style). This file is the "main"; compareSrc is
+  // its bound source. The source is drawn over the main image with the same
+  // box and transform (so zoom/pan keep lining up) and clipped at a split:
+  // left of the split = source, right = this file. Desktop: the split follows
+  // the mouse (hidden when the mouse leaves). Touch: a draggable slider.
+  // The split is written straight to the DOM — no re-render per mouse move.
+  const [compareOn, setCompareOn] = useState(true);
+  const compareTouch = useMemo(() => { try { return !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches); } catch { return false; } }, []);
+  const cmpImgRef = useRef(null);
+  const cmpLineRef = useRef(null);
+  const cmpPosRef = useRef(null); // 0..1, or null = not splitting (main shown whole)
+  const applyCompareSplit = useCallback((f) => {
+    cmpPosRef.current = f;
+    const ov = cmpImgRef.current, line = cmpLineRef.current;
+    if (!ov) return;
+    if (f == null) { ov.style.clipPath = "inset(0 100% 0 0)"; if (line) line.style.display = "none"; return; }
+    ov.style.clipPath = `inset(0 ${((1 - f) * 100).toFixed(3)}% 0 0)`;
+    const box = imgRef.current && imgRef.current.getBoundingClientRect();
+    const stage = containerRef.current && containerRef.current.getBoundingClientRect();
+    if (line && box && stage && box.width) {
+      line.style.display = "block";
+      line.style.left = `${box.left - stage.left + f * box.width}px`;
+    }
+  }, []);
+  const compareSplitAt = useCallback((clientX) => {
+    const box = imgRef.current && imgRef.current.getBoundingClientRect();
+    if (!box || !box.width) return;
+    applyCompareSplit(Math.min(1, Math.max(0, (clientX - box.left) / box.width)));
+  }, [applyCompareSplit]);
   const showImageRef = useRef(false);
   showImageRef.current = showImage;
   const rotateRef = useRef(0);
@@ -3049,6 +3078,28 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
       wasPlayingRef.current = false;
     }
   };
+  const compareActive = !!compareSrc && showImage && compareOn && !tracking && !loading;
+  // Desktop: the split follows the mouse over the stage; leaving shows the
+  // main file whole again. Touch: start centred, the slider moves it.
+  useEffect(() => {
+    if (!compareActive) return undefined;
+    applyCompareSplit(compareTouch ? (cmpPosRef.current ?? 0.5) : null);
+    if (compareTouch) return undefined;
+    const el = containerRef.current;
+    if (!el) return undefined;
+    const move = (e) => compareSplitAt(e.clientX);
+    const leave = () => applyCompareSplit(null);
+    el.addEventListener("mousemove", move);
+    el.addEventListener("mouseleave", leave);
+    return () => { el.removeEventListener("mousemove", move); el.removeEventListener("mouseleave", leave); };
+  }, [compareActive, compareTouch, compareSrc, loadedUrl, applyCompareSplit, compareSplitAt]);
+  // Keep the line on the split while zoom/pan/rotation/stage size change.
+  useEffect(() => {
+    if (!compareActive || cmpPosRef.current == null) return undefined;
+    const t = setTimeout(() => applyCompareSplit(cmpPosRef.current), 170); // after the .15s transform
+    applyCompareSplit(cmpPosRef.current);
+    return () => clearTimeout(t);
+  }, [compareActive, zoom, pan, rotate, stageSize, mediaReady, applyCompareSplit]);
   useEffect(() => {
     const onKey = (e) => {
       if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable) return;
@@ -3441,6 +3492,44 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
             <span data-testid="viewer-loading" style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", pointerEvents: "none", zIndex: 2 }}>
               <span className="xdl-thumb-spinner" />
             </span>
+          )}
+          {compareActive && (
+            <>
+              <img key={`cmp|${compareSrc}`} ref={cmpImgRef} data-testid="viewer-compare-source" src={compareSrc} alt={compareLabel || "compare source"} draggable={false} onContextMenu={(e) => e.preventDefault()}
+                onLoad={() => applyCompareSplit(cmpPosRef.current)}
+                style={{ position: "absolute", inset: 0, margin: "auto", zIndex: 1, width: mediaW, height: mediaH, objectFit: "contain", background: "#000", pointerEvents: "none", clipPath: "inset(0 100% 0 0)", opacity: mediaReady ? 1 : 0, transition: zoom === 1 ? "opacity .45s ease, transform 0.15s" : "opacity .45s ease", transform: `translate(${pan.x}px, ${pan.y}px) rotate(${rotate}deg) scale(${zoom})`, transformOrigin: origin, WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none" }} />
+              <div ref={cmpLineRef} data-testid="viewer-compare-line"
+                onPointerDown={compareTouch ? (e) => { e.stopPropagation(); e.preventDefault(); try { e.currentTarget.setPointerCapture(e.pointerId); } catch {} compareSplitAt(e.clientX); } : undefined}
+                onPointerMove={compareTouch ? (e) => { if (e.buttons || e.pointerType === "touch") { e.stopPropagation(); compareSplitAt(e.clientX); } } : undefined}
+                onTouchStart={compareTouch ? (e) => e.stopPropagation() : undefined}
+                onTouchMove={compareTouch ? (e) => e.stopPropagation() : undefined}
+                onTouchEnd={compareTouch ? (e) => e.stopPropagation() : undefined}
+                onMouseDown={compareTouch ? (e) => e.stopPropagation() : undefined}
+                onClick={compareTouch ? (e) => e.stopPropagation() : undefined}
+                style={{ position: "absolute", top: 0, bottom: 0, left: "50%", width: compareTouch ? 44 : 2, marginLeft: compareTouch ? -22 : -1, zIndex: 3, display: "none", pointerEvents: compareTouch ? "auto" : "none", touchAction: "none", cursor: "ew-resize" }}>
+                <span style={{ position: "absolute", top: 0, bottom: 0, left: "50%", width: 2, marginLeft: -1, background: "rgba(255,255,255,.9)", boxShadow: "0 0 0 1px rgba(0,0,0,.45)" }} />
+                {compareTouch && (
+                  <span style={{ position: "absolute", top: "50%", left: "50%", width: 36, height: 36, marginLeft: -18, marginTop: -18, borderRadius: 999, background: "rgba(255,255,255,.95)", color: "#111", display: "grid", placeItems: "center", boxShadow: "0 2px 10px rgba(0,0,0,.5)" }}>
+                    <i className="bi bi-arrows-expand-vertical" style={{ fontSize: 16 }} />
+                  </span>
+                )}
+              </div>
+            </>
+          )}
+          {compareSrc && showImage && !tracking && (
+            <div style={{ position: "absolute", left: 10, right: 10, bottom: 10, zIndex: 4, display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: 8, pointerEvents: "none" }}>
+              <button type="button" data-testid="viewer-compare-toggle" aria-pressed={compareOn}
+                onClick={(e) => { e.stopPropagation(); setCompareOn((v) => !v); }}
+                onMouseDown={(e) => e.stopPropagation()} onTouchStart={(e) => e.stopPropagation()} onTouchEnd={(e) => e.stopPropagation()}
+                title={compareOn ? "Comparing — click to view this file alone" : "Compare with the source file"}
+                style={{ pointerEvents: "auto", maxWidth: "48%", display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 10px", borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: compareOn ? "rgba(99,102,241,.9)" : "rgba(0,0,0,.6)", color: "#fff", fontSize: 11, backdropFilter: "blur(6px)", overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>
+                <i className="bi bi-layout-split" />
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{compareOn ? `◀ ${compareLabel || "source"}` : "Compare"}</span>
+              </button>
+              {compareOn && (
+                <span style={{ maxWidth: "48%", padding: "4px 10px", borderRadius: 999, background: "rgba(0,0,0,.6)", color: "#fff", fontSize: 11, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>{titleEff} ▶</span>
+              )}
+            </div>
           )}
           {loading ? null : showImage ? (
             <img key={loadedUrl} ref={imgRef} src={loadedUrl} alt={titleEff} onContextMenu={(e) => e.preventDefault()} draggable={false} onLoad={() => setMediaReady(true)} onError={isGif ? () => setGifAsVideo(true) : () => setMediaReady(true)} style={{ width: mediaW, height: mediaH, objectFit: "contain", background: "#000", borderRadius: 0, opacity: mediaReady ? 1 : 0, transition: (!tracking && zoom===1) ? "opacity .45s ease, transform 0.15s" : "opacity .45s ease", transform: tracking ? trackViewRef.current.transform : `translate(${pan.x}px, ${pan.y}px) rotate(${rotate}deg) scale(${zoom})`, transformOrigin: origin, WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none" }} />

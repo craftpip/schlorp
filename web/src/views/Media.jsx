@@ -163,6 +163,11 @@ export default function Media() {
   const [dropInfo, setDropInfo] = useState(null);
   const dragKeyRef = useRef(null);
   const dragKeysRef = useRef(null); // pile drag: whole member block moves as one
+  // Shift+drag file1 onto file2 = compare file2 against file1 in the viewer.
+  // The dragged key and whether Shift was down at drag start (some platforms
+  // drop modifier state on dragover) live here; compareDropKey lights the target.
+  const compareDragRef = useRef({ key: null, shift: false });
+  const [compareDropKey, setCompareDropKey] = useState(null);
   const customOrderMap = useMemo(() => {
     const m = new Map();
     for (let i = 0; i < customOrder.length; i++) {
@@ -1854,6 +1859,70 @@ const collapseSpreadUnlessMember = (fid) => {
     ns.delete("flat");
     setSearchParams(ns);
   };
+  // --- Image compare (main ← source). Paths are media-relative. ---
+  const mediaRelOfItem = (it) => { const k = rowKey(it); if (it && it._isPlaylistItem) return k; return folder ? `${folder}/${k}` : k; };
+  const isCompareImage = (it) => !!it && !it.dir && /^(photo|gif)$/.test(fileCategory(it.displayName || it.name));
+  const setCompareLocal = (mainKey, source) => setItems((prev) => prev.map((x) => {
+    if (x.dir || rowKey(x) !== mainKey) return x;
+    const { compareWith: _drop, ...rest } = x;
+    return source ? { ...rest, compareWith: source } : rest;
+  }));
+  const bindCompare = async (sourceKey, mainIt) => {
+    const sourceIt = items.find((x) => !x.dir && rowKey(x) === sourceKey);
+    if (!sourceIt || !mainIt || rowKey(mainIt) === sourceKey) return;
+    if (!isCompareImage(sourceIt) || !isCompareImage(mainIt)) {
+      setAlertState({ open: true, title: "Can't compare", message: "Compare works between two images (unlock the vault first for encrypted files)." });
+      return;
+    }
+    try {
+      const r = await fetch("/api/compare", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ main: mediaRelOfItem(mainIt), source: mediaRelOfItem(sourceIt) }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || "bind failed");
+      setCompareLocal(rowKey(mainIt), j.source);
+    } catch (e) {
+      setAlertState({ open: true, title: "Compare failed", message: e.message || String(e) });
+    }
+  };
+  const unbindCompare = async (mainIt) => {
+    if (!mainIt) return;
+    try {
+      const r = await fetch("/api/compare", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ main: mediaRelOfItem(mainIt) }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || "unbind failed");
+      setCompareLocal(rowKey(mainIt), null);
+    } catch (e) {
+      setAlertState({ open: true, title: "Unbind failed", message: e.message || String(e) });
+    }
+  };
+  // Drag handlers that turn a file tile/row into a Shift+drop compare target.
+  // They swallow the event only while a compare drag is over them, so plain
+  // drags keep reordering / stacking / moving as before.
+  const compareDropProps = (it) => {
+    const k = rowKey(it);
+    const active = (e) => { const d = compareDragRef.current; return !!d.key && d.key !== k && (e.shiftKey || d.shift); };
+    return {
+      onDragOver: (e) => {
+        if (!active(e)) { if (compareDropKey === k) setCompareDropKey(null); return; }
+        e.preventDefault(); e.stopPropagation();
+        e.dataTransfer.dropEffect = "link";
+        if (dropInfo) setDropInfo(null);
+        if (compareDropKey !== k) setCompareDropKey(k);
+      },
+      onDragLeave: (e) => { if (!e.currentTarget.contains(e.relatedTarget) && compareDropKey === k) setCompareDropKey(null); },
+      onDrop: (e) => {
+        if (!active(e)) return;
+        e.preventDefault(); e.stopPropagation();
+        const src = compareDragRef.current.key;
+        compareDragRef.current = { key: null, shift: false };
+        dragKeyRef.current = null; dragKeysRef.current = null;
+        setCompareDropKey(null); setDropInfo(null);
+        bindCompare(src, it);
+      },
+    };
+  };
+  const startCompareDrag = (e, k) => { compareDragRef.current = { key: k, shift: !!e.shiftKey }; };
+  const endCompareDrag = () => { compareDragRef.current = { key: null, shift: false }; setCompareDropKey(null); };
+
   const delFile = (it) => {
     setDeleteTarget(it);
   };
@@ -2241,9 +2310,11 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         onContextMenu={(e) => { if (e.ctrlKey) { e.preventDefault(); toggleSelection({ kind: "file", it, key: rk }); return; } if (!isDir && (gridMulti || (it && it._isPlaylistItem))) { e.preventDefault(); openContextMenu(e, { kind: "file", it, key: rk }); } }}
         title={dragEnabled ? `${displayName(it)} — drag to reorder` : `${displayName(it)} — click to select, double-click to open`}
         draggable={isCoarse ? false : (dragEnabled || (gridMulti && !isDir))}
+        {...(!isDir ? compareDropProps(it) : {})}
         onDragStart={(e) => {
           if (isCoarse) return;
           if (!(dragEnabled || (gridMulti && !isDir))) return;
+          startCompareDrag(e, rk);
           // Dragging an unselected file carries just that file — never a
           // stale multi-selection (dragstart suppresses the click that
           // would otherwise select it first).
@@ -2274,7 +2345,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
           // Stack drag: carry the dragged file(s) so pile drop targets add them
           try { e.dataTransfer.setData("application/x-xdl-stack", JSON.stringify(carry)); } catch {}
         }}
-        onDragEnd={() => { dragKeyRef.current = null; dragKeysRef.current = null; if (dropInfo) setDropInfo(null); }}
+        onDragEnd={() => { endCompareDrag(); dragKeyRef.current = null; dragKeysRef.current = null; if (dropInfo) setDropInfo(null); }}
         style={{ position: "relative", flex: isDir ? "0 0 auto" : "0 0 auto", width: w, height: h, overflow: (menuOpen || isDropTarget) ? "visible" : "hidden", zIndex: menuOpen ? 60 : "auto", borderRadius: highlight || stackColor ? 10 : 0, background: isDir ? "var(--surface-2)" : "var(--surface-2)", outline: highlight ? "4px solid #fff" : (stackColor ? `3px solid ${stackColor}` : "none"), cursor: dragEnabled ? "grab" : "pointer", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, contentVisibility: menuOpen ? "visible" : "auto", containIntrinsicSize: `${w}px ${h}px`, animation: anim || undefined, userSelect: "none", WebkitUserSelect: "none", touchAction: "manipulation" }}
       >
         {src ? (
@@ -2327,6 +2398,16 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
               </div>
             )}
           </div>
+        )}
+        {!isDir && it.compareWith && (
+          <span data-testid="media-tile-compare" title={`Compares with ${String(it.compareWith).split("/").pop()} — right-click to unbind`} style={{ position: "absolute", top: !it.locked && vaultOn ? 32 : 6, right: 6, zIndex: 3, width: 22, height: 22, borderRadius: 999, display: "grid", placeItems: "center", background: "rgba(99,102,241,.85)", color: "#fff", pointerEvents: "none" }}>
+            <i className="bi bi-layout-split" style={{ fontSize: 11 }} />
+          </span>
+        )}
+        {compareDropKey === rk && (
+          <span data-testid="media-compare-drop" style={{ position: "absolute", inset: 0, zIndex: 6, display: "grid", placeItems: "center", background: "rgba(99,102,241,.35)", outline: "3px dashed #a5b4fc", outlineOffset: -3, color: "#fff", fontSize: 12, fontWeight: 600, textAlign: "center", padding: 8, pointerEvents: "none" }}>
+            <span><i className="bi bi-layout-split" /> Compare with<br />{(() => { const sk = compareDragRef.current.key; const sit = sk && items.find((x) => rowKey(x) === sk); return sit ? displayName(sit) : "dragged file"; })()}</span>
+          </span>
         )}
         {isDropTarget && (
           <span data-testid="media-drop-line" style={{
@@ -4758,10 +4839,13 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                     const isSel = selKey === ky || selKeys.has(ky);
                     const isBookmarked = pk ? bookmarkedKeys.has(pk) : false;
                     return (
-                      <div key={isFlat ? it.rel || it.name : it.name} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={isSel} className={it.dir ? "mrow mrow-dir" : "mrow mrow-file"} style={{ display: "grid", gridTemplateColumns: "subgrid", gridColumn: "1 / -1", gap: "0 10px", alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: it.dir && folderDrop && folderDrop.key === `dir:${ky}` ? "rgba(99,102,241,0.22)" : isSel ? "rgba(99,102,241,0.14)" : it.dir ? "var(--surface-2)" : "var(--surface)", cursor: "pointer", userSelect: "none", WebkitUserSelect: "none", ...(it.dir ? dropRing(`dir:${ky}`) : null) }}
+                      <div key={isFlat ? it.rel || it.name : it.name} id={`media-file-${sanitizeKey(ky)}`} data-testid="media-row" data-filename={ky} data-selected={isSel} className={it.dir ? "mrow mrow-dir" : "mrow mrow-file"} style={{ display: "grid", gridTemplateColumns: "subgrid", gridColumn: "1 / -1", gap: "0 10px", alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: compareDropKey === ky ? "rgba(99,102,241,0.32)" : it.dir && folderDrop && folderDrop.key === `dir:${ky}` ? "rgba(99,102,241,0.22)" : isSel ? "rgba(99,102,241,0.14)" : it.dir ? "var(--surface-2)" : "var(--surface)", cursor: "pointer", userSelect: "none", WebkitUserSelect: "none", ...(it.dir ? dropRing(`dir:${ky}`) : null) }}
                         {...(it.dir ? folderDropProps(`dir:${ky}`, folderPathOf(it), displayName(it)) : {})}
                         draggable={!it.dir && !isCoarsePointer() && !inPlaylistView}
+                        {...(!it.dir ? compareDropProps(it) : {})}
+                        onDragEnd={it.dir ? undefined : endCompareDrag}
                         onDragStart={it.dir ? undefined : (e) => {
+                          startCompareDrag(e, ky);
                           // Drag a file (or the selection it belongs to) onto a folder to move it.
                           let carry = [...selectedKeysForStack];
                           if (!carry.includes(ky)) { carry = [ky]; setSelKeys(new Set([ky])); setAnchorKey(ky); setSelectedKey(ky); }
@@ -4781,6 +4865,7 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                           ) : (
                             <button data-testid="media-row-open-file" onClick={(e) => { e.stopPropagation(); tapItem(it); }} onDoubleClick={(e) => { e.stopPropagation(); openItem(it); }} title={`${displayName(it)} — click to select, double-click to open`} style={{ background: "none", border: 0, color: "var(--text)", fontWeight: 500, textAlign: "left", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", padding: 0, minWidth: 0, maxWidth: "100%", userSelect: "none", WebkitUserSelect: "none" }}>{displayName(it)}</button>
                           )}
+                          {!it.dir && it.compareWith && <i data-testid="media-row-compare" className="bi bi-layout-split" title={`Compares with ${String(it.compareWith).split("/").pop()} — right-click to unbind`} style={{ color: "#818cf8", fontSize: 12, flex: "0 0 auto" }} />}
                         </div>
                         <span data-testid="media-row-size" className="small mcol-size" style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", color: "var(--muted)", whiteSpace: "nowrap" }}>{fmtSize(it.size)}</span>
                         <span data-testid="media-row-time" className="small mcol-time" style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", color: "var(--muted)", whiteSpace: "nowrap" }} title={it.created ? new Date(it.created).toLocaleString() : ""}>{timeAgo(it.created || it.mtime)}</span>
@@ -4809,6 +4894,14 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         const isPlItem = !!it._isPlaylistItem;
         const viewerSrc = isPlItem ? "/media/" + String(keyName).split("/").filter(Boolean).map(encodeURIComponent).join("/") : toMediaUrl(folder, keyName);
         const viewerFilePath = isPlItem ? String(keyName) : (folder ? `${folder}/${keyName}` : keyName);
+        // Bound compare source (main file only): slide between the two images.
+        const cmp = (() => {
+          const rel = it.compareWith ? String(it.compareWith) : "";
+          if (!rel) return null;
+          const peer = items.find((x) => !x.dir && mediaRelOfItem(x) === rel);
+          const label = peer ? (peer.displayName || peer.name) : rel.split("/").pop();
+          return { src: "/media/" + rel.split("/").filter(Boolean).map(encodeURIComponent).join("/"), label };
+        })();
         const handleClose = () => {
           setViewerKey(null);
           setTimeout(() => scrollSelectionIntoView(true), 0);
@@ -4830,6 +4923,8 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
               onNext={() => goViewer(shownViewerIdx + 1)}
               onGoto={goViewer}
               onDeleted={handleViewerDeleted}
+              compareSrc={cmp ? cmp.src : undefined}
+              compareLabel={cmp ? cmp.label : undefined}
             />
           </div>
         );
@@ -4904,6 +4999,11 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         lock={ctxLock}
         preview={ctxPreview}
         download={ctxDownload}
+        compare={(() => {
+          const e = ctxMenu && ctxMenu.entry;
+          if (!e || e.kind !== "file" || !e.it || !e.it.compareWith) return null;
+          return { label: `Unbind compare (${String(e.it.compareWith).split("/").pop()})`, onUnbind: () => unbindCompare(e.it) };
+        })()}
         onRenameFolder={() => { const e = ctxMenu && ctxMenu.entry; if (e && e.kind === "folder" && e.it) setPromptState({ open: true, id: `folder:${e.it.name}`, value: e.it.name }); }}
         onDeleteFolder={() => { const e = ctxMenu && ctxMenu.entry; if (e && e.kind === "folder" && e.it) setFolderDel({ name: e.it.name, phase: 1 }); }}
         onClose={() => setCtxMenu(null)}

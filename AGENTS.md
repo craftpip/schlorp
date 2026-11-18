@@ -69,6 +69,7 @@
 | GET/POST | `/api/security`, `/api/security/password` (`currentPassword`, `newPassword`), `/api/security/pattern` (`pattern` or null, `password`), `/api/security/prefs` (`preferLogin`, `autoLockMinutes`) | | settings | Password/pattern stored as scrypt hashes in `.xdl-auth.json` (root, gitignored); changing them re-seals the vault slots |
 | GET/POST | `/api/config` | `{key,value}` | schema groups | Settings page: friendly schema (`settingsSchema()`), type-checked; keys set by the container env are `lockedByContainer` (409 on save) |
 | POST | `/api/restart` | JSON: `force` (opt) | `{ ok }` | Exits so Docker restarts the app (409 while a job runs unless forced) |
+| GET/POST/DELETE | `/api/compare` | POST JSON: `main`, `source` (media-relative); DELETE JSON: `main` | `{ ok, links }` / `{ ok, main, source }` / `{ ok, removed }` | Image compare links (`.mediacompare.json`, root, gitignored). Shift+drag file1 onto file2 = main file2 → source file1; right-click file2 → Unbind compare. Listings tag main files with `compareWith`; links follow rename/move/lock/delete |
 | PUT | `/api/mediaorder` | JSON: `folder` (opt), `flat` (opt), `order` (array, req) | `{ ok, scope, order }` | Saves custom grid order (deduped, sanitized, max 20000) |
 
 ## Environment Variables (all optional, defaults in parens)
@@ -133,6 +134,7 @@ scan-videos/scan-saved.js    → { scanSavedPage({ browser, targetUrl, endUrls?,
 scan-videos/site-hosts.js     → { SITE_HOSTS, hostMatchesSite, siteOfHostname }  // canonical + mirror hosts per site (plan 036 §8)
 scan-videos/media-crypto.js   → { encryptFileInPlace(pub), decryptFileInPlace(priv), decryptRange(priv), createDecryptStream, encryptIterableToFile(pub), readFileHeader, createVault, openVault(slot), setVaultSlot, vaultPublicKey, isLockableName, ... }  // plan 039 v3
 scan-videos/media-vault.js    → { createMediaVault({ mediaDir, rootDir, isProtected }) }  // setup/unlock(slot)/lock/setSlot, encryptKey()/decryptKey(), per-drive copies, lock cache, created-time overrides
+scan-videos/media-compare.js  → { createCompareStore({ file }), normRel }  // main → source image compare links: bind/unbind/rename/renamePrefix/forget
 scan-videos/pattern-auth.js   → { createPatternAuth({ rootDir }) }  // password/pattern hashes, rate limiter, sessions, prefs, .env password migration
 ```
 
