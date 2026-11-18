@@ -47,7 +47,7 @@ const VIEWER_SECTIONS = [
     { keys: ["↓", "s"], desc: "Next file" },
   ] },
   { heading: "Playback", rows: [
-    { keys: ["Space"], desc: "Play / pause" },
+    { keys: ["Space"], desc: "Play / pause · photos: slideshow on / off" },
     { keys: ["m"], desc: "Mute / unmute" },
     { keys: ["e"], desc: "Toggle frame-seek mode (1s ↔ 1 frame)" },
     { keys: ["r"], desc: "Cycle end mode (End → Next → Loop → Shuffle)" },

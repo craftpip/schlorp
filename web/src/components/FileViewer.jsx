@@ -23,6 +23,31 @@ function saveFileRotation(fp, deg) {
     localStorage.setItem(ROT_STORE_KEY, JSON.stringify(map));
   } catch {}
 }
+// A photo's zoom and pan, kept per file like the rotation. The pan is stored
+// as a share of the stage size so it lands on the same part of the picture
+// after the window was resized.
+const ZOOM_STORE_KEY = "xdl_viewer_zooms";
+const ZOOM_STORE_MAX = 2000;
+function readFileZoom(fp) {
+  if (!fp) return null;
+  try {
+    const v = JSON.parse(localStorage.getItem(ZOOM_STORE_KEY) || "{}")[fp];
+    if (!v || !Number.isFinite(v.z) || v.z <= 1 || v.z > 4) return null;
+    return { z: v.z, px: Number.isFinite(v.px) ? v.px : 0, py: Number.isFinite(v.py) ? v.py : 0 };
+  } catch { return null; }
+}
+function saveFileZoom(fp, z, px, py) {
+  if (!fp) return;
+  try {
+    const map = JSON.parse(localStorage.getItem(ZOOM_STORE_KEY) || "{}");
+    delete map[fp];
+    if (z > 1.001) map[fp] = { z: Math.round(z * 1000) / 1000, px: Math.round(px * 10000) / 10000, py: Math.round(py * 10000) / 10000 };
+    const keys = Object.keys(map);
+    for (let i = 0; i < keys.length - ZOOM_STORE_MAX; i++) delete map[keys[i]];
+    localStorage.setItem(ZOOM_STORE_KEY, JSON.stringify(map));
+  } catch {}
+}
+const SLIDE_SECS = [2, 3, 5, 8, 10, 15, 30, 60];
 const TRACK_CAP = 480;
 const TRACK_TPL = 40;
 // The identity fingerprint reads a wider window than the match template. A
@@ -193,7 +218,6 @@ const TRACK_BG_MISS = 10;
 // the user navigated away by hand. The dwell is only a stand-in for that missing
 // end, so it is counted from the file being on screen rather than from its own
 // length: five seconds is about as long as a still is worth looking at.
-const STILL_DWELL_MS = 5000;
 function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
 // Median of an already-sorted array (the caller sorts; don't re-sort here).
 // The mean of the two middle entries, not the upper one: picking a[n>>1] on an
@@ -1452,6 +1476,8 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
   // "point" is the old placed-subject mode, which is gone: anyone who had that
   // stored gets the foreground mode, which is what replaced it.
   const [trackPref, setTrackPref] = useState(() => { try { const p = localStorage.getItem("xdl_viewer_track"); return p === "bg" || p === "fg" || p === "point" ? (p === "point" ? "fg" : p) : "none"; } catch { return "none"; } });
+  const [slideshow, setSlideshow] = useState(() => { try { return localStorage.getItem("xdl_viewer_slideshow") === "1"; } catch { return false; } });
+  const [slideSecs, setSlideSecs] = useState(() => { try { const v = Number(localStorage.getItem("xdl_viewer_slideSecs")); return SLIDE_SECS.includes(v) ? v : 5; } catch { return 5; } });
   const [endMode, setEndMode] = useState(() => { try { const v = localStorage.getItem("xdl_viewer_endMode"); if (v === "stop") return "next"; if (v === "repeat" || v === "random") return v; return "none"; } catch { return "none"; } });
   const [randHistory, setRandHistory] = useState([]);
   const [randCursor, setRandCursor] = useState(-1);
@@ -1577,6 +1603,31 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
   useEffect(() => { if (rotLoadedRef.current !== filePathEff) return; saveFileRotation(filePathEff, rotate); }, [rotate, filePathEff]);
   useEffect(() => { stopTracking(); rotLoadedRef.current = filePathEff; setZoom(1); setOrigin("50% 50%"); setPan({x:0,y:0}); setRotate(readFileRotation(filePathEff)); setCurrent(0); setDuration(0); setGifAsVideo(false); setMediaReady(false); setYConfirm(false); lastYRef.current = 0; animRef.current = null; pendingSeekRef.current = null; if (yConfirmTimerRef.current) { clearTimeout(yConfirmTimerRef.current); yConfirmTimerRef.current = null; } setTimeout(() => videoRef.current?.focus(), 50); }, [loadedUrl, filePathEff, stopTracking]);
   useEffect(() => { if (!mediaReady) return; if (applyTrackPrefRef.current) applyTrackPrefRef.current(); }, [mediaReady, loadedUrl]);
+  useEffect(() => { try { localStorage.setItem("xdl_viewer_slideshow", slideshow ? "1" : "0"); localStorage.setItem("xdl_viewer_slideSecs", String(slideSecs)); } catch {} }, [slideshow, slideSecs]);
+  // A photo opens at the zoom it was left at. Runs after the reset above (same
+  // deps, later in order), so its values win.
+  const zoomLoadedRef = useRef("");
+  useEffect(() => {
+    zoomLoadedRef.current = "";
+    if (!showImageRef.current) return;
+    const saved = readFileZoom(filePathEff);
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (saved && rect && rect.width && rect.height) {
+      setZoom(saved.z);
+      setPan({ x: saved.px * rect.width, y: saved.py * rect.height });
+      setOrigin("50% 50%");
+    }
+    zoomLoadedRef.current = filePathEff;
+  }, [loadedUrl, filePathEff]);
+  useEffect(() => {
+    if (!showImage || tracking || zoomLoadedRef.current !== filePathEff) return;
+    const t = setTimeout(() => {
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect || !rect.width || !rect.height) return;
+      saveFileZoom(filePathEff, zoom, pan.x / rect.width, pan.y / rect.height);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [zoom, pan, filePathEff, showImage, tracking]);
   // Drive the seekbar with requestAnimationFrame: read the video's live
   // currentTime every frame so the thumb glides instead of stepping with the
   // ~4/s timeupdate events. Any seek (keyboard, wheel, ±10s, track click, or
@@ -1771,17 +1822,23 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
   // does. Only the two modes that mean "move on" are given a dwell, and they go
   // through the same dispatch as the buttons, so the random history is walked
   // forward and back the same way whichever one moved the viewer on.
+  // Photos move on only while the slideshow is on, after its timer; the order
+  // follows the end mode (Shuffle = random, anything else = the next file,
+  // wrapping to the first at the end). Zooming or panning starts the count
+  // again, so a photo being looked at closely isn't pulled away.
   useEffect(() => {
     if (isVideo || isAudio || gifAsVideoEff) return;
-    const mode = endModeRef.current;
-    if (mode !== "next" && mode !== "random") return;
+    if (!slideshow) return;
     // A file the browser cannot preview never reports itself ready -- there is no
     // load event to report one -- so its dwell starts once it is on the stage,
     // while an image has to have actually arrived before its five seconds run.
     if (!mediaReady && isFormatKnown) return;
-    const timer = setTimeout(() => { if (dispatchNextRef.current) dispatchNextRef.current(); }, STILL_DWELL_MS);
+    const timer = setTimeout(() => {
+      if (endModeRef.current !== "random" && !hasNextRef.current) { if ((viewableRef.current || []).length > 1) onGotoRef.current(0); return; }
+      if (dispatchNextRef.current) dispatchNextRef.current();
+    }, slideSecs * 1000);
     return () => clearTimeout(timer);
-  }, [loadedUrl, endMode, isVideo, isAudio, gifAsVideoEff, isFormatKnown, mediaReady]);
+  }, [loadedUrl, endMode, isVideo, isAudio, gifAsVideoEff, isFormatKnown, mediaReady, slideshow, slideSecs, zoom, pan]);
   const cycleEndMode = () => setEndMode((m) => m === "none" ? "next" : m === "next" ? "repeat" : m === "repeat" ? "random" : "none");
   const cycleEndModeRef = useRef(cycleEndMode);
   cycleEndModeRef.current = cycleEndMode;
@@ -3015,7 +3072,8 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
       } else if ((e.code === "Space" || e.key === " " || e.key === "Spacebar") && !e.ctrlKey && !e.altKey && !e.metaKey) {
         // Always swallow Space while the viewer is open so the window never scrolls.
         e.preventDefault();
-        if ((!showImage) && videoRef.current) {
+        if (showImageRef.current) setSlideshow((v) => !v);
+        else if (videoRef.current) {
           if (jogRef.current) { clearInterval(jogRef.current); jogRef.current = null; jogWasPlayingRef.current = false; videoRef.current.pause(); }
           else { if (videoRef.current.paused) videoRef.current.play(); else videoRef.current.pause(); }
         }
@@ -3362,6 +3420,9 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
   .fv-header > div:nth-child(2){ display: none !important; }
 }`}</style>
         <div ref={containerRef} onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp} onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd} style={{ position: "relative", flex: "1 1 auto", minHeight: 0, overflow: "hidden", background: "#080a14", display: "flex", alignItems: "center", justifyContent: "center", padding: 0, cursor: tracking ? "grab" : "default", touchAction: "none" }}>
+          {slideshow && !isVideo && !isAudio && !gifAsVideoEff && (mediaReady || !isFormatKnown) && (
+            <div key={`${loadedUrl}|${slideSecs}|${zoom}|${pan.x}|${pan.y}`} aria-hidden="true" style={{ position: "absolute", left: 0, bottom: 0, height: 3, width: "100%", background: "#6366f1", opacity: 0.85, transformOrigin: "0 50%", animation: `fvSlide ${slideSecs}s linear forwards`, zIndex: 4, pointerEvents: "none" }} />
+          )}
           {tracking && <canvas ref={trackCanvasRef} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", zIndex: 1, pointerEvents: "none" }} />}
           {tracking && !trackBg && (
             <div ref={trackDotRef} title="Drag onto what to follow"
@@ -3486,6 +3547,17 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
               <button type="button" tabIndex={-1} onClick={() => setSeekFrames(false)} className={`btn btn-sm ${!seekFrames ? "btn-primary" : "btn-outline-secondary"}`} style={{ padding: "2px 6px", fontSize: 11, minWidth: 32 }} title="Seek by 1 second (←/→)">1s</button>
               <button type="button" tabIndex={-1} onClick={() => setSeekFrames(true)} className={`btn btn-sm ${seekFrames ? "btn-primary" : "btn-outline-secondary"}`} style={{ padding: "2px 6px", fontSize: 11, minWidth: 32 }} title="Seek by 1 frame (~33ms)">1f</button>
             </div>
+            {!isVideo && !isAudio && !gifAsVideoEff && (
+              <div data-testid="fv-slideshow" style={{ position: "relative", display: "flex", gap: 3, alignItems: "center", border: "1px solid var(--border)", borderRadius: 6, padding: 2, background: "var(--surface-2)" }}>
+                <span className="btn-kbd-hint">Space</span>
+                <button type="button" tabIndex={-1} onClick={() => setSlideshow((v) => !v)} className={`btn btn-sm ${slideshow ? "btn-primary" : "btn-outline-secondary"}`} style={{ padding: "2px 8px", fontSize: 11 }} title={slideshow ? "Slideshow on — click or Space to stop" : "Start slideshow (Space)"}>
+                  <i className={`bi ${slideshow ? "bi-pause-fill" : "bi-play-fill"}`} /> Slideshow
+                </button>
+                <select tabIndex={-1} value={slideSecs} onChange={(e) => { setSlideSecs(Number(e.target.value)); e.target.blur(); }} title="Time per photo" style={{ fontSize: 11, padding: "2px 4px", borderRadius: 4, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)" }}>
+                  {SLIDE_SECS.map((n) => <option key={n} value={n}>{n < 60 ? `${n}s` : `${n / 60}m`}</option>)}
+                </select>
+              </div>
+            )}
             <span style={{ flex: 1 }} />
             {(isVideo || gifAsVideoEff) && (
               <button type="button" tabIndex={-1} className={`btn btn-sm ${tracking ? "btn-primary" : "btn-outline-secondary"}`} onClick={() => cycleTracking()} title={tracking ? (trackBg ? "BG tracking on — click or ⇧T for FG tracking" : "FG tracking on — click or ⇧T to turn stabilization off") : "Stabilization off — click or ⇧T to start BG tracking"} style={{ position: "relative", padding: "4px 8px", fontSize: 11 }}><span className="btn-kbd-hint">⇧T</span><i className="bi bi-camera-video" /> {tracking ? (trackBg ? "BG tracking" : "FG tracking") : "Track"}</button>

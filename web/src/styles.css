@@ -1040,3 +1040,4 @@
       .wiz-skip:hover{color:var(--text-2)}
       /* Settings rows (Password & pattern): same height, so the spacing between rows is even. */
       .sec-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-height:30px}
+@keyframes fvSlide{from{transform:scaleX(0)}to{transform:scaleX(1)}}
