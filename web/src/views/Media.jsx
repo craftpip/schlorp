@@ -1899,7 +1899,20 @@ const collapseSpreadUnlessMember = (fid) => {
   // drags keep reordering / stacking / moving as before.
   const compareDropProps = (it) => {
     const k = rowKey(it);
-    const active = (e) => { const d = compareDragRef.current; return !!d.key && d.key !== k && (e.shiftKey || d.shift); };
+    // Shift counts once seen at any point of the drag (latched in d.shift):
+    // browsers don't always report it on every drag event after the drag
+    // has begun, so pressing it mid-drag must stick.
+    const active = (e) => {
+      const d = compareDragRef.current;
+      if (!d.key || d.key === k) return false;
+      if (e.shiftKey) d.shift = true;
+      // The "Compare" spot shown on each photo during a drag works without
+      // Shift: once a drag has begun Chrome stops delivering key presses,
+      // so Shift pressed mid-drag can't be seen at all.
+      const t = e.target;
+      if (t && t.closest && t.closest("[data-compare-zone]")) return true;
+      return d.shift;
+    };
     return {
       onDragOver: (e) => {
         if (!active(e)) { if (compareDropKey === k) setCompareDropKey(null); return; }
@@ -1917,14 +1930,45 @@ const collapseSpreadUnlessMember = (fid) => {
         e.preventDefault(); e.stopPropagation();
         const src = compareDragRef.current.key;
         compareDragRef.current = { key: null, shift: false };
+        setCompareDragging(null);
         dragKeyRef.current = null; dragKeysRef.current = null;
         setCompareDropKey(null); setDropInfo(null);
         bindCompare(src, it);
       },
     };
   };
-  const startCompareDrag = (e, k) => { compareDragRef.current = { key: k, shift: !!e.shiftKey }; };
-  const endCompareDrag = () => { compareDragRef.current = { key: null, shift: false }; setCompareDropKey(null); };
+  // Source key while a photo is being dragged → photos show a Compare spot.
+  const [compareDragging, setCompareDragging] = useState(null);
+  const startCompareDrag = (e, k) => {
+    compareDragRef.current = { key: k, shift: !!e.shiftKey };
+    const it = itemsRef.current.find((x) => !x.dir && rowKey(x) === k);
+    // Deferred: changing the DOM inside dragstart can abort the drag.
+    if (isCompareImage(it)) setTimeout(() => { if (compareDragRef.current.key === k) setCompareDragging(k); }, 0);
+  };
+  const endCompareDrag = () => { compareDragRef.current = { key: null, shift: false }; setCompareDropKey(null); setCompareDragging(null); };
+  // Pressing / releasing Shift after a native drag has started: catch it on
+  // every channel the browser may use (key events, or the modifier flags of
+  // the drag/dragover events, which keep firing while the mouse is still).
+  useEffect(() => {
+    const latch = (e) => { const d = compareDragRef.current; if (d.key && e.shiftKey) d.shift = true; };
+    const onKey = (e) => {
+      if (e.key !== "Shift") return;
+      const d = compareDragRef.current;
+      if (d.key) d.shift = e.type === "keydown";
+    };
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("keyup", onKey, true);
+    document.addEventListener("drag", latch, true);
+    document.addEventListener("dragover", latch, true);
+    document.addEventListener("dragenter", latch, true);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("keyup", onKey, true);
+      document.removeEventListener("drag", latch, true);
+      document.removeEventListener("dragover", latch, true);
+      document.removeEventListener("dragenter", latch, true);
+    };
+  }, []);
   // Chrome never starts a native drag when Shift is held at mouse-down (it
   // means "extend selection"), so Shift+press → move → release is tracked
   // with pointer events instead. The HTML5 path above still covers pressing
@@ -2493,6 +2537,11 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
         {!isDir && it.compareWith && (
           <span data-testid="media-tile-compare" title={`Compares with ${String(it.compareWith).split("/").pop()} — right-click to unbind`} style={{ position: "absolute", top: !it.locked && vaultOn ? 32 : 6, right: 6, zIndex: 3, width: 22, height: 22, borderRadius: 999, display: "grid", placeItems: "center", background: "rgba(99,102,241,.85)", color: "#fff", pointerEvents: "none" }}>
             <i className="bi bi-layout-split" style={{ fontSize: 11 }} />
+          </span>
+        )}
+        {compareDragging && compareDragging !== rk && isCompareImage(it) && (
+          <span data-testid="media-compare-zone" data-compare-zone="1" style={{ position: "absolute", left: "50%", bottom: 10, transform: "translateX(-50%)", zIndex: 7, padding: "8px 14px", borderRadius: 999, background: compareDropKey === rk ? "rgba(99,102,241,.95)" : "rgba(17,24,39,.8)", border: "2px dashed #a5b4fc", color: "#fff", fontSize: 12, fontWeight: 600, whiteSpace: "nowrap" }}>
+            <i className="bi bi-layout-split" /> Compare
           </span>
         )}
         {compareDropKey === rk && (
@@ -4956,6 +5005,9 @@ const stackBorderColor = (stackId) => stackColorFor(stackId, null).color;
                             <button data-testid="media-row-open-folder" onClick={(e) => { e.stopPropagation(); tapItem(it); }} onDoubleClick={(e) => { e.stopPropagation(); openItem(it); }} title={`${it.name} — click to select, double-click to open`} style={{ background: "none", border: 0, color: "var(--text)", fontWeight: 600, textAlign: "left", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0, maxWidth: "100%", userSelect: "none", WebkitUserSelect: "none" }}>{it.name}</button>
                           ) : (
                             <button data-testid="media-row-open-file" onClick={(e) => { e.stopPropagation(); tapItem(it); }} onDoubleClick={(e) => { e.stopPropagation(); openItem(it); }} title={`${displayName(it)} — click to select, double-click to open`} style={{ background: "none", border: 0, color: "var(--text)", fontWeight: 500, textAlign: "left", cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", padding: 0, minWidth: 0, maxWidth: "100%", userSelect: "none", WebkitUserSelect: "none" }}>{displayName(it)}</button>
+                          )}
+                          {compareDragging && compareDragging !== ky && isCompareImage(it) && (
+                            <span data-testid="media-compare-zone" data-compare-zone="1" style={{ marginLeft: "auto", flex: "0 0 auto", padding: "2px 10px", borderRadius: 999, background: compareDropKey === ky ? "rgba(99,102,241,.95)" : "rgba(99,102,241,.18)", border: "1px dashed #818cf8", color: compareDropKey === ky ? "#fff" : "#818cf8", fontSize: 11, fontWeight: 600, whiteSpace: "nowrap" }}><i className="bi bi-layout-split" /> Compare</span>
                           )}
                           {!it.dir && it.compareWith && <i data-testid="media-row-compare" className="bi bi-layout-split" title={`Compares with ${String(it.compareWith).split("/").pop()} — right-click to unbind`} style={{ color: "#818cf8", fontSize: 12, flex: "0 0 auto" }} />}
                         </div>
