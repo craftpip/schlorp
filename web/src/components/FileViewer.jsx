@@ -1690,19 +1690,21 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
     lockViewRef.current = { z, px: p.x / rect.width, py: p.y / rect.height };
     setZoomLocked(true);
   };
-  // Double tap on a photo (touch). Zoomed -> back to fit. At fit: landscape
+  // Double tap on a photo or video (touch). Zoomed -> back to fit. At fit: landscape
   // zooms until it fills the height; portrait goes to 100% (actual pixels)
   // when the photo is bigger than the window, else a 20% zoom-in. The tapped
   // point stays under the finger, and the pan is kept inside the picture.
   const doubleTapZoom = (tx, ty) => {
     const rect = containerRef.current?.getBoundingClientRect();
-    const img = imgRef.current;
+    const img = showImageRef.current ? imgRef.current : null;
+    const vid = !showImageRef.current ? videoRef.current : null;
     if (!rect || !rect.width || !rect.height) return;
     if (zoomGlideTimerRef.current) clearTimeout(zoomGlideTimerRef.current);
     setZoomGlide(true);
     zoomGlideTimerRef.current = setTimeout(() => { setZoomGlide(false); zoomGlideTimerRef.current = null; }, 260);
     if (zoom > 1.01) { setZoom(1); setPan({ x: 0, y: 0 }); setOrigin("50% 50%"); return; }
-    const nw0 = img?.naturalWidth || 0, nh0 = img?.naturalHeight || 0;
+    const nw0 = img ? img.naturalWidth || 0 : vid ? vid.videoWidth || 0 : 0;
+    const nh0 = img ? img.naturalHeight || 0 : vid ? vid.videoHeight || 0 : 0;
     if (!nw0 || !nh0) return;
     const rotT = rotate === 90 || rotate === 270;
     const nw = rotT ? nh0 : nw0, nh = rotT ? nw0 : nh0;
@@ -3144,14 +3146,16 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
       else if (dy > 0) dispatchPrevRef.current();
       return;
     }
-    // Double tap on a photo: quick, still taps close together.
+    // Double tap on a photo or video: quick, still taps close together.
     const isTap = !pr.wasMultiTouch && (!e.touches || e.touches.length === 0) && Math.hypot(dx, dy) < 12 && Date.now() - (pr.t0 || 0) < 300;
-    if (isTap && showImage && !tracking && !zoomLockedRef.current && imgRef.current) {
+    if (isTap && !isAudio && !tracking && !zoomLockedRef.current && (showImage ? imgRef.current : videoRef.current)) {
       const now = Date.now(), lt = lastTapRef.current;
       if (now - lt.t < 320 && Math.hypot(t.clientX - lt.x, t.clientY - lt.y) < 40) {
         lastTapRef.current = { t: 0, x: 0, y: 0 };
         if (e.cancelable) e.preventDefault();
         doubleTapZoom(t.clientX, t.clientY);
+        if (wasPlayingRef.current && videoRef.current && !showImage) videoRef.current.play().catch(() => {});
+        wasPlayingRef.current = false;
         return;
       }
       lastTapRef.current = { t: now, x: t.clientX, y: t.clientY };
@@ -3670,7 +3674,7 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
               autoFocus
 
               onContextMenu={(e) => e.preventDefault()}
-              style={{ width: mediaW, height: mediaH, background: "#000", display: "block", objectFit: "contain", opacity: mediaReady ? 1 : 0, transition: (!tracking && zoom===1) ? "opacity .45s ease, transform 0.15s" : "opacity .45s ease", transform: tracking ? trackViewRef.current.transform : `translate(${pan.x}px, ${pan.y}px) rotate(${rotate}deg) scale(${zoom})`, transformOrigin: origin, WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none", cursor: "default", outline: "none" }}
+              style={{ width: mediaW, height: mediaH, background: "#000", display: "block", objectFit: "contain", opacity: mediaReady ? 1 : 0, transition: (!tracking && (zoom===1 || zoomGlide)) ? "opacity .45s ease, transform 0.15s" : "opacity .45s ease", transform: tracking ? trackViewRef.current.transform : `translate(${pan.x}px, ${pan.y}px) rotate(${rotate}deg) scale(${zoom})`, transformOrigin: origin, WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none", cursor: "default", outline: "none" }}
               onTimeUpdate={(e)=> setCurrent(e.currentTarget.currentTime)}
               onLoadedMetadata={(e)=> setDuration(e.currentTarget.duration)}
               onLoadedData={() => setMediaReady(true)}
@@ -3695,7 +3699,7 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
               tabIndex={0}
               autoFocus
 
-              style={{ width: mediaW, height: mediaH, background: "#000", display: "block", objectFit: "contain", opacity: mediaReady ? 1 : 0, transition: (!tracking && zoom===1) ? "opacity .45s ease, transform 0.15s" : "opacity .45s ease", transform: tracking ? trackViewRef.current.transform : `translate(${pan.x}px, ${pan.y}px) rotate(${rotate}deg) scale(${zoom})`, transformOrigin: origin, WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none", cursor: "default", outline: "none" }}
+              style={{ width: mediaW, height: mediaH, background: "#000", display: "block", objectFit: "contain", opacity: mediaReady ? 1 : 0, transition: (!tracking && (zoom===1 || zoomGlide)) ? "opacity .45s ease, transform 0.15s" : "opacity .45s ease", transform: tracking ? trackViewRef.current.transform : `translate(${pan.x}px, ${pan.y}px) rotate(${rotate}deg) scale(${zoom})`, transformOrigin: origin, WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none", cursor: "default", outline: "none" }}
               onTimeUpdate={(e)=> setCurrent(e.currentTarget.currentTime)}
               onLoadedMetadata={(e)=> setDuration(e.currentTarget.duration)}
               onLoadedData={() => setMediaReady(true)}
