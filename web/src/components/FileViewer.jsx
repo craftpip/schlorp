@@ -36,15 +36,18 @@ function readFileZoom(fp) {
   try {
     const v = JSON.parse(localStorage.getItem(ZOOM_STORE_KEY) || "{}")[fp];
     if (!v || !Number.isFinite(v.z) || v.z <= 1 || v.z > MAX_ZOOM) return null;
-    return { z: v.z, px: Number.isFinite(v.px) ? v.px : 0, py: Number.isFinite(v.py) ? v.py : 0 };
+    return { z: v.z, px: Number.isFinite(v.px) ? v.px : 0, py: Number.isFinite(v.py) ? v.py : 0, l: v.l === 1 };
   } catch { return null; }
 }
-function saveFileZoom(fp, z, px, py) {
+function saveFileZoom(fp, z, px, py, locked) {
   if (!fp) return;
   try {
     const map = JSON.parse(localStorage.getItem(ZOOM_STORE_KEY) || "{}");
     delete map[fp];
-    if (z > 1.001) map[fp] = { z: Math.round(z * 1000) / 1000, px: Math.round(px * 10000) / 10000, py: Math.round(py * 10000) / 10000 };
+    if (z > 1.001) {
+      map[fp] = { z: Math.round(z * 1000) / 1000, px: Math.round(px * 10000) / 10000, py: Math.round(py * 10000) / 10000 };
+      if (locked) map[fp].l = 1;
+    }
     const keys = Object.keys(map);
     for (let i = 0; i < keys.length - ZOOM_STORE_MAX; i++) delete map[keys[i]];
     localStorage.setItem(ZOOM_STORE_KEY, JSON.stringify(map));
@@ -1406,12 +1409,11 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
   const [deleting, setDeleting] = useState(false);
   const [zoom, setZoom] = useState(1);
   // Zoom lock: freezes the zoom and pan (no pinch, wheel or drag-pan) so a
-  // swipe up/down goes to next/prev even while zoomed, and the next file opens
-  // at the same zoom. lockViewRef holds that view, pan as a share of the stage.
+  // swipe up/down goes to next/prev even while zoomed. The lock belongs to the
+  // file: it is saved with that file's zoom, and other files are not affected.
   const [zoomLocked, setZoomLocked] = useState(false);
   const zoomLockedRef = useRef(false);
   zoomLockedRef.current = zoomLocked;
-  const lockViewRef = useRef(null);
   // Brief transform transition for a double-tap zoom, so it glides in.
   const [zoomGlide, setZoomGlide] = useState(false);
   const zoomGlideTimerRef = useRef(null);
@@ -1648,47 +1650,43 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
   useEffect(() => { stopTracking(); rotLoadedRef.current = filePathEff; setZoom(1); setOrigin("50% 50%"); setPan({x:0,y:0}); setRotate(readFileRotation(filePathEff)); setCurrent(0); setDuration(0); setGifAsVideo(false); setMediaReady(false); setYConfirm(false); lastYRef.current = 0; animRef.current = null; pendingSeekRef.current = null; if (yConfirmTimerRef.current) { clearTimeout(yConfirmTimerRef.current); yConfirmTimerRef.current = null; } setTimeout(() => videoRef.current?.focus(), 50); }, [loadedUrl, filePathEff, stopTracking]);
   useEffect(() => { if (!mediaReady) return; if (applyTrackPrefRef.current) applyTrackPrefRef.current(); }, [mediaReady, loadedUrl]);
   useEffect(() => { try { localStorage.setItem("xdl_viewer_slideshow", slideshow ? "1" : "0"); localStorage.setItem("xdl_viewer_slideSecs", String(slideSecs)); } catch {} }, [slideshow, slideSecs]);
-  // A photo opens at the zoom it was left at. Runs after the reset above (same
-  // deps, later in order), so its values win.
+  // A file opens at the zoom it was left at, and locked if it was locked.
+  // Photos always remember their zoom; a video only when it was locked.
+  // Runs after the reset above (same deps, later in order), so its values win.
   const zoomLoadedRef = useRef("");
   useEffect(() => {
     zoomLoadedRef.current = "";
-    const rect = containerRef.current?.getBoundingClientRect();
-    const lv = zoomLockedRef.current ? lockViewRef.current : null;
-    if (lv && rect && rect.width && rect.height) {
-      setZoom(lv.z);
-      setPan({ x: lv.px * rect.width, y: lv.py * rect.height });
-      setOrigin("50% 50%");
-      zoomLoadedRef.current = filePathEff;
-      return;
-    }
-    if (!showImageRef.current) return;
+    setZoomLocked(false);
     const saved = readFileZoom(filePathEff);
-    if (saved && rect && rect.width && rect.height) {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (saved && (showImageRef.current || saved.l) && rect && rect.width && rect.height) {
       setZoom(saved.z);
       setPan({ x: saved.px * rect.width, y: saved.py * rect.height });
       setOrigin("50% 50%");
+      setZoomLocked(saved.l);
     }
     zoomLoadedRef.current = filePathEff;
   }, [loadedUrl, filePathEff]);
   useEffect(() => {
-    if (!showImage || tracking || zoomLocked || zoomLoadedRef.current !== filePathEff) return;
+    if (isAudio || tracking || zoomLoadedRef.current !== filePathEff) return;
     const t = setTimeout(() => {
       const rect = containerRef.current?.getBoundingClientRect();
       if (!rect || !rect.width || !rect.height) return;
-      saveFileZoom(filePathEff, zoom, pan.x / rect.width, pan.y / rect.height);
+      if (showImage || zoomLocked) saveFileZoom(filePathEff, zoom, pan.x / rect.width, pan.y / rect.height, zoomLocked);
+      else if (readFileZoom(filePathEff)) saveFileZoom(filePathEff, 1, 0, 0, false);
     }, 300);
     return () => clearTimeout(t);
-  }, [zoom, pan, filePathEff, showImage, tracking, zoomLocked]);
+  }, [zoom, pan, filePathEff, showImage, isAudio, tracking, zoomLocked]);
   const toggleZoomLock = () => {
-    if (zoomLockedRef.current) { setZoomLocked(false); lockViewRef.current = null; return; }
+    const next = !zoomLockedRef.current;
+    setZoomLocked(next);
+    // While tracking, the view lives in trackViewRef and the effect above
+    // does not save, so write it here.
     const rect = containerRef.current?.getBoundingClientRect();
-    if (!rect || !rect.width || !rect.height) return;
-    const trk = trackingRef.current && !!trackStateRef.current;
-    const z = trk ? trackViewRef.current.zoom : zoom;
-    const p = trk ? trackViewRef.current.pan : pan;
-    lockViewRef.current = { z, px: p.x / rect.width, py: p.y / rect.height };
-    setZoomLocked(true);
+    if (!rect || !rect.width || !rect.height || !(trackingRef.current && trackStateRef.current)) return;
+    const tv = trackViewRef.current;
+    if (showImageRef.current || next) saveFileZoom(filePathEff, tv.zoom, tv.pan.x / rect.width, tv.pan.y / rect.height, next);
+    else saveFileZoom(filePathEff, 1, 0, 0, false);
   };
   // Double tap on a photo or video (touch). Zoomed -> back to fit. At fit: landscape
   // zooms until it fills the height; portrait goes to 100% (actual pixels)
@@ -3567,7 +3565,7 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
                   onMouseDown={(e) => e.stopPropagation()}
                   aria-pressed={zoomLocked}
                   aria-label={zoomLocked ? "Unlock zoom" : "Lock zoom"}
-                  title={zoomLocked ? "Zoom locked: swipe goes next/prev at this zoom. Tap to unlock" : "Lock zoom: keep this zoom and swipe next/prev"}
+                  title={zoomLocked ? "Zoom locked for this file: swipe goes next/prev. Tap to unlock" : "Lock this file's zoom and swipe next/prev"}
                   style={{ position: "relative", width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: zoomLocked ? "rgba(99,102,241,.9)" : "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}
                 >
                   <i className={`bi ${zoomLocked ? "bi-lock-fill" : "bi-unlock"}`} />
