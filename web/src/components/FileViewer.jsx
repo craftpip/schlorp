@@ -27,12 +27,15 @@ function saveFileRotation(fp, deg) {
 // as a share of the stage size so it lands on the same part of the picture
 // after the window was resized.
 const ZOOM_STORE_KEY = "xdl_viewer_zooms";
+// Highest zoom anywhere in the viewer. Double tap can ask for a big photo at
+// 100% (often past 4x), and pinch/wheel must not snap back from there.
+const MAX_ZOOM = 8;
 const ZOOM_STORE_MAX = 2000;
 function readFileZoom(fp) {
   if (!fp) return null;
   try {
     const v = JSON.parse(localStorage.getItem(ZOOM_STORE_KEY) || "{}")[fp];
-    if (!v || !Number.isFinite(v.z) || v.z <= 1 || v.z > 4) return null;
+    if (!v || !Number.isFinite(v.z) || v.z <= 1 || v.z > MAX_ZOOM) return null;
     return { z: v.z, px: Number.isFinite(v.px) ? v.px : 0, py: Number.isFinite(v.py) ? v.py : 0 };
   } catch { return null; }
 }
@@ -1402,6 +1405,17 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
   const [isPlaying, setIsPlaying] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [zoom, setZoom] = useState(1);
+  // Zoom lock: freezes the zoom and pan (no pinch, wheel or drag-pan) so a
+  // swipe up/down goes to next/prev even while zoomed, and the next file opens
+  // at the same zoom. lockViewRef holds that view, pan as a share of the stage.
+  const [zoomLocked, setZoomLocked] = useState(false);
+  const zoomLockedRef = useRef(false);
+  zoomLockedRef.current = zoomLocked;
+  const lockViewRef = useRef(null);
+  // Brief transform transition for a double-tap zoom, so it glides in.
+  const [zoomGlide, setZoomGlide] = useState(false);
+  const zoomGlideTimerRef = useRef(null);
+  const lastTapRef = useRef({ t: 0, x: 0, y: 0 });
   const [origin, setOrigin] = useState("50% 50%");
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [rotate, setRotate] = useState(0);
@@ -1639,9 +1653,17 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
   const zoomLoadedRef = useRef("");
   useEffect(() => {
     zoomLoadedRef.current = "";
+    const rect = containerRef.current?.getBoundingClientRect();
+    const lv = zoomLockedRef.current ? lockViewRef.current : null;
+    if (lv && rect && rect.width && rect.height) {
+      setZoom(lv.z);
+      setPan({ x: lv.px * rect.width, y: lv.py * rect.height });
+      setOrigin("50% 50%");
+      zoomLoadedRef.current = filePathEff;
+      return;
+    }
     if (!showImageRef.current) return;
     const saved = readFileZoom(filePathEff);
-    const rect = containerRef.current?.getBoundingClientRect();
     if (saved && rect && rect.width && rect.height) {
       setZoom(saved.z);
       setPan({ x: saved.px * rect.width, y: saved.py * rect.height });
@@ -1650,14 +1672,59 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
     zoomLoadedRef.current = filePathEff;
   }, [loadedUrl, filePathEff]);
   useEffect(() => {
-    if (!showImage || tracking || zoomLoadedRef.current !== filePathEff) return;
+    if (!showImage || tracking || zoomLocked || zoomLoadedRef.current !== filePathEff) return;
     const t = setTimeout(() => {
       const rect = containerRef.current?.getBoundingClientRect();
       if (!rect || !rect.width || !rect.height) return;
       saveFileZoom(filePathEff, zoom, pan.x / rect.width, pan.y / rect.height);
     }, 300);
     return () => clearTimeout(t);
-  }, [zoom, pan, filePathEff, showImage, tracking]);
+  }, [zoom, pan, filePathEff, showImage, tracking, zoomLocked]);
+  const toggleZoomLock = () => {
+    if (zoomLockedRef.current) { setZoomLocked(false); lockViewRef.current = null; return; }
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect || !rect.width || !rect.height) return;
+    const trk = trackingRef.current && !!trackStateRef.current;
+    const z = trk ? trackViewRef.current.zoom : zoom;
+    const p = trk ? trackViewRef.current.pan : pan;
+    lockViewRef.current = { z, px: p.x / rect.width, py: p.y / rect.height };
+    setZoomLocked(true);
+  };
+  // Double tap on a photo (touch). Zoomed -> back to fit. At fit: landscape
+  // zooms until it fills the height; portrait goes to 100% (actual pixels)
+  // when the photo is bigger than the window, else a 20% zoom-in. The tapped
+  // point stays under the finger, and the pan is kept inside the picture.
+  const doubleTapZoom = (tx, ty) => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    const img = imgRef.current;
+    if (!rect || !rect.width || !rect.height) return;
+    if (zoomGlideTimerRef.current) clearTimeout(zoomGlideTimerRef.current);
+    setZoomGlide(true);
+    zoomGlideTimerRef.current = setTimeout(() => { setZoomGlide(false); zoomGlideTimerRef.current = null; }, 260);
+    if (zoom > 1.01) { setZoom(1); setPan({ x: 0, y: 0 }); setOrigin("50% 50%"); return; }
+    const nw0 = img?.naturalWidth || 0, nh0 = img?.naturalHeight || 0;
+    if (!nw0 || !nh0) return;
+    const rotT = rotate === 90 || rotate === 270;
+    const nw = rotT ? nh0 : nw0, nh = rotT ? nw0 : nh0;
+    const W = rect.width, H = rect.height;
+    const fit = Math.min(W / nw, H / nh);
+    const dw = nw * fit, dh = nh * fit;
+    let z;
+    if (nw > nh) {
+      z = H / dh;
+      if (z < 1.05) z = 1.5;
+    } else {
+      z = nh > H ? nh / dh : 1.2;
+      if (z < 1.05) z = 1.2;
+    }
+    z = Math.min(MAX_ZOOM, Math.max(1, z));
+    const cx = rect.left + W / 2, cy = rect.top + H / 2;
+    const maxX = Math.max(0, (dw * z - W) / 2), maxY = Math.max(0, (dh * z - H) / 2);
+    const clamp = (v, m) => Math.max(-m, Math.min(m, v));
+    setZoom(z);
+    setPan({ x: clamp((tx - cx) * (1 - z), maxX), y: clamp((ty - cy) * (1 - z), maxY) });
+    setOrigin("50% 50%");
+  };
   // Drive the seekbar with requestAnimationFrame: read the video's live
   // currentTime every frame so the thumb glides instead of stepping with the
   // ~4/s timeupdate events. Any seek (keyboard, wheel, ±10s, track click, or
@@ -2004,7 +2071,7 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
     if (!st || !rect) return null;
     const tv = trackViewRef.current;
     const rot = rotateRef.current;
-    if (Number.isFinite(z)) tv.zoom = Math.min(4, Math.max(1, z));
+    if (Number.isFinite(z)) tv.zoom = Math.min(MAX_ZOOM, Math.max(1, z));
     if (st.mode === "fg") {
       // The gesture moves the picture, and the spot moves with it, so the dot
       // moves by the same amount and stays on the spot.
@@ -2091,6 +2158,7 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
       return;
     }
     if (isAudio) return;
+    if (zoomLockedRef.current) { e.preventDefault(); return; }
     if (trackingRef.current) {
       const st = trackStateRef.current;
       if (!st) return;
@@ -2098,7 +2166,7 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
       const rect = containerRef.current?.getBoundingClientRect();
       if (!rect) return;
       const perLine = e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 100 : 1;
-      const z = Math.min(4, Math.max(1, trackViewRef.current.zoom * Math.exp(-e.deltaY * perLine * 0.0022)));
+      const z = Math.min(MAX_ZOOM, Math.max(1, trackViewRef.current.zoom * Math.exp(-e.deltaY * perLine * 0.0022)));
       if (z === trackViewRef.current.zoom) return;
       const rot = rotateRef.current;
       // Zooming is not a framing decision, so the remembered one is left alone --
@@ -2141,7 +2209,7 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
     const rect = containerRef.current?.getBoundingClientRect();
     if (!rect) return;
     const perLine = e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 100 : 1;
-    const newZoom = Math.min(4, Math.max(1, zoom * Math.exp(-e.deltaY * perLine * 0.0022)));
+    const newZoom = Math.min(MAX_ZOOM, Math.max(1, zoom * Math.exp(-e.deltaY * perLine * 0.0022)));
     if (newZoom === zoom) return;
     if (newZoom === 1) { setZoom(1); setPan({x:0,y:0}); setOrigin("50% 50%"); return; }
     const cx = rect.left + rect.width / 2;
@@ -2847,13 +2915,13 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
       wasPlayingRef.current = !videoRef.current.paused;
       if (wasPlayingRef.current) videoRef.current.pause();
     }
-    if (trackingRef.current) {
+    if (trackingRef.current && !zoomLockedRef.current) {
       const st = trackStateRef.current;
       dragRef.current = { dragging: true, trackDrag: true, startX: e.clientX, startY: e.clientY, lastX: e.clientX, lastY: e.clientY, downX: e.clientX, downY: e.clientY, origOffX: st ? st.offX || 0 : 0, origOffY: st ? st.offY || 0 : 0 };
       e.preventDefault();
       return;
     }
-    if (zoom === 1 || isAudio) {
+    if (zoom === 1 || isAudio || zoomLockedRef.current) {
       if (!showImage) e.preventDefault();
       return;
     }
@@ -2924,7 +2992,7 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
   const handleTouchStart = (e) => {
     const t = e.touches[0];
     if (!t) return;
-    touchRef.current = { startX: t.clientX, startY: t.clientY, startTime: videoRef.current?.currentTime || 0, isSeeking: false, isHorizontal: null, startPan: visiblePan(), lastDx: 0, pinchActive: false, trkDrag: false, wasMultiTouch: false };
+    touchRef.current = { startX: t.clientX, startY: t.clientY, startTime: videoRef.current?.currentTime || 0, isSeeking: false, isHorizontal: null, startPan: visiblePan(), lastDx: 0, pinchActive: false, trkDrag: false, wasMultiTouch: false, t0: Date.now() };
     if (e.touches.length > 1) {
       touchRef.current.wasMultiTouch = true;
       if (!showImage && wasPlayingRef.current && videoRef.current) {
@@ -2945,6 +3013,7 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
     const dy = t.clientY - touchRef.current.startY;
     if (e.touches.length >= 2) {
       e.preventDefault();
+      if (zoomLockedRef.current) return;
       const a = e.touches[0], b = e.touches[1];
       const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
       const midX = (a.clientX + b.clientX) / 2, midY = (a.clientY + b.clientY) / 2;
@@ -2972,7 +3041,7 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
       if (rect) {
         const cx = rect.left + rect.width / 2;
         const cy = rect.top + rect.height / 2;
-        const newZoom = Math.min(4, Math.max(1, pr.pinchPrevZoom * (dist / pr.pinchPrevDist)));
+        const newZoom = Math.min(MAX_ZOOM, Math.max(1, pr.pinchPrevZoom * (dist / pr.pinchPrevDist)));
         let nextPan = { x: 0, y: 0 };
         // What actually ends up on screen. Off tracking that is the pan itself;
         // on it, zoom 1 does not mean pan 0 - the tracked part still holds the
@@ -3006,8 +3075,9 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
       }
       return;
     }
-    if (zoom > 1) {
-      const want = { x: touchRef.current.startPan.x + dx, y: touchRef.current.startPan.y + dy };
+    if (zoom > 1 && !zoomLockedRef.current) {
+      const pr = touchRef.current;
+      const want = { x: pr.startPan.x + dx, y: pr.startPan.y + dy };
       // While tracking the pan state is not what is on screen, so a one-finger
       // drag has to move the tracking view too or the picture stays put.
       if (trackingRef.current && trackStateRef.current) {
@@ -3051,12 +3121,27 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
     const dx = t.clientX - pr.startX;
     const dy = t.clientY - pr.startY;
     const isRandom = endModeRef.current === "random";
-    const wasNav = zoom === 1 && !pr.wasMultiTouch && Math.abs(dy) > 25 && Math.abs(dy) > Math.abs(dx) && (isRandom ? total > 1 : ((dy < 0 && hasNext) || (dy > 0 && hasPrev)));
+    const wasNav = (zoom === 1 || zoomLockedRef.current) && !pr.wasMultiTouch && Math.abs(dy) > 25 && Math.abs(dy) > Math.abs(dx) && (isRandom ? total > 1 : ((dy < 0 && hasNext) || (dy > 0 && hasPrev)));
     if (wasNav) {
       wasPlayingRef.current = false;
+      lastTapRef.current.t = 0;
       if (dy < 0) dispatchNextRef.current();
       else if (dy > 0) dispatchPrevRef.current();
       return;
+    }
+    // Double tap on a photo: quick, still taps close together.
+    const isTap = !pr.wasMultiTouch && (!e.touches || e.touches.length === 0) && Math.hypot(dx, dy) < 12 && Date.now() - (pr.t0 || 0) < 300;
+    if (isTap && showImage && !tracking && !zoomLockedRef.current && imgRef.current) {
+      const now = Date.now(), lt = lastTapRef.current;
+      if (now - lt.t < 320 && Math.hypot(t.clientX - lt.x, t.clientY - lt.y) < 40) {
+        lastTapRef.current = { t: 0, x: 0, y: 0 };
+        if (e.cancelable) e.preventDefault();
+        doubleTapZoom(t.clientX, t.clientY);
+        return;
+      }
+      lastTapRef.current = { t: now, x: t.clientX, y: t.clientY };
+    } else if (!isTap) {
+      lastTapRef.current.t = 0;
     }
     if (pr.wasMultiTouch && e.touches && e.touches.length === 1) {
       const r = e.touches[0];
@@ -3452,6 +3537,23 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
                   );
                 })()}
               </div>
+              {!isAudio && (zoom > 1 || zoomLocked) && (
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  data-testid="viewer-zoom-lock"
+                  onClick={(e) => { e.stopPropagation(); toggleZoomLock(); }}
+                  onTouchStart={(e) => e.stopPropagation()}
+                  onTouchEnd={(e) => e.stopPropagation()}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  aria-pressed={zoomLocked}
+                  aria-label={zoomLocked ? "Unlock zoom" : "Lock zoom"}
+                  title={zoomLocked ? "Zoom locked: swipe goes next/prev at this zoom. Tap to unlock" : "Lock zoom: keep this zoom and swipe next/prev"}
+                  style={{ position: "relative", width: 36, height: 36, padding: 0, borderRadius: 999, border: "1px solid rgba(255,255,255,.18)", background: zoomLocked ? "rgba(99,102,241,.9)" : "rgba(0,0,0,.55)", color: "#fff", backdropFilter: "blur(6px)" }}
+                >
+                  <i className={`bi ${zoomLocked ? "bi-lock-fill" : "bi-unlock"}`} />
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -3499,7 +3601,7 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
             <>
               <img key={`cmp|${compareSrc}`} ref={cmpImgRef} data-testid="viewer-compare-source" src={compareSrc} alt={compareLabel || "compare source"} draggable={false} onContextMenu={(e) => e.preventDefault()}
                 onLoad={() => applyCompareSplit(cmpPosRef.current)}
-                style={{ position: "absolute", inset: 0, margin: "auto", zIndex: 1, width: mediaW, height: mediaH, objectFit: "contain", background: "#000", pointerEvents: "none", clipPath: "inset(0 50% 0 0)", opacity: mediaReady ? 1 : 0, transition: zoom === 1 ? "opacity .45s ease, transform 0.15s" : "opacity .45s ease", transform: `translate(${pan.x}px, ${pan.y}px) rotate(${rotate}deg) scale(${zoom})`, transformOrigin: origin, WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none" }} />
+                style={{ position: "absolute", inset: 0, margin: "auto", zIndex: 1, width: mediaW, height: mediaH, objectFit: "contain", background: "#000", pointerEvents: "none", clipPath: "inset(0 50% 0 0)", opacity: mediaReady ? 1 : 0, transition: (zoom === 1 || zoomGlide) ? "opacity .45s ease, transform 0.15s" : "opacity .45s ease", transform: `translate(${pan.x}px, ${pan.y}px) rotate(${rotate}deg) scale(${zoom})`, transformOrigin: origin, WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none" }} />
               <div ref={cmpLineRef} data-testid="viewer-compare-line"
                 onPointerDown={compareTouch ? (e) => { e.stopPropagation(); e.preventDefault(); try { e.currentTarget.setPointerCapture(e.pointerId); } catch {} compareSplitAt(e.clientX); } : undefined}
                 onPointerMove={compareTouch ? (e) => { if (e.buttons || e.pointerType === "touch") { e.stopPropagation(); compareSplitAt(e.clientX); } } : undefined}
@@ -3534,7 +3636,7 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
             </div>
           )}
           {loading ? null : showImage ? (
-            <img key={loadedUrl} ref={imgRef} src={loadedUrl} alt={titleEff} onContextMenu={(e) => e.preventDefault()} draggable={false} onLoad={() => setMediaReady(true)} onError={isGif ? () => setGifAsVideo(true) : () => setMediaReady(true)} style={{ width: mediaW, height: mediaH, objectFit: "contain", background: "#000", borderRadius: 0, opacity: mediaReady ? 1 : 0, transition: (!tracking && zoom===1) ? "opacity .45s ease, transform 0.15s" : "opacity .45s ease", transform: tracking ? trackViewRef.current.transform : `translate(${pan.x}px, ${pan.y}px) rotate(${rotate}deg) scale(${zoom})`, transformOrigin: origin, WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none" }} />
+            <img key={loadedUrl} ref={imgRef} src={loadedUrl} alt={titleEff} onContextMenu={(e) => e.preventDefault()} draggable={false} onLoad={() => setMediaReady(true)} onError={isGif ? () => setGifAsVideo(true) : () => setMediaReady(true)} style={{ width: mediaW, height: mediaH, objectFit: "contain", background: "#000", borderRadius: 0, opacity: mediaReady ? 1 : 0, transition: (!tracking && (zoom===1 || zoomGlide)) ? "opacity .45s ease, transform 0.15s" : "opacity .45s ease", transform: tracking ? trackViewRef.current.transform : `translate(${pan.x}px, ${pan.y}px) rotate(${rotate}deg) scale(${zoom})`, transformOrigin: origin, WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none" }} />
           ) : gifAsVideoEff ? (
             <video
               key={loadedUrl}
