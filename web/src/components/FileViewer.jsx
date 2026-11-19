@@ -1688,19 +1688,18 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
     if (showImageRef.current || next) saveFileZoom(filePathEff, tv.zoom, tv.pan.x / rect.width, tv.pan.y / rect.height, next);
     else saveFileZoom(filePathEff, 1, 0, 0, false);
   };
-  // Double tap on a photo or video (touch). Zoomed -> back to fit. At fit: landscape
-  // zooms until it fills the height; portrait goes to 100% (actual pixels)
-  // when the photo is bigger than the window, else a 20% zoom-in. The tapped
-  // point stays under the finger, and the pan is kept inside the picture.
+  // Double tap on a photo or video (touch) steps through zoom levels, then
+  // back to fit. Level 1: landscape fills the height; portrait goes to 100%
+  // (actual pixels) when bigger than the window, else a 20% zoom-in. Then 3
+  // more levels, each 1.6x the last (up to MAX_ZOOM). If the zoom was changed
+  // by pinch/wheel since the last double tap, a double tap goes back to fit.
+  // The tapped point stays under the finger, and the pan stays inside the picture.
+  const dtCycleRef = useRef({ fp: "", level: 0, z: 1 });
   const doubleTapZoom = (tx, ty) => {
     const rect = containerRef.current?.getBoundingClientRect();
     const img = showImageRef.current ? imgRef.current : null;
     const vid = !showImageRef.current ? videoRef.current : null;
     if (!rect || !rect.width || !rect.height) return;
-    if (zoomGlideTimerRef.current) clearTimeout(zoomGlideTimerRef.current);
-    setZoomGlide(true);
-    zoomGlideTimerRef.current = setTimeout(() => { setZoomGlide(false); zoomGlideTimerRef.current = null; }, 260);
-    if (zoom > 1.01) { setZoom(1); setPan({ x: 0, y: 0 }); setOrigin("50% 50%"); return; }
     const nw0 = img ? img.naturalWidth || 0 : vid ? vid.videoWidth || 0 : 0;
     const nh0 = img ? img.naturalHeight || 0 : vid ? vid.videoHeight || 0 : 0;
     if (!nw0 || !nh0) return;
@@ -1709,21 +1708,39 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
     const W = rect.width, H = rect.height;
     const fit = Math.min(W / nw, H / nh);
     const dw = nw * fit, dh = nh * fit;
-    let z;
+    let z1;
     if (nw > nh) {
-      z = H / dh;
-      if (z < 1.05) z = 1.5;
+      z1 = H / dh;
+      if (z1 < 1.05) z1 = 1.5;
     } else {
-      z = nh > H ? nh / dh : 1.2;
-      if (z < 1.05) z = 1.2;
+      z1 = nh > H ? nh / dh : 1.2;
+      if (z1 < 1.05) z1 = 1.2;
     }
-    z = Math.min(MAX_ZOOM, Math.max(1, z));
+    const levels = [1];
+    for (let k = 0, lz = z1; k < 4; k++, lz *= 1.6) {
+      const c = Math.min(MAX_ZOOM, Math.max(1, lz));
+      if (c > levels[levels.length - 1] + 0.01) levels.push(c);
+    }
+    const cyc = dtCycleRef.current;
+    let level;
+    if (cyc.fp === filePathEff && Math.abs(zoom - cyc.z) < 0.01 && zoom > 1.01) level = cyc.level + 1;
+    else level = zoom > 1.01 ? 0 : 1;
+    if (level >= levels.length) level = 0;
+    const z = levels[level];
+    dtCycleRef.current = { fp: filePathEff, level, z };
+    if (zoomGlideTimerRef.current) clearTimeout(zoomGlideTimerRef.current);
+    setZoomGlide(true);
+    zoomGlideTimerRef.current = setTimeout(() => { setZoomGlide(false); zoomGlideTimerRef.current = null; }, 260);
+    setOrigin("50% 50%");
+    if (level === 0) { setZoom(1); setPan({ x: 0, y: 0 }); return; }
     const cx = rect.left + W / 2, cy = rect.top + H / 2;
+    const from = zoom > 1.01 ? zoom : 1;
+    const p0 = zoom > 1.01 ? pan : { x: 0, y: 0 };
+    const ratio = z / from;
     const maxX = Math.max(0, (dw * z - W) / 2), maxY = Math.max(0, (dh * z - H) / 2);
     const clamp = (v, m) => Math.max(-m, Math.min(m, v));
     setZoom(z);
-    setPan({ x: clamp((tx - cx) * (1 - z), maxX), y: clamp((ty - cy) * (1 - z), maxY) });
-    setOrigin("50% 50%");
+    setPan({ x: clamp((tx - cx) - (tx - cx - p0.x) * ratio, maxX), y: clamp((ty - cy) - (ty - cy - p0.y) * ratio, maxY) });
   };
   // Drive the seekbar with requestAnimationFrame: read the video's live
   // currentTime every frame so the thumb glides instead of stepping with the
