@@ -2992,7 +2992,18 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
   const handleTouchStart = (e) => {
     const t = e.touches[0];
     if (!t) return;
-    touchRef.current = { startX: t.clientX, startY: t.clientY, startTime: videoRef.current?.currentTime || 0, isSeeking: false, isHorizontal: null, startPan: visiblePan(), lastDx: 0, pinchActive: false, trkDrag: false, wasMultiTouch: false, t0: Date.now() };
+    touchRef.current = { startX: t.clientX, startY: t.clientY, startTime: videoRef.current?.currentTime || 0, isSeeking: false, isHorizontal: null, startPan: visiblePan(), lastDx: 0, pinchActive: false, trkDrag: false, wasMultiTouch: false, t0: Date.now(), zone: "pan" };
+    // Zoomed (not locked), one finger: the right 20% of the stage swipes
+    // next/prev, and on a video the bottom 20% scrubs; the rest pans. Two
+    // fingers always pinch-zoom/pan.
+    if (zoom > 1 && !zoomLockedRef.current) {
+      const r = containerRef.current?.getBoundingClientRect();
+      if (r && r.width && r.height) {
+        const fx = (t.clientX - r.left) / r.width, fy = (t.clientY - r.top) / r.height;
+        if (!showImage && videoRef.current && fy >= 0.8) touchRef.current.zone = "seek";
+        else if (fx >= 0.8) touchRef.current.zone = "nav";
+      }
+    }
     if (e.touches.length > 1) {
       touchRef.current.wasMultiTouch = true;
       if (!showImage && wasPlayingRef.current && videoRef.current) {
@@ -3075,7 +3086,11 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
       }
       return;
     }
-    if (zoom > 1 && !zoomLockedRef.current) {
+    if (zoom > 1 && !zoomLockedRef.current && touchRef.current.zone === "nav") {
+      if (Math.abs(dx) > 10 || Math.abs(dy) > 10) e.preventDefault();
+      return;
+    }
+    if (zoom > 1 && !zoomLockedRef.current && touchRef.current.zone !== "seek") {
       const pr = touchRef.current;
       const want = { x: pr.startPan.x + dx, y: pr.startPan.y + dy };
       // While tracking the pan state is not what is on screen, so a one-finger
@@ -3121,7 +3136,7 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
     const dx = t.clientX - pr.startX;
     const dy = t.clientY - pr.startY;
     const isRandom = endModeRef.current === "random";
-    const wasNav = (zoom === 1 || zoomLockedRef.current) && !pr.wasMultiTouch && Math.abs(dy) > 25 && Math.abs(dy) > Math.abs(dx) && (isRandom ? total > 1 : ((dy < 0 && hasNext) || (dy > 0 && hasPrev)));
+    const wasNav = (zoom === 1 || zoomLockedRef.current || pr.zone === "nav") && !pr.wasMultiTouch && Math.abs(dy) > 25 && Math.abs(dy) > Math.abs(dx) && (isRandom ? total > 1 : ((dy < 0 && hasNext) || (dy > 0 && hasPrev)));
     if (wasNav) {
       wasPlayingRef.current = false;
       lastTapRef.current.t = 0;
@@ -3590,6 +3605,12 @@ export default function FileViewer({ src, title, name, filePath, url, file, view
               style={{ position: "absolute", left: "50%", top: "50%", width: 36, height: 36, marginLeft: -18, marginTop: -18, zIndex: 4, display: "grid", placeItems: "center", cursor: "grab", touchAction: "none" }}>
               <span style={{ width: 12, height: 12, borderRadius: "50%", background: trackLost ? "#ff5a5a" : "#fff", border: "2px solid rgba(0,0,0,.75)", boxShadow: "0 0 0 1.5px rgba(255,255,255,.7)", pointerEvents: "none" }} />
             </div>
+          )}
+          {compareTouch && zoom > 1 && !zoomLocked && !tracking && (
+            <>
+              <div aria-hidden="true" data-testid="viewer-nav-zone" style={{ position: "absolute", top: 0, right: 0, bottom: (!showImage && !isAudio) ? "20%" : 0, width: "20%", zIndex: 2, pointerEvents: "none", background: "linear-gradient(to left, rgba(255,255,255,.07), rgba(255,255,255,0))", borderLeft: "1px dashed rgba(255,255,255,.12)" }} />
+              {!showImage && !isAudio && <div aria-hidden="true" data-testid="viewer-seek-zone" style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: "20%", zIndex: 2, pointerEvents: "none", background: "linear-gradient(to top, rgba(255,255,255,.07), rgba(255,255,255,0))", borderTop: "1px dashed rgba(255,255,255,.12)" }} />}
+            </>
           )}
           {zoom>1 && <span style={{ position: "absolute", top: 10, right: 10, zIndex: 3, background: "rgba(0,0,0,.6)", color: "#fff", padding: "4px 8px", borderRadius: 6, fontSize: 11, fontFamily: "var(--mono)" }}>{Math.round(zoom*100)}%</span>}
           {(loading || (!mediaReady && isFormatKnown)) && (
